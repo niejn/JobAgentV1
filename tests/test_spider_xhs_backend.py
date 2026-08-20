@@ -97,6 +97,32 @@ class FakeApi:
             },
         )
 
+    def get_user_note_info(
+        self,
+        user_id: str,
+        cursor: str,
+        xsec_token: str = "",
+        xsec_source: str = "",
+    ) -> tuple[bool, str, dict[str, Any]]:
+        assert user_id == "user-1"
+        assert cursor == ""
+        assert xsec_token == ""
+        assert xsec_source == "pc_user"
+        return (
+            True,
+            "success",
+            {
+                "data": {
+                    "notes": [
+                        {"note_id": "note-2", "xsec_token": "user-token"},
+                        {"note_id": "note-3", "xsec_token": "user-token-2"},
+                    ],
+                    "cursor": "next",
+                    "has_more": False,
+                }
+            },
+        )
+
 
 class FakeHttpClient:
     def __init__(self) -> None:
@@ -212,6 +238,21 @@ async def test_search_notes_reuses_spider_search(
     assert notes[0].note_id == "note-1"
     assert "xsec_token=token%3D1" in notes[0].url
     assert notes[0].raw["note_card"]["display_title"] == "一面复盘"
+
+
+@pytest.mark.asyncio
+async def test_list_user_notes_reuses_spider_user_api(
+    settings: Settings,
+    bindings: SpiderXhsBindings,
+) -> None:
+    backend = SpiderXhsBackend(settings, bindings=bindings)
+    await backend.start()
+
+    notes = await backend.list_user_notes("user-1", limit=1)
+
+    assert [note.note_id for note in notes] == ["note-2"]
+    assert "xsec_token=user-token" in notes[0].url
+    assert "xsec_source=pc_user" in notes[0].url
 
 
 @pytest.mark.asyncio

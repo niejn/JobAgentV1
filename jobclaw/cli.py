@@ -23,6 +23,7 @@ from jobclaw.profile.loader import load_profile
 from jobclaw.scraper.boss import BossScraper
 from jobclaw.scraper.linkedin import LinkedInScraper
 from jobclaw.scraper.xhs_backend import SpiderXhsBackend
+from jobclaw.scraper.xhs_discovery import XhsDiscoveryRequest, discover_xhs_notes
 
 
 @click.group(help="JobClaw: AI-powered job hunting agent.")
@@ -130,6 +131,121 @@ async def _xhs_download(url: str, output_dir: Path | None) -> None:
     click.echo(f"Body: {result.body_path}")
     click.echo(f"Images: {len(result.images)}")
     click.echo(f"Directory: {result.directory}")
+
+
+@main.command("xhs-search")
+@click.option("--company", default=None, help="Target company, e.g. 字节跳动.")
+@click.option("--role", default=None, help="Target role, e.g. 后端开发.")
+@click.option("--city", default=None, help="Target city, e.g. 北京.")
+@click.option("--keyword", default=None, help="Additional search terms.")
+@click.option(
+    "--user-id",
+    default=None,
+    help="List posts from one XHS user instead of keyword search.",
+)
+@click.option(
+    "--days",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Only keep posts from the latest N days; defaults to settings.",
+)
+@click.option("--limit", type=click.IntRange(min=1, max=100), default=10, show_default=True)
+@click.option(
+    "--download",
+    "download_limit",
+    type=click.IntRange(min=0),
+    default=5,
+    show_default=True,
+    help="Download this many accepted posts; use 0 for discovery only.",
+)
+@click.option(
+    "--output",
+    "output_dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=None,
+    help="Download root; defaults to XHS_DOWNLOAD_DIR.",
+)
+def xhs_search_command(
+    company: str | None,
+    role: str | None,
+    city: str | None,
+    keyword: str | None,
+    user_id: str | None,
+    days: int | None,
+    limit: int,
+    download_limit: int,
+    output_dir: Path | None,
+) -> None:
+    """Find recent XHS interview posts and filter obvious material sellers."""
+
+    try:
+        asyncio.run(
+            _xhs_search(
+                company=company,
+                role=role,
+                city=city,
+                keyword=keyword,
+                user_id=user_id,
+                days=days,
+                limit=limit,
+                download_limit=download_limit,
+                output_dir=output_dir,
+            )
+        )
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+
+
+async def _xhs_search(
+    *,
+    company: str | None,
+    role: str | None,
+    city: str | None,
+    keyword: str | None,
+    user_id: str | None,
+    days: int | None,
+    limit: int,
+    download_limit: int,
+    output_dir: Path | None,
+) -> None:
+    """Internal XHS interview-post discovery workflow."""
+
+    settings = get_settings()
+    request = XhsDiscoveryRequest(
+        company=company,
+        role=role,
+        city=city,
+        keyword=keyword,
+        user_id=user_id,
+        days=days or settings.xhs_referral_stale_days,
+        limit=limit,
+        download_limit=download_limit,
+        output_dir=output_dir,
+    )
+    async with SpiderXhsBackend(settings) as backend:
+        result = await discover_xhs_notes(backend, request)
+
+    source = f"user:{user_id}" if user_id else result.query
+    click.echo(f"XHS source: {source}")
+    click.echo(
+        f"Evaluated={len(result.candidates)} Accepted={len(result.accepted)} "
+        f"Rejected={len(result.rejected)} Downloaded={len(result.downloads)}"
+    )
+    for candidate in result.candidates:
+        decision = "ACCEPT" if candidate.accepted else "REJECT"
+        reasons: list[str] = []
+        if not candidate.is_fresh:
+            reasons.append("old-or-unknown-date")
+        if candidate.seller_risk:
+            reasons.append("seller:" + ",".join(candidate.risk_flags))
+        suffix = f" ({'; '.join(reasons)})" if reasons else ""
+        click.echo(
+            f"[{decision}] {candidate.note.published_at or 'unknown-date'} "
+            f"{candidate.note.author_name} | {candidate.note.title}{suffix}"
+        )
+        click.echo(f"  {candidate.note.url}")
+    for downloaded in result.downloads:
+        click.echo(f"Downloaded: {downloaded.directory}")
 
 
 async def _login(platforms: list[str], timeout: int, check_only: bool) -> None:
