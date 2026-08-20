@@ -39,6 +39,9 @@ htmlcov/
 playwright-report/
 test-results/
 
+# Downloaded source artifacts
+data/xhs/
+
 # OS files
 .DS_Store
 Thumbs.db

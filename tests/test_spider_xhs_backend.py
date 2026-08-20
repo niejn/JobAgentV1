@@ -1,0 +1,248 @@
+"""Tests for the in-process Spider_XHS backend adapter."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from jobclaw.config import Settings
+from jobclaw.scraper.xhs_backend import (
+    SpiderXhsBackend,
+    SpiderXhsBindings,
+    XhsAuthenticationError,
+    load_spider_xhs_bindings,
+)
+
+
+class FakeAuth:
+    cookie: str = ""
+
+    @classmethod
+    def from_cookie(cls, cookie: str) -> FakeAuth:
+        cls.cookie = cookie
+        return cls()
+
+
+class FakeApi:
+    bootstrapped = False
+
+    def __init__(self, auth: FakeAuth) -> None:
+        self.auth = auth
+        self.http = FakeHttpClient()
+
+    def bootstrap(self) -> FakeApi:
+        self.bootstrapped = True
+        return self
+
+    def search_some_note(
+        self,
+        query: str,
+        require_num: int,
+        sort_type_choice: int = 0,
+        note_type: int = 0,
+    ) -> tuple[bool, str, list[dict[str, Any]]]:
+        assert query == "字节 后端 面经"
+        assert require_num == 2
+        assert sort_type_choice == 0
+        assert note_type == 2
+        return (
+            True,
+            "success",
+            [
+                {
+                    "model_type": "note",
+                    "id": "note-1",
+                    "xsec_token": "token=1",
+                    "note_card": {"display_title": "一面复盘"},
+                },
+                {"model_type": "hot_query", "id": "ignored"},
+            ],
+        )
+
+    def get_note_info(self, url: str) -> tuple[bool, str, dict[str, Any]]:
+        return (
+            True,
+            "success",
+            {
+                "success": True,
+                "data": {
+                    "items": [
+                        {
+                            "id": "note-1",
+                            "note_card": {
+                                "type": "normal",
+                                "title": "字节后端一面",
+                                "desc": "面试正文",
+                                "user": {
+                                    "user_id": "user-1",
+                                    "nickname": "测试作者",
+                                    "avatar": "ignored",
+                                },
+                                "interact_info": {
+                                    "liked_count": "12",
+                                    "collected_count": "3",
+                                    "comment_count": "4",
+                                    "share_count": "1",
+                                },
+                                "image_list": [],
+                                "tag_list": [{"name": "面经"}],
+                                "time": 1_700_000_000_000,
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+
+
+class FakeHttpClient:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def fake_handle_note_info(item: dict[str, Any]) -> dict[str, Any]:
+    card = item["note_card"]
+    return {
+        "note_id": item["id"],
+        "note_url": item["url"],
+        "note_type": "图集",
+        "user_id": card["user"]["user_id"],
+        "nickname": card["user"]["nickname"],
+        "title": card["title"],
+        "desc": card["desc"],
+        "image_list": ["https://example.com/0.webp", "https://example.com/1.webp"],
+        "tags": ["面经"],
+        "upload_time": "2025-01-02 03:04:05",
+        "liked_count": "12",
+        "comment_count": "4",
+        "ip_location": "北京",
+    }
+
+
+def fake_download_note(note: dict[str, Any], path: str, save_choice: str) -> str:
+    assert save_choice == "media-image"
+    note_dir = Path(path) / note["note_id"]
+    note_dir.mkdir(parents=True)
+    (note_dir / "detail.txt").write_text(note["desc"], encoding="utf-8")
+    (note_dir / "info.json").write_text(json.dumps(note), encoding="utf-8")
+    (note_dir / "image_0.jpg").write_bytes(b"image-0")
+    (note_dir / "image_1.jpg").write_bytes(b"image-1")
+    return str(note_dir)
+
+
+@pytest.fixture()
+def bindings() -> SpiderXhsBindings:
+    return SpiderXhsBindings(
+        auth_class=FakeAuth,
+        api_class=FakeApi,
+        handle_note_info=fake_handle_note_info,
+        download_note=fake_download_note,
+    )
+
+
+@pytest.fixture()
+def settings(tmp_path: Path) -> Settings:
+    return Settings(
+        xhs_cookie_header="a1=a-value; web_session=session-value",
+        spider_xhs_path=tmp_path,
+        xhs_download_dir=tmp_path / "downloads",
+    )
+
+
+@pytest.mark.asyncio
+async def test_start_bootstraps_spider_with_full_cookie(
+    settings: Settings,
+    bindings: SpiderXhsBindings,
+) -> None:
+    backend = SpiderXhsBackend(settings, bindings=bindings)
+
+    await backend.start()
+
+    assert FakeAuth.cookie == "a1=a-value; web_session=session-value"
+    assert backend.started is True
+
+
+@pytest.mark.asyncio
+async def test_close_reuses_spider_http_client_close(
+    settings: Settings,
+    bindings: SpiderXhsBindings,
+) -> None:
+    backend = SpiderXhsBackend(settings, bindings=bindings)
+    await backend.start()
+    http_client = backend._api.http
+
+    await backend.close()
+
+    assert http_client.closed is True
+    assert backend.started is False
+
+
+@pytest.mark.asyncio
+async def test_start_rejects_cookie_without_required_fields(
+    tmp_path: Path,
+    bindings: SpiderXhsBindings,
+) -> None:
+    settings = Settings(
+        xhs_cookie_header="web_session=session-only",
+        spider_xhs_path=tmp_path,
+    )
+    backend = SpiderXhsBackend(settings, bindings=bindings)
+
+    with pytest.raises(XhsAuthenticationError, match="a1"):
+        await backend.start()
+
+
+@pytest.mark.asyncio
+async def test_search_notes_reuses_spider_search(
+    settings: Settings,
+    bindings: SpiderXhsBindings,
+) -> None:
+    backend = SpiderXhsBackend(settings, bindings=bindings)
+    await backend.start()
+
+    notes = await backend.search_notes("字节 后端 面经", limit=2)
+
+    assert len(notes) == 1
+    assert notes[0].note_id == "note-1"
+    assert "xsec_token=token%3D1" in notes[0].url
+    assert notes[0].raw["note_card"]["display_title"] == "一面复盘"
+
+
+@pytest.mark.asyncio
+async def test_download_note_reuses_spider_normalizer_and_downloader(
+    settings: Settings,
+    bindings: SpiderXhsBindings,
+) -> None:
+    backend = SpiderXhsBackend(settings, bindings=bindings)
+    await backend.start()
+
+    result = await backend.download_note(
+        "https://www.xiaohongshu.com/explore/note-1?xsec_token=token"
+    )
+
+    assert result.note.note_id == "note-1"
+    assert result.note.body == "面试正文"
+    assert result.note.author_id == "user-1"
+    assert result.directory.name == "note-1"
+    assert [path.name for path in result.images] == ["image_0.jpg", "image_1.jpg"]
+    assert result.body_path.read_text(encoding="utf-8") == "面试正文"
+    assert json.loads(result.raw_response_path.read_text(encoding="utf-8"))["success"] is True
+
+
+def test_real_spider_library_bindings_can_be_loaded() -> None:
+    spider_path = Path(r"D:\mashibing\xiaohongshu_crawler\Spider_XHS")
+    if not spider_path.exists():
+        pytest.skip("Local Spider_XHS checkout is not available")
+
+    real_bindings = load_spider_xhs_bindings(spider_path)
+
+    assert real_bindings.auth_class.__name__ == "XHSPcAuth"
+    assert real_bindings.api_class.__name__ == "XHS_Apis"
+    assert real_bindings.handle_note_info.__name__ == "handle_note_info"
+    assert real_bindings.download_note.__name__ == "download_note"

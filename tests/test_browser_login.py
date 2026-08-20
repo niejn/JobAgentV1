@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -67,6 +68,8 @@ class TestSaveLoadCookies:
         assert (tmp_cookie_dir / "boss.json").exists()
 
     def test_save_file_permissions(self, tmp_cookie_dir):
+        if sys.platform == "win32":
+            pytest.skip("POSIX file modes are not enforced on Windows/NTFS")
         _save_cookies("boss", [{"name": "a", "value": "b"}])
         f = tmp_cookie_dir / "boss.json"
         mode = f.stat().st_mode & 0o777
