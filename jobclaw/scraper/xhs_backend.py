@@ -61,6 +61,14 @@ class XhsBackend(Protocol):
     ) -> list[XhsNoteReference]:
         """Search XHS image notes."""
 
+    async def list_user_notes(
+        self,
+        user_id: str,
+        *,
+        limit: int | None = None,
+    ) -> list[XhsNoteReference]:
+        """List notes published by one XHS user."""
+
     async def fetch_note(self, url: str) -> XhsFetchedNote:
         """Fetch one note without downloading media."""
 
@@ -261,6 +269,23 @@ class SpiderXhsBackend:
         async with self._request_lock:
             return await asyncio.to_thread(self._search_notes_sync, query, requested, sort)
 
+    async def list_user_notes(
+        self,
+        user_id: str,
+        *,
+        limit: int | None = None,
+    ) -> list[XhsNoteReference]:
+        """List a user's notes through Spider_XHS's paginated user API."""
+
+        self._ensure_started()
+        requested = limit or self._settings.xhs_referral_max_posts
+        async with self._request_lock:
+            return await asyncio.to_thread(
+                self._list_user_notes_sync,
+                user_id.strip(),
+                requested,
+            )
+
     async def fetch_note(self, url: str) -> XhsFetchedNote:
         """Fetch and normalize one note using Spider_XHS functions."""
 
@@ -330,6 +355,60 @@ class SpiderXhsBackend:
                     raw=dict(raw_item),
                 )
             )
+        return references
+
+    def _list_user_notes_sync(
+        self,
+        user_id: str,
+        limit: int,
+    ) -> list[XhsNoteReference]:
+        if not user_id:
+            raise ValueError("XHS user_id cannot be empty")
+
+        references: list[XhsNoteReference] = []
+        cursor = ""
+        while len(references) < limit:
+            success, message, response = self._api.get_user_note_info(
+                user_id,
+                cursor,
+                "",
+                "pc_user",
+            )
+            if not success:
+                raise SpiderXhsError(f"Spider_XHS user note listing failed: {message}")
+            try:
+                data = response["data"]
+                items = data.get("notes", [])
+            except (KeyError, TypeError) as exc:
+                raise SpiderXhsError(
+                    "Spider_XHS user note response has no note list"
+                ) from exc
+
+            for raw_item in items:
+                note_id = str(raw_item.get("note_id") or raw_item.get("id") or "").strip()
+                if not note_id:
+                    continue
+                params = urlencode(
+                    {
+                        "xsec_token": raw_item.get("xsec_token") or "",
+                        "xsec_source": "pc_user",
+                    }
+                )
+                references.append(
+                    XhsNoteReference(
+                        note_id=note_id,
+                        url=f"{_XHS_BASE}/explore/{note_id}?{params}",
+                        raw=dict(raw_item),
+                    )
+                )
+                if len(references) >= limit:
+                    break
+
+            next_cursor = str(data.get("cursor") or "")
+            if not data.get("has_more") or not items or next_cursor == cursor:
+                break
+            cursor = next_cursor
+
         return references
 
     def _fetch_note_sync(self, url: str) -> XhsFetchedNote:
