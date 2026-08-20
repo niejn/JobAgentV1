@@ -38,6 +38,19 @@ PLATFORM_CONFIG: dict[str, dict] = {
         "check_url": "https://www.linkedin.com/feed/",
         "check_redirect_pattern": "/login",
     },
+    "xhs": {
+        # Xiaohongshu: login modal on homepage; after login the sidebar
+        # shows the user avatar. URL does not change -> rely on selectors.
+        "login_url": "https://www.xiaohongshu.com",
+        "success_indicator": "__never_matches__",  # force selector-based detection
+        "success_selectors": [".side-bar-user", ".user .avatar", ".avatar-wrapper"],
+        "domain": ".xiaohongshu.com",
+        "key_cookies": ["web_session", "a1"],
+        "check_url": "https://www.xiaohongshu.com/explore",
+        "check_redirect_pattern": "__never_matches__",  # use selectors below
+        "check_logged_in_selector": ".side-bar-user, .user .avatar",
+        "check_logged_out_selector": ".login-container, .login-modal",
+    },
 }
 
 
@@ -203,6 +216,9 @@ async def cookies_valid(platform: str) -> bool:
     """Check if saved cookies are still valid by visiting a protected page headlessly.
 
     Returns True if the page loads without redirecting to login.
+    For platforms with ``check_logged_in_selector`` configured (e.g. XHS,
+    which shows a login modal without changing URL), element presence is
+    checked instead of / in addition to the redirect pattern.
     """
     if platform not in PLATFORM_CONFIG:
         return False
@@ -214,9 +230,11 @@ async def cookies_valid(platform: str) -> bool:
     config = PLATFORM_CONFIG[platform]
     check_url = config.get("check_url")
     redirect_pattern = config.get("check_redirect_pattern")
+    logged_in_selector = config.get("check_logged_in_selector")
+    logged_out_selector = config.get("check_logged_out_selector")
 
-    if not check_url or not redirect_pattern:
-        # Can't validate without check config — assume valid if cookies exist
+    if not check_url:
+        # Can't validate without check config - assume valid if cookies exist
         return True
 
     try:
@@ -227,12 +245,34 @@ async def cookies_valid(platform: str) -> bool:
             page = await context.new_page()
 
             await page.goto(check_url, wait_until="domcontentloaded", timeout=15_000)
+            await page.wait_for_timeout(2000)  # let SPA render
             current_url = page.url
 
-            await browser.close()
+            # Selector-based check (SPA login modals that don't redirect)
+            if logged_in_selector or logged_out_selector:
+                logged_in = False
+                logged_out = False
+                if logged_in_selector:
+                    el = await page.query_selector(logged_in_selector)
+                    logged_in = bool(el)
+                if logged_out_selector:
+                    el = await page.query_selector(logged_out_selector)
+                    logged_out = bool(el and await el.is_visible())
+
+                await browser.close()
+
+                if logged_out:
+                    logger.info("Cookies for %s are expired (login UI visible)", platform)
+                    return False
+                if logged_in:
+                    logger.info("Cookies for %s are valid", platform)
+                    return True
+                # Neither signal found - fall through to redirect check
+            else:
+                await browser.close()
 
             # If redirected to login page, cookies are invalid
-            if redirect_pattern in current_url:
+            if redirect_pattern and redirect_pattern in current_url:
                 logger.info("Cookies for %s are expired (redirected to login)", platform)
                 return False
 

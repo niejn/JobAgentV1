@@ -8,21 +8,21 @@ from pathlib import Path
 import click
 
 from jobclaw.applier.boss import BossApplier
+from jobclaw.applier.linkedin import LinkedInApplier
 from jobclaw.auth.browser_login import (
     PLATFORM_CONFIG,
     cookies_valid,
     get_cookie_age_hours,
     interactive_login,
 )
-from jobclaw.applier.linkedin import LinkedInApplier
 from jobclaw.config import get_settings
-from jobclaw.matcher.llm_matcher import LLMMatcher
 from jobclaw.models import JobSource
 from jobclaw.notifier.discord import DiscordNotifier
 from jobclaw.notifier.telegram import TelegramNotifier
 from jobclaw.profile.loader import load_profile
 from jobclaw.scraper.boss import BossScraper
 from jobclaw.scraper.linkedin import LinkedInScraper
+from jobclaw.scraper.xhs_backend import SpiderXhsBackend
 
 
 @click.group(help="JobClaw: AI-powered job hunting agent.")
@@ -90,7 +90,7 @@ def run_command(
 @main.command("login")
 @click.option(
     "--platform",
-    type=click.Choice(["boss", "linkedin", "all"]),
+    type=click.Choice(["boss", "linkedin", "xhs", "all"]),
     default="boss",
     show_default=True,
     help="Platform to log in to.",
@@ -101,6 +101,35 @@ def login_command(platform: str, timeout: int, check: bool) -> None:
     """Interactive browser login to save cookies."""
     platforms = list(PLATFORM_CONFIG.keys()) if platform == "all" else [platform]
     asyncio.run(_login(platforms=platforms, timeout=timeout, check_only=check))
+
+
+@main.command("xhs-download")
+@click.argument("url")
+@click.option(
+    "--output",
+    "output_dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=None,
+    help="Download root; defaults to XHS_DOWNLOAD_DIR.",
+)
+def xhs_download_command(url: str, output_dir: Path | None) -> None:
+    """Download one XHS note body and all images through Spider_XHS."""
+
+    asyncio.run(_xhs_download(url=url, output_dir=output_dir))
+
+
+async def _xhs_download(url: str, output_dir: Path | None) -> None:
+    """Internal XHS detail and image download workflow."""
+
+    settings = get_settings()
+    async with SpiderXhsBackend(settings) as backend:
+        result = await backend.download_note(url, output_dir=output_dir)
+
+    click.echo(f"Downloaded XHS note: {result.note.note_id}")
+    click.echo(f"Title: {result.note.title}")
+    click.echo(f"Body: {result.body_path}")
+    click.echo(f"Images: {len(result.images)}")
+    click.echo(f"Directory: {result.directory}")
 
 
 async def _login(platforms: list[str], timeout: int, check_only: bool) -> None:
@@ -174,6 +203,10 @@ async def _run_pipeline(
 ) -> None:
     """Internal async end-to-end workflow."""
 
+    # Keep optional/provider-specific LLM imports out of unrelated commands
+    # such as login and xhs-download.
+    from jobclaw.matcher.llm_matcher import LLMMatcher
+
     settings = get_settings()
     profile = load_profile(profile_path)
     matcher = LLMMatcher(model_name=settings.jobclaw_llm_model)
@@ -243,7 +276,9 @@ async def _notify_summary(
         f"Jobs={total_jobs}, TopMatches={total_matches}, Applications={total_applications}."
     )
 
-    if getattr(settings, "telegram_bot_token", None) and getattr(settings, "telegram_chat_id", None):
+    if getattr(settings, "telegram_bot_token", None) and getattr(
+        settings, "telegram_chat_id", None
+    ):
         telegram = TelegramNotifier(
             bot_token=settings.telegram_bot_token,
             chat_id=settings.telegram_chat_id,
