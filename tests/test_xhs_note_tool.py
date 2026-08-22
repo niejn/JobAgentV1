@@ -8,14 +8,16 @@ from pydantic import ValidationError
 
 from jobagent.agent import build_job_agent
 from jobagent.config import Settings
-from jobagent.scraper.xhs_backend import XhsAuthenticationError
+from jobagent.interview.ocr import ImageContentExtraction
+from jobagent.interview.snapshot import SnapshotMaterializer
+from jobagent.scraper.xhs_backend import DownloadedXhsNote, XhsAuthenticationError, XhsFetchedNote
 from jobagent.tools.shared_url import (
     SharedUrlSaver,
     SharedUrlSaveRequest,
     WebPageSaver,
     build_shared_url_save_tool,
 )
-from jobagent.tools.xhs_note import XhsNoteSaver, XhsNoteSaveRequest
+from jobagent.tools.xhs_note import XhsContentReader, XhsNoteSaver, XhsNoteSaveRequest
 
 
 def test_default_agent_registers_shared_url_saver(tmp_path) -> None:
@@ -27,6 +29,7 @@ def test_default_agent_registers_shared_url_saver(tmp_path) -> None:
     agent = build_job_agent(settings, model=FakeListChatModel(responses=["ok"]))
 
     assert "save_shared_url" in {tool.name for tool in agent._tools}
+    assert "extract_shared_url" in {tool.name for tool in agent._tools}
 
 
 class FakeXhsSaver:
@@ -84,6 +87,19 @@ class FakeResponse:
 
     def iter_content(self, chunk_size: int) -> list[bytes]:
         return [self.content]
+
+
+class FakeExtractor:
+    def extract(self, image_path):
+        return ImageContentExtraction(
+            source_image=image_path.resolve(),
+            source_hash="sha256:fake",
+            text=f"OCR {image_path.stem}",
+            confidence=0.9,
+            engine="fake",
+            engine_version="1",
+            language="chi_sim",
+        )
 
 
 @pytest.mark.asyncio
@@ -348,3 +364,46 @@ async def test_xhs_saver_reports_missing_login_without_downloading(tmp_path) -> 
 
     assert result["status"] == "blocked"
     assert result["error_type"] == "login_required"
+
+
+@pytest.mark.asyncio
+async def test_xhs_content_reader_materializes_and_reloads_body_and_image_ocr(tmp_path) -> None:
+    directory = tmp_path / "xhs" / "saved-note"
+    directory.mkdir(parents=True)
+    body_path = directory / "detail.txt"
+    body_path.write_text("正文：LangGraph 生产经验", encoding="utf-8")
+    image_path = directory / "image_0.jpg"
+    image_path.write_bytes(b"fake-image")
+    raw_path = directory / "raw_response.json"
+    raw_path.write_text("{}", encoding="utf-8")
+    (directory / "info.json").write_text(
+        '{"note_id":"note-ocr-1","title":"LangGraph 经验","desc":"正文：LangGraph 生产经验",'
+        '"image_list":["https://img.example/0"]}',
+        encoding="utf-8",
+    )
+    note = XhsFetchedNote(
+        note_id="note-ocr-1",
+        url="https://www.xiaohongshu.com/discovery/item/note-ocr-1",
+        title="LangGraph 经验",
+        body="正文：LangGraph 生产经验",
+        author_id="author",
+        author_name="作者",
+        image_urls=("https://img.example/0",),
+        tags=("LangGraph",),
+        published_at=None,
+        normalized={},
+        raw_response={},
+    )
+    downloaded = DownloadedXhsNote(note, directory, body_path, (image_path,), raw_path)
+    reader = XhsContentReader(
+        Settings(_env_file=None, xhs_download_dir=tmp_path / "xhs"),
+        materializer_factory=lambda settings: SnapshotMaterializer(FakeExtractor()),
+    )
+
+    first = await reader.materialize(downloaded)
+    second = await reader.extract_saved(note.url)
+
+    assert first["status"] == "completed"
+    assert first["body_text"] == "正文：LangGraph 生产经验"
+    assert "OCR image_0" in first["image_ocr_text"]
+    assert second["extracted_text"] == first["extracted_text"]

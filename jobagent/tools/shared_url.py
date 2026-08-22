@@ -243,6 +243,16 @@ class SharedUrlSaver:
         platform = "boss" if host == "zhipin.com" or host.endswith(".zhipin.com") else "web"
         return await self._page_saver.save(request.url, platform=platform)
 
+    async def extract(self, request: SharedUrlSaveRequest) -> dict[str, Any]:
+        host = (urlsplit(request.url).hostname or "").lower()
+        if host in {"xiaohongshu.com", "www.xiaohongshu.com"}:
+            return await self._xhs_saver.extract_saved(XhsNoteSaveRequest(url=request.url))
+        return {
+            "status": "unsupported",
+            "platform": "boss" if host.endswith(".zhipin.com") else "web",
+            "message": "当前只支持对已保存的小红书图文快照执行图片 OCR。",
+        }
+
 
 def build_shared_url_save_tool(saver: SharedUrlSaver) -> BaseTool:
     """Expose one stable URL-saving interface to the conversational Agent."""
@@ -260,6 +270,26 @@ def build_shared_url_save_tool(saver: SharedUrlSaver) -> BaseTool:
             "Boss URLs use their platform-aware logged-in readers. Other sites are attempted "
             "read-only and report login walls or access controls without bypassing them. Call "
             "this directly when the user supplies a URL; do not ask for company or role first."
+        ),
+        args_schema=SharedUrlSaveRequest,
+    )
+
+
+def build_shared_url_extract_tool(saver: SharedUrlSaver) -> BaseTool:
+    """Expose saved-source text and OCR extraction without file-path guessing."""
+
+    async def extract_shared_url(url: str) -> dict[str, Any]:
+        """Extract body and image OCR from a previously saved source URL."""
+
+        return await saver.extract(SharedUrlSaveRequest(url=url))
+
+    return StructuredTool.from_function(
+        coroutine=extract_shared_url,
+        name="extract_shared_url",
+        description=(
+            "Read the body and OCR text from a previously saved Xiaohongshu note. "
+            "Use this when the user asks to summarize, extract, or analyze the contents "
+            "of a URL already downloaded; do not use read_user_document or guess file paths."
         ),
         args_schema=SharedUrlSaveRequest,
     )
