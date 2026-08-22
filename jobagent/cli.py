@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import traceback
 from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
@@ -187,6 +188,8 @@ async def _chat(startup_config: Path | None, thread_id: str | None) -> None:
                 await _render_streaming_reply(agent, message, active_thread_id)
             except Exception:
                 logger.exception("JobAgent turn failed")
+                if settings.jobagent_debug_trace:
+                    click.echo(click.style(traceback.format_exc(), fg="yellow"))
                 click.echo(
                     click.style(
                         "JobAgent> 本轮处理失败，但会话仍然可用；可以继续输入或稍后重试。",

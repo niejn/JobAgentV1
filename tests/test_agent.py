@@ -18,7 +18,12 @@ from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool, tool
 from pydantic import ValidationError
 
-from jobagent.agent import SYSTEM_PROMPT, _deterministic_tool_answer, build_job_agent
+from jobagent.agent import (
+    SYSTEM_PROMPT,
+    _deterministic_tool_answer,
+    _safe_debug_args,
+    build_job_agent,
+)
 from jobagent.config import Settings
 from jobagent.profile import SQLiteCandidateProfileStore
 
@@ -315,6 +320,26 @@ async def test_agent_streams_visible_tokens_without_hidden_reasoning(tmp_path) -
 
 
 @pytest.mark.asyncio
+async def test_debug_trace_emits_sanitized_phase_diagnostics(tmp_path) -> None:
+    settings = Settings(
+        _env_file=None,
+        jobagent_debug_trace=True,
+        jobagent_checkpoint_db=tmp_path / "checkpoints.db",
+    )
+    agent = build_job_agent(settings, model=VisibleStreamingFakeModel(), tools=[])
+
+    try:
+        events = [event async for event in agent.stream_reply("你好", thread_id="debug-1")]
+    finally:
+        await agent.close()
+
+    debug_statuses = [event.text for event in events if event.kind == "status"]
+    assert "[debug] Agent 请求开始" in debug_statuses
+    assert any("[debug] 模型请求开始" in text for text in debug_statuses)
+    assert any("[debug] LangGraph 首事件" in text for text in debug_statuses)
+
+
+@pytest.mark.asyncio
 async def test_agent_streams_safe_tool_lifecycle_without_arguments(tmp_path) -> None:
     settings = Settings(
         _env_file=None,
@@ -600,6 +625,15 @@ def test_write_file_result_has_deterministic_path_fallback() -> None:
 
     assert _deterministic_tool_answer(message) == "文件已写入：/shared_urls/post.markdown"
     assert "完整查询字符串" in SYSTEM_PROMPT
+
+
+def test_debug_trace_redacts_credential_like_tool_arguments() -> None:
+    rendered = _safe_debug_args(
+        {"url": "https://xhs.example/item?xsec_token=secret-value", "role": "Agent"}
+    )
+
+    assert "secret-value" not in rendered
+    assert "[REDACTED]" in rendered
 
 
 def test_default_agent_registers_safe_user_document_reader(tmp_path) -> None:
