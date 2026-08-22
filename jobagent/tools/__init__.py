@@ -32,6 +32,7 @@ from jobagent.tools.opportunity_artifacts import (
 from jobagent.tools.shared_url import (
     SharedUrlSaver,
     SharedUrlSaveRequest,
+    build_shared_url_extract_tool,
     build_shared_url_save_tool,
 )
 
@@ -61,4 +62,5 @@ __all__ = [
     "SharedUrlSaveRequest",
     "SharedUrlSaver",
     "build_shared_url_save_tool",
+    "build_shared_url_extract_tool",
 ]

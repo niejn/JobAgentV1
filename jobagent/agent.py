@@ -49,6 +49,7 @@ from jobagent.tools import (
     build_save_candidate_background_tool,
     build_save_job_analysis_tool,
     build_save_job_search_profile_tool,
+    build_shared_url_extract_tool,
     build_shared_url_save_tool,
     build_update_application_state_tool,
     build_user_document_tool,
@@ -518,6 +519,8 @@ def _merge_streamed_text(accumulated: str, chunk: str) -> tuple[str, str]:
 def _tool_start_status(tool_name: str) -> str:
     if tool_name == "save_shared_url":
         return "正在读取并保存分享链接中的资料…"
+    if tool_name == "extract_shared_url":
+        return "正在读取已保存内容并执行图片 OCR…"
     if tool_name == "discover_boss_jobs":
         return "正在 Boss 搜索并筛选岗位…"
     if tool_name == "discover_interview_evidence":
@@ -556,10 +559,11 @@ def build_job_agent(
     elif state_db.is_file():
         with SQLiteCandidateProfileStore(state_db) as profile_store:
             effective_context = profile_store.load_context()
-    registered_tools = (
-        list(tools)
-        if tools is not None
-        else [
+    if tools is not None:
+        registered_tools = list(tools)
+    else:
+        shared_url_saver = SharedUrlSaver(settings)
+        registered_tools = [
             build_boss_job_discovery_tool(BossJobDiscovery(settings)),
             build_import_candidate_resume_tool(
                 CandidateProfileManager(
@@ -588,7 +592,8 @@ def build_job_agent(
             build_interview_evidence_tool(
                 InterviewEvidenceDiscovery(settings, candidate_context=effective_context)
             ),
-            build_shared_url_save_tool(SharedUrlSaver(settings)),
+            build_shared_url_save_tool(shared_url_saver),
+            build_shared_url_extract_tool(shared_url_saver),
             build_job_description_tool(
                 JobDescriptionReader(settings.jobagent_workspace_root)
             ),
@@ -596,7 +601,6 @@ def build_job_agent(
                 UserDocumentReader(settings.jobagent_workspace_root)
             ),
         ]
-    )
     system_prompt = MAIN_AGENT_SYSTEM_PROMPT
     if effective_context is not None:
         system_prompt += (
