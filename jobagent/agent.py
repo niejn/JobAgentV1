@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
@@ -65,6 +67,10 @@ logger = logging.getLogger(__name__)
 
 _HISTORY_SUMMARY_MARKER = "jobagent_history_summary"
 _HISTORY_SUMMARY_MAX_CHARS = 6_000
+_DEBUG_SENSITIVE_KEYS = ("token", "key", "cookie", "password", "secret", "authorization")
+_DEBUG_SENSITIVE_QUERY = re.compile(
+    r"(?i)(xsec_token|token|key|cookie|password|secret|authorization)=([^&\s]+)"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +122,7 @@ class JobAgent:
         history_summary_timeout: int = 60,
         opportunity_artifacts: LocalOpportunityArtifacts | None = None,
         filesystem_root: Path | None = None,
+        debug_trace: bool = False,
     ) -> None:
         self._model = model
         self._tools = tuple(tools)
@@ -131,6 +138,7 @@ class JobAgent:
         self._history_summary_timeout = history_summary_timeout
         self._opportunity_artifacts = opportunity_artifacts
         self._filesystem_root = (filesystem_root or Path("data/journeys")).expanduser().resolve()
+        self._debug_trace = debug_trace
 
     async def reply(self, message: str, *, thread_id: str = "default") -> str:
         """Continue one conversation and collect its visible token stream."""
@@ -155,6 +163,8 @@ class JobAgent:
 
         yield AgentStreamEvent("status", "正在分析你的请求…")
         request_started = time.perf_counter()
+        if self._debug_trace:
+            yield AgentStreamEvent("status", "[debug] Agent 请求开始")
         graph = await self._ensure_graph()
         yield AgentStreamEvent(
             "status",
@@ -167,6 +177,11 @@ class JobAgent:
         history_elapsed = time.perf_counter() - history_started
         if history_elapsed >= 0.1:
             yield AgentStreamEvent("status", f"会话上下文已准备（{history_elapsed:.1f}s）")
+        if self._debug_trace:
+            yield AgentStreamEvent(
+                "status",
+                f"[debug] 模型请求开始（累计 {time.perf_counter() - request_started:.1f}s）",
+            )
         emitted_visible_token = False
         complete_message_fallback = ""
         streamed_text: dict[str, str] = {}
@@ -190,8 +205,15 @@ class JobAgent:
                     "status",
                     f"模型已返回事件（等待 {time.perf_counter() - model_started:.1f}s）",
                 )
+                if self._debug_trace:
+                    yield AgentStreamEvent(
+                        "status",
+                        f"[debug] LangGraph 首事件（{time.perf_counter() - model_started:.1f}s）",
+                    )
             if part.get("type") == "updates":
                 for node, update in part["data"].items():
+                    if self._debug_trace:
+                        yield AgentStreamEvent("status", f"[debug] 节点：{node}")
                     if node == "model" and isinstance(update, dict):
                         for updated_message in update.get("messages", []):
                             if not isinstance(updated_message, AIMessage):
@@ -208,6 +230,13 @@ class JobAgent:
                                     continue
                                 announced_tool_calls.add(call_id)
                                 tool_started = time.perf_counter()
+                                if self._debug_trace:
+                                    yield AgentStreamEvent(
+                                        "status",
+                                        "[debug] Tool 请求："
+                                        f"{tool_call.get('name', '')} "
+                                        f"{_safe_debug_args(tool_call.get('args'))}",
+                                    )
                                 yield AgentStreamEvent(
                                     "status",
                                     _tool_start_status(str(tool_call.get("name") or "")),
@@ -224,6 +253,12 @@ class JobAgent:
                             "status",
                             "资料处理完成，正在生成回答…",
                         )
+                        if self._debug_trace:
+                            yield AgentStreamEvent(
+                                "status",
+                                f"[debug] Tool 完成：{time.perf_counter() - tool_started:.1f}s "
+                                f"{_tool_result_summary(update)}",
+                            )
                         yield AgentStreamEvent(
                             "status",
                             f"本次 Tool 耗时 {time.perf_counter() - tool_started:.1f}s",
@@ -255,6 +290,12 @@ class JobAgent:
                             "正式答案开始输出（模型等待 "
                             f"{time.perf_counter() - model_started:.1f}s）",
                         )
+                        if self._debug_trace:
+                            yield AgentStreamEvent(
+                                "status",
+                                "[debug] 首个可见 token（累计 "
+                                f"{time.perf_counter() - request_started:.1f}s）",
+                            )
                     emitted_visible_token = True
                     yield AgentStreamEvent("token", novel)
             elif visible and isinstance(streamed_message, AIMessage):
@@ -276,6 +317,11 @@ class JobAgent:
                 if recovered:
                     yield AgentStreamEvent("token", recovered)
         yield AgentStreamEvent("done", "")
+        if self._debug_trace:
+            logger.info(
+                "jobagent.debug_trace.complete",
+                extra={"elapsed_seconds": round(time.perf_counter() - request_started, 3)},
+            )
 
     async def _recover_final_answer(self, graph: Any, thread_id: str) -> str:
         """Retry once without Tools when a completed Tool turn has no visible answer."""
@@ -522,6 +568,54 @@ def _deterministic_tool_answer(message: Any) -> str:
     return f"文件已写入：{content.removeprefix('Successfully wrote to ').strip()}"
 
 
+def _safe_debug_args(value: Any) -> str:
+    """Render bounded Tool args with credential-like fields redacted."""
+
+    def scrub(item: Any) -> Any:
+        if isinstance(item, dict):
+            return {
+                str(key): (
+                    "[REDACTED]"
+                    if any(term in str(key).lower() for term in _DEBUG_SENSITIVE_KEYS)
+                    else scrub(child)
+                )
+                for key, child in item.items()
+            }
+        if isinstance(item, (list, tuple)):
+            return [scrub(child) for child in item[:10]]
+        if isinstance(item, str):
+            scrubbed = _DEBUG_SENSITIVE_QUERY.sub(r"\1=[REDACTED]", item)
+            return scrubbed[:300]
+        return item
+
+    try:
+        return json.dumps(scrub(value), ensure_ascii=False, default=str)[:800]
+    except (TypeError, ValueError):
+        return "[unserializable]"
+
+
+def _tool_result_summary(update: Any) -> str:
+    messages = update.get("messages", []) if isinstance(update, dict) else []
+    summaries: list[str] = []
+    for message in messages:
+        name = str(getattr(message, "name", "tool"))
+        content = _visible_text(message)
+        try:
+            payload = json.loads(content)
+        except (TypeError, ValueError):
+            payload = None
+        if isinstance(payload, dict):
+            details = {
+                key: payload[key]
+                for key in ("status", "error_type", "image_count", "image_ocr_count", "file_path")
+                if key in payload
+            }
+            summaries.append(f"{name} {_safe_debug_args(details)}")
+        else:
+            summaries.append(f"{name} ({len(content)} chars)")
+    return "; ".join(summaries)[:1_200]
+
+
 def _is_history_summary(message: BaseMessage) -> bool:
     return isinstance(message, SystemMessage) and bool(
         message.additional_kwargs.get(_HISTORY_SUMMARY_MARKER)
@@ -699,4 +793,5 @@ def build_job_agent(
             settings.jobagent_opportunity_dir
         ),
         filesystem_root=settings.jobagent_artifact_dir,
+        debug_trace=settings.jobagent_debug_trace,
     )

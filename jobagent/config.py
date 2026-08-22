@@ -19,6 +19,10 @@ class Settings(BaseSettings):
 
     jobagent_env: str = Field(default="development")
     jobagent_log_level: str = Field(default="INFO")
+    jobagent_debug_trace: bool = Field(
+        default=False,
+        description="Show sanitized Agent timing, Tool, OCR, and graph diagnostics in chat.",
+    )
     jobagent_headless: bool = Field(default=True)
     jobagent_max_jobs: int = Field(default=30, ge=1, le=500)
     jobagent_request_timeout: int = Field(default=30, ge=5, le=300)
