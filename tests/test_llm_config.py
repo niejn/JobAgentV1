@@ -101,7 +101,7 @@ def test_max_tokens_cannot_exceed_context_window() -> None:
         resolve_llm_config(settings)
 
 
-def test_agent_model_binds_ark_compatible_max_tokens_field() -> None:
+def test_agent_model_is_native_chat_model_with_ark_compatible_max_tokens() -> None:
     settings = Settings(
         _env_file=None,
         openai_api_key="test-key",
@@ -113,4 +113,5 @@ def test_agent_model_binds_ark_compatible_max_tokens_field() -> None:
 
     model = build_agent_model(settings)
 
-    assert model.kwargs == {"max_tokens": 128_000}  # type: ignore[attr-defined]
+    assert model.max_tokens == 128_000
+    assert callable(model.bind_tools)
