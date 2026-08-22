@@ -50,6 +50,7 @@ from jobagent.tools import (
     build_save_job_analysis_tool,
     build_save_job_search_profile_tool,
     build_shared_url_extract_tool,
+    build_shared_url_markdown_tool,
     build_shared_url_save_tool,
     build_update_application_state_tool,
     build_user_document_tool,
@@ -521,6 +522,8 @@ def _tool_start_status(tool_name: str) -> str:
         return "正在读取并保存分享链接中的资料…"
     if tool_name == "extract_shared_url":
         return "正在读取已保存内容并执行图片 OCR…"
+    if tool_name == "export_shared_url_markdown":
+        return "正在把正文和图片 OCR 写入 Markdown 文件…"
     if tool_name == "discover_boss_jobs":
         return "正在 Boss 搜索并筛选岗位…"
     if tool_name == "discover_interview_evidence":
@@ -594,6 +597,7 @@ def build_job_agent(
             ),
             build_shared_url_save_tool(shared_url_saver),
             build_shared_url_extract_tool(shared_url_saver),
+            build_shared_url_markdown_tool(shared_url_saver),
             build_job_description_tool(
                 JobDescriptionReader(settings.jobagent_workspace_root)
             ),

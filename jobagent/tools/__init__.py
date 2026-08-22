@@ -33,6 +33,7 @@ from jobagent.tools.shared_url import (
     SharedUrlSaver,
     SharedUrlSaveRequest,
     build_shared_url_extract_tool,
+    build_shared_url_markdown_tool,
     build_shared_url_save_tool,
 )
 
@@ -63,4 +64,5 @@ __all__ = [
     "SharedUrlSaver",
     "build_shared_url_save_tool",
     "build_shared_url_extract_tool",
+    "build_shared_url_markdown_tool",
 ]
