@@ -23,9 +23,19 @@ from jobagent.config import Settings
 from jobagent.profile import SQLiteCandidateProfileStore
 
 
+class ToolBindableFakeListChatModel(FakeListChatModel):
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+
+class ToolBindableFakeModel:
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+
 @pytest.mark.asyncio
 async def test_agent_can_ask_for_missing_business_information(tmp_path) -> None:
-    model = FakeListChatModel(responses=["请先告诉我目标公司和岗位。"])
+    model = ToolBindableFakeListChatModel(responses=["请先告诉我目标公司和岗位。"])
     settings = Settings(_env_file=None, jobagent_checkpoint_db=tmp_path / "checkpoints.db")
     agent = build_job_agent(settings, model=model, tools=[])
 
@@ -58,7 +68,7 @@ async def test_default_deep_agent_write_file_is_scoped_to_artifact_root(tmp_path
     ) == "# OCR 内容"
 
 
-class HistoryAwareFakeModel(BaseChatModel):
+class HistoryAwareFakeModel(ToolBindableFakeModel, BaseChatModel):
     @property
     def _llm_type(self) -> str:
         return "history-aware-fake"
@@ -76,7 +86,7 @@ class HistoryAwareFakeModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=human_text))])
 
 
-class CandidateContextAwareFakeModel(BaseChatModel):
+class CandidateContextAwareFakeModel(ToolBindableFakeModel, BaseChatModel):
     @property
     def _llm_type(self) -> str:
         return "candidate-context-aware-fake"
@@ -99,7 +109,7 @@ class CandidateContextAwareFakeModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=answer))])
 
 
-class VisibleStreamingFakeModel(BaseChatModel):
+class VisibleStreamingFakeModel(ToolBindableFakeModel, BaseChatModel):
     @property
     def _llm_type(self) -> str:
         return "visible-streaming-fake"
@@ -471,7 +481,7 @@ async def test_agent_lists_saved_conversation_sessions_newest_first(tmp_path) ->
     assert all(session.checkpoint_count > 0 for session in sessions)
 
 
-class SummarizingFakeModel(BaseChatModel):
+class SummarizingFakeModel(ToolBindableFakeModel, BaseChatModel):
     @property
     def _llm_type(self) -> str:
         return "summarizing-fake"
@@ -597,7 +607,7 @@ def test_default_agent_registers_safe_user_document_reader(tmp_path) -> None:
         jobagent_checkpoint_db=tmp_path / "checkpoints.db",
     )
 
-    agent = build_job_agent(settings, model=FakeListChatModel(responses=["ok"]))
+    agent = build_job_agent(settings, model=ToolBindableFakeListChatModel(responses=["ok"]))
 
     tool_names = {tool.name for tool in agent._tools}
     assert {

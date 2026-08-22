@@ -13,7 +13,6 @@ import aiosqlite
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
 from deepagents.middleware.filesystem import FilesystemMiddleware
-from langchain.agents import create_agent
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage,
@@ -116,7 +115,6 @@ class JobAgent:
         history_summary_timeout: int = 60,
         opportunity_artifacts: LocalOpportunityArtifacts | None = None,
         filesystem_root: Path | None = None,
-        use_deep_agent: bool = True,
     ) -> None:
         self._model = model
         self._tools = tuple(tools)
@@ -132,7 +130,6 @@ class JobAgent:
         self._history_summary_timeout = history_summary_timeout
         self._opportunity_artifacts = opportunity_artifacts
         self._filesystem_root = (filesystem_root or Path("data/journeys")).expanduser().resolve()
-        self._use_deep_agent = use_deep_agent
 
     async def reply(self, message: str, *, thread_id: str = "default") -> str:
         """Continue one conversation and collect its visible token stream."""
@@ -364,39 +361,30 @@ class JobAgent:
             )
             try:
                 await saver.setup()
-                if self._use_deep_agent:
-                    filesystem_backend = FilesystemBackend(
-                        root_dir=self._filesystem_root,
-                        virtual_mode=True,
-                    )
-                    filesystem_middleware = FilesystemMiddleware(
-                        backend=filesystem_backend,
-                        tools=[
-                            "ls",
-                            "read_file",
-                            "write_file",
-                            "edit_file",
-                            "glob",
-                            "grep",
-                        ],
-                    )
-                    graph = create_deep_agent(
-                        model=self._model,
-                        tools=list(self._tools),
-                        system_prompt=self._system_prompt,
-                        middleware=[filesystem_middleware],
-                        backend=filesystem_backend,
-                        checkpointer=saver,
-                        name="jobagent",
-                    )
-                else:
-                    graph = create_agent(
-                        model=self._model,
-                        tools=list(self._tools),
-                        system_prompt=self._system_prompt,
-                        checkpointer=saver,
-                        name="jobagent",
-                    )
+                filesystem_backend = FilesystemBackend(
+                    root_dir=self._filesystem_root,
+                    virtual_mode=True,
+                )
+                filesystem_middleware = FilesystemMiddleware(
+                    backend=filesystem_backend,
+                    tools=[
+                        "ls",
+                        "read_file",
+                        "write_file",
+                        "edit_file",
+                        "glob",
+                        "grep",
+                    ],
+                )
+                graph = create_deep_agent(
+                    model=self._model,
+                    tools=list(self._tools),
+                    system_prompt=self._system_prompt,
+                    middleware=[filesystem_middleware],
+                    backend=filesystem_backend,
+                    checkpointer=saver,
+                    name="jobagent",
+                )
             except Exception:
                 await connection.close()
                 raise
@@ -679,5 +667,4 @@ def build_job_agent(
             settings.jobagent_opportunity_dir
         ),
         filesystem_root=settings.jobagent_artifact_dir,
-        use_deep_agent=tools is None,
     )
