@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import subprocess
 from collections.abc import Callable
 from typing import Any
@@ -222,10 +223,50 @@ class XhsNoteSaver:
             "note_url": request.url,
         }
 
+    async def export_markdown(self, request: XhsNoteSaveRequest) -> dict[str, Any]:
+        """Write extracted source text to a controlled Markdown artifact path."""
+
+        extracted = await self.extract_saved(request)
+        if extracted.get("status") != "completed":
+            return extracted
+        title = str(extracted.get("title") or "xhs-note")
+        note_id = _safe_filename(
+            str(extracted.get("note_id") or _note_id_from_url(request.url)),
+            fallback="note",
+        )
+        filename = f"{_safe_filename(title, fallback='xhs-note')}-{note_id}.markdown"
+        root = self._settings.jobagent_artifact_dir.expanduser().resolve() / "shared_urls"
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / filename
+        content = (
+            f"# {title}\n\n"
+            f"来源：{extracted.get('source_url') or request.url}\n\n"
+            "## 正文\n\n"
+            f"{extracted.get('body_text') or '（正文为空，主要内容在图片中）'}\n\n"
+            "## 图片 OCR\n\n"
+            f"{extracted.get('image_ocr_text') or '（没有可用的图片 OCR 文本）'}\n"
+        )
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(content, encoding="utf-8")
+        temporary.replace(path)
+        return {
+            "status": "completed",
+            "platform": "xiaohongshu",
+            "file_path": str(path),
+            "artifact_ref": f"shared_urls/{filename}",
+            "image_count": extracted.get("image_count", 0),
+            "image_ocr_count": extracted.get("image_ocr_count", 0),
+        }
+
 
 def _note_id_from_url(url: str) -> str:
     parts = tuple(part for part in urlsplit(url).path.split("/") if part)
     return parts[-1] if parts else ""
+
+
+def _safe_filename(value: str, *, fallback: str) -> str:
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip(" .")
+    return cleaned[:100] or fallback
 
 
 def _bundle_text(bundle: SnapshotBundle) -> dict[str, Any]:
@@ -237,6 +278,8 @@ def _bundle_text(bundle: SnapshotBundle) -> dict[str, Any]:
     combined = f"正文：\n{body}\n\n图片 OCR：\n{ocr_text}".strip()
     return {
         "status": "completed",
+        "note_id": bundle.snapshot.note_id,
+        "source_url": bundle.snapshot.source_url,
         "title": bundle.snapshot.title,
         "body_text": body,
         "image_ocr_text": ocr_text,
