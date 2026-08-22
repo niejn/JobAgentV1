@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -153,10 +154,19 @@ class JobAgent:
         """Stream safe progress and final-answer tokens without hidden reasoning."""
 
         yield AgentStreamEvent("status", "正在分析你的请求…")
+        request_started = time.perf_counter()
         graph = await self._ensure_graph()
+        yield AgentStreamEvent(
+            "status",
+            f"Agent 已就绪（{time.perf_counter() - request_started:.1f}s）",
+        )
+        history_started = time.perf_counter()
         _, compacted = await self._compact_history(graph, thread_id)
         if compacted:
             yield AgentStreamEvent("status", "较早的会话已整理为摘要…")
+        history_elapsed = time.perf_counter() - history_started
+        if history_elapsed >= 0.1:
+            yield AgentStreamEvent("status", f"会话上下文已准备（{history_elapsed:.1f}s）")
         emitted_visible_token = False
         complete_message_fallback = ""
         streamed_text: dict[str, str] = {}
@@ -164,12 +174,22 @@ class JobAgent:
         saw_tool_completion = False
         deterministic_tool_answer = ""
         last_finish_reason: str | None = None
+        model_started = time.perf_counter()
+        first_model_event_reported = False
+        first_visible_token_reported = False
+        tool_started = time.perf_counter()
         async for part in graph.astream(
             {"messages": [{"role": "user", "content": message}]},
             config={"configurable": {"thread_id": thread_id}},
             stream_mode=["messages", "updates"],
             version="v2",
         ):
+            if not first_model_event_reported:
+                first_model_event_reported = True
+                yield AgentStreamEvent(
+                    "status",
+                    f"模型已返回事件（等待 {time.perf_counter() - model_started:.1f}s）",
+                )
             if part.get("type") == "updates":
                 for node, update in part["data"].items():
                     if node == "model" and isinstance(update, dict):
@@ -187,6 +207,7 @@ class JobAgent:
                                 if call_id in announced_tool_calls:
                                     continue
                                 announced_tool_calls.add(call_id)
+                                tool_started = time.perf_counter()
                                 yield AgentStreamEvent(
                                     "status",
                                     _tool_start_status(str(tool_call.get("name") or "")),
@@ -202,6 +223,10 @@ class JobAgent:
                         yield AgentStreamEvent(
                             "status",
                             "资料处理完成，正在生成回答…",
+                        )
+                        yield AgentStreamEvent(
+                            "status",
+                            f"本次 Tool 耗时 {time.perf_counter() - tool_started:.1f}s",
                         )
                 continue
             if part.get("type") != "messages":
@@ -223,6 +248,13 @@ class JobAgent:
                 )
                 streamed_text[message_key] = accumulated
                 if novel:
+                    if not first_visible_token_reported:
+                        first_visible_token_reported = True
+                        yield AgentStreamEvent(
+                            "status",
+                            "正式答案开始输出（模型等待 "
+                            f"{time.perf_counter() - model_started:.1f}s）",
+                        )
                     emitted_visible_token = True
                     yield AgentStreamEvent("token", novel)
             elif visible and isinstance(streamed_message, AIMessage):

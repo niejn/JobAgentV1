@@ -307,6 +307,8 @@ async def test_agent_streams_visible_tokens_without_hidden_reasoning(tmp_path) -
 
     assert events[0].kind == "status"
     assert "分析" in events[0].text
+    assert any("模型已返回事件" in event.text for event in events if event.kind == "status")
+    assert any("正式答案开始输出" in event.text for event in events if event.kind == "status")
     assert "".join(event.text for event in events if event.kind == "token") == "你好"
     assert all("hidden chain of thought" not in event.text for event in events)
     assert events[-1].kind == "done"
