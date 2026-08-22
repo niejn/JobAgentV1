@@ -29,6 +29,11 @@ from jobagent.tools.opportunity_artifacts import (
     build_save_job_analysis_tool,
     build_update_application_state_tool,
 )
+from jobagent.tools.shared_url import (
+    SharedUrlSaver,
+    SharedUrlSaveRequest,
+    build_shared_url_save_tool,
+)
 
 __all__ = [
     "CandidateProfileManager",
@@ -53,4 +58,7 @@ __all__ = [
     "ApplicationStateUpdateInput",
     "build_save_job_analysis_tool",
     "build_update_application_state_tool",
+    "SharedUrlSaveRequest",
+    "SharedUrlSaver",
+    "build_shared_url_save_tool",
 ]
