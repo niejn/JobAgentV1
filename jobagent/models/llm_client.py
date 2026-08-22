@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
@@ -154,13 +154,13 @@ def build_agent_model(settings: Settings) -> BaseChatModel:
         base_url=runtime.base_url,
         timeout=float(settings.jobagent_llm_timeout),
         max_retries=2,
+        max_completion_tokens=runtime.max_tokens,
         use_responses_api=False,
     )
-    # ChatOpenAI's constructor aliases its token field to max_completion_tokens.
-    # Ark Agent Plan explicitly expects max_tokens, so bind it as an invocation
-    # argument. _ChatModelBinding retains the full chat-model interface, including
-    # bind_tools(), but langchain-core does not expose that structural type publicly.
-    return cast(BaseChatModel, model.bind(max_tokens=runtime.max_tokens))
+    # Keep the native ChatOpenAI object so DeepAgents can inspect and resolve it.
+    # ChatOpenAI exposes this constructor field as max_completion_tokens while
+    # translating the legacy max_tokens request shape for compatible providers.
+    return model
 
 
 def _optional_text(value: str | None) -> str | None:
