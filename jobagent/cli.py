@@ -22,6 +22,7 @@ from jobagent.auth.browser_login import (
     inspect_cookie_providers,
     interactive_login,
 )
+from jobagent.cli_status import RichStatusSpinner
 from jobagent.config import Settings, get_settings
 from jobagent.models import Job, JobSource
 from jobagent.notifier.discord import DiscordNotifier
@@ -371,20 +372,25 @@ async def _render_streaming_reply(
 
     answer_line_open = False
     emitted_answer = False
-    async for event in agent.stream_reply(message, thread_id=thread_id):
-        kind = getattr(event, "kind", "")
-        text = str(getattr(event, "text", ""))
-        if kind == "status" and text:
-            if answer_line_open:
-                click.echo()
-                answer_line_open = False
-            click.echo(f"JobAgent · {text}")
-        elif kind == "token" and text:
-            emitted_answer = True
-            if not answer_line_open:
-                click.echo("JobAgent> ", nl=False)
-                answer_line_open = True
-            click.echo(text, nl=False)
+    spinner = RichStatusSpinner(stream=click.get_text_stream("stdout"))
+    try:
+        async for event in agent.stream_reply(message, thread_id=thread_id):
+            kind = getattr(event, "kind", "")
+            text = str(getattr(event, "text", ""))
+            if kind == "status" and text:
+                if answer_line_open:
+                    click.echo()
+                    answer_line_open = False
+                spinner.update(text)
+            elif kind == "token" and text:
+                spinner.stop()
+                emitted_answer = True
+                if not answer_line_open:
+                    click.echo("JobAgent> ", nl=False)
+                    answer_line_open = True
+                click.echo(text, nl=False)
+    finally:
+        spinner.stop()
     if answer_line_open:
         click.echo()
     elif not emitted_answer:
