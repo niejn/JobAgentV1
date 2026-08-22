@@ -253,15 +253,6 @@ class SharedUrlSaver:
             "message": "当前只支持对已保存的小红书图文快照执行图片 OCR。",
         }
 
-    async def export_markdown(self, request: SharedUrlSaveRequest) -> dict[str, Any]:
-        host = (urlsplit(request.url).hostname or "").lower()
-        if host in {"xiaohongshu.com", "www.xiaohongshu.com"}:
-            return await self._xhs_saver.export_markdown(XhsNoteSaveRequest(url=request.url))
-        return {
-            "status": "unsupported",
-            "platform": "boss" if host.endswith(".zhipin.com") else "web",
-            "message": "当前只支持将已保存的小红书图文内容导出为 Markdown。",
-        }
 
 
 def build_shared_url_save_tool(saver: SharedUrlSaver) -> BaseTool:
@@ -300,27 +291,6 @@ def build_shared_url_extract_tool(saver: SharedUrlSaver) -> BaseTool:
             "Read the body and OCR text from a previously saved Xiaohongshu note. "
             "Use this when the user asks to summarize, extract, or analyze the contents "
             "of a URL already downloaded; do not use read_user_document or guess file paths."
-        ),
-        args_schema=SharedUrlSaveRequest,
-    )
-
-
-def build_shared_url_markdown_tool(saver: SharedUrlSaver) -> BaseTool:
-    """Export saved source text to a controlled Markdown artifact."""
-
-    async def export_shared_url_markdown(url: str) -> dict[str, Any]:
-        """Write saved source body and image OCR to a Markdown file."""
-
-        return await saver.export_markdown(SharedUrlSaveRequest(url=url))
-
-    return StructuredTool.from_function(
-        coroutine=export_shared_url_markdown,
-        name="export_shared_url_markdown",
-        description=(
-            "Write the body and image OCR of a previously saved Xiaohongshu note to a Markdown "
-            "file in the controlled JobAgent artifact directory. Use this when the user asks "
-            "to save, export, or write the extracted article to Markdown; return the exact "
-            "file_path."
         ),
         args_schema=SharedUrlSaveRequest,
     )

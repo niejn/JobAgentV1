@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
@@ -11,6 +10,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 import aiosqlite
+from deepagents import create_deep_agent
+from deepagents.backends import FilesystemBackend
+from deepagents.middleware.filesystem import FilesystemMiddleware
 from langchain.agents import create_agent
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import (
@@ -52,7 +54,6 @@ from jobagent.tools import (
     build_save_job_analysis_tool,
     build_save_job_search_profile_tool,
     build_shared_url_extract_tool,
-    build_shared_url_markdown_tool,
     build_shared_url_save_tool,
     build_update_application_state_tool,
     build_user_document_tool,
@@ -114,6 +115,8 @@ class JobAgent:
         history_summary_input_max_chars: int = 24_000,
         history_summary_timeout: int = 60,
         opportunity_artifacts: LocalOpportunityArtifacts | None = None,
+        filesystem_root: Path | None = None,
+        use_deep_agent: bool = True,
     ) -> None:
         self._model = model
         self._tools = tuple(tools)
@@ -128,6 +131,8 @@ class JobAgent:
         self._history_summary_input_max_chars = history_summary_input_max_chars
         self._history_summary_timeout = history_summary_timeout
         self._opportunity_artifacts = opportunity_artifacts
+        self._filesystem_root = (filesystem_root or Path("data/journeys")).expanduser().resolve()
+        self._use_deep_agent = use_deep_agent
 
     async def reply(self, message: str, *, thread_id: str = "default") -> str:
         """Continue one conversation and collect its visible token stream."""
@@ -359,13 +364,39 @@ class JobAgent:
             )
             try:
                 await saver.setup()
-                graph = create_agent(
-                    model=self._model,
-                    tools=list(self._tools),
-                    system_prompt=self._system_prompt,
-                    checkpointer=saver,
-                    name="jobagent",
-                )
+                if self._use_deep_agent:
+                    filesystem_backend = FilesystemBackend(
+                        root_dir=self._filesystem_root,
+                        virtual_mode=True,
+                    )
+                    filesystem_middleware = FilesystemMiddleware(
+                        backend=filesystem_backend,
+                        tools=[
+                            "ls",
+                            "read_file",
+                            "write_file",
+                            "edit_file",
+                            "glob",
+                            "grep",
+                        ],
+                    )
+                    graph = create_deep_agent(
+                        model=self._model,
+                        tools=list(self._tools),
+                        system_prompt=self._system_prompt,
+                        middleware=[filesystem_middleware],
+                        backend=filesystem_backend,
+                        checkpointer=saver,
+                        name="jobagent",
+                    )
+                else:
+                    graph = create_agent(
+                        model=self._model,
+                        tools=list(self._tools),
+                        system_prompt=self._system_prompt,
+                        checkpointer=saver,
+                        name="jobagent",
+                    )
             except Exception:
                 await connection.close()
                 raise
@@ -463,19 +494,12 @@ def _deterministic_tool_answer(message: Any) -> str:
     if not isinstance(message, ToolMessage):
         return ""
     name = str(getattr(message, "name", ""))
-    if name != "export_shared_url_markdown":
+    if name != "write_file":
         return ""
     content = _visible_text(message)
-    try:
-        payload = json.loads(content)
-    except (TypeError, ValueError):
+    if not content.lower().startswith("successfully wrote to "):
         return ""
-    if not isinstance(payload, dict) or payload.get("status") != "completed":
-        return ""
-    file_path = str(payload.get("file_path") or "").strip()
-    if not file_path:
-        return ""
-    return f"Markdown 文件已生成：{file_path}"
+    return f"文件已写入：{content.removeprefix('Successfully wrote to ').strip()}"
 
 
 def _is_history_summary(message: BaseMessage) -> bool:
@@ -555,8 +579,6 @@ def _tool_start_status(tool_name: str) -> str:
         return "正在读取并保存分享链接中的资料…"
     if tool_name == "extract_shared_url":
         return "正在读取已保存内容并执行图片 OCR…"
-    if tool_name == "export_shared_url_markdown":
-        return "正在把正文和图片 OCR 写入 Markdown 文件…"
     if tool_name == "discover_boss_jobs":
         return "正在 Boss 搜索并筛选岗位…"
     if tool_name == "discover_interview_evidence":
@@ -630,7 +652,6 @@ def build_job_agent(
             ),
             build_shared_url_save_tool(shared_url_saver),
             build_shared_url_extract_tool(shared_url_saver),
-            build_shared_url_markdown_tool(shared_url_saver),
             build_job_description_tool(
                 JobDescriptionReader(settings.jobagent_workspace_root)
             ),
@@ -657,4 +678,6 @@ def build_job_agent(
         opportunity_artifacts=LocalOpportunityArtifacts(
             settings.jobagent_opportunity_dir
         ),
+        filesystem_root=settings.jobagent_artifact_dir,
+        use_deep_agent=tools is None,
     )

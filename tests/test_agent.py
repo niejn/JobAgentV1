@@ -38,6 +38,26 @@ async def test_agent_can_ask_for_missing_business_information(tmp_path) -> None:
     assert "岗位" in response
 
 
+@pytest.mark.asyncio
+async def test_default_deep_agent_write_file_is_scoped_to_artifact_root(tmp_path) -> None:
+    settings = Settings(
+        _env_file=None,
+        jobagent_artifact_dir=tmp_path / "journeys",
+        jobagent_checkpoint_db=tmp_path / "checkpoints.db",
+    )
+    agent = build_job_agent(settings, model=WriteFileCallingFakeModel())
+
+    try:
+        response = await agent.reply("把 OCR 内容写入 Markdown")
+    finally:
+        await agent.close()
+
+    assert response == "文件写入完成"
+    assert (tmp_path / "journeys" / "shared_urls" / "test.markdown").read_text(
+        encoding="utf-8"
+    ) == "# OCR 内容"
+
+
 class HistoryAwareFakeModel(BaseChatModel):
     @property
     def _llm_type(self) -> str:
@@ -138,6 +158,34 @@ class ToolCallingFakeModel(BaseChatModel):
                         "name": "discover_interview_evidence",
                         "args": {"company": "示例公司"},
                         "id": "call-1",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+        return ChatResult(generations=[ChatGeneration(message=answer)])
+
+
+class WriteFileCallingFakeModel(ToolCallingFakeModel):
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: object | None = None,
+        **kwargs: object,
+    ) -> ChatResult:
+        if any(message.type == "tool" for message in messages):
+            answer = AIMessage(content="文件写入完成")
+        else:
+            answer = AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "write_file",
+                        "args": {
+                            "file_path": "/shared_urls/test.markdown",
+                            "content": "# OCR 内容",
+                        },
+                        "id": "write-file-1",
                         "type": "tool_call",
                     }
                 ],
@@ -527,21 +575,18 @@ def test_main_agent_prompt_contains_critical_contracts() -> None:
     assert "只追问缺失项" in SYSTEM_PROMPT
     assert "save_shared_url" in SYSTEM_PROMPT
     assert "extract_shared_url" in SYSTEM_PROMPT
-    assert "export_shared_url_markdown" in SYSTEM_PROMPT
     assert "不要调用" in SYSTEM_PROMPT
     assert "不得先追问公司、岗位" in SYSTEM_PROMPT
 
 
-def test_export_tool_result_has_deterministic_file_path_fallback() -> None:
+def test_write_file_result_has_deterministic_path_fallback() -> None:
     message = ToolMessage(
-        name="export_shared_url_markdown",
+        name="write_file",
         tool_call_id="export-1",
-        content='{"status":"completed","file_path":"data/journeys/shared_urls/post.markdown"}',
+        content="Successfully wrote to /shared_urls/post.markdown",
     )
 
-    assert _deterministic_tool_answer(message) == (
-        "Markdown 文件已生成：data/journeys/shared_urls/post.markdown"
-    )
+    assert _deterministic_tool_answer(message) == "文件已写入：/shared_urls/post.markdown"
     assert "完整查询字符串" in SYSTEM_PROMPT
 
 
@@ -565,5 +610,4 @@ def test_default_agent_registers_safe_user_document_reader(tmp_path) -> None:
         "discover_boss_jobs",
         "save_shared_url",
         "extract_shared_url",
-        "export_shared_url_markdown",
     } <= tool_names
