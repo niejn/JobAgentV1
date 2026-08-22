@@ -1,4 +1,4 @@
-"""Tests for jobclaw.auth.browser_login — cookie save/load/validation."""
+"""Tests for jobagent.auth.browser_login — cookie save/load/validation."""
 
 from __future__ import annotations
 
@@ -6,12 +6,10 @@ import json
 import sys
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from jobclaw.auth.browser_login import (
-    COOKIE_DIR,
+from jobagent.auth.browser_login import (
     PLATFORM_CONFIG,
     _save_cookies,
     cookies_valid,
@@ -24,7 +22,9 @@ from jobclaw.auth.browser_login import (
 def tmp_cookie_dir(tmp_path: Path, monkeypatch):
     """Redirect COOKIE_DIR to a temp directory."""
     cookie_dir = tmp_path / "cookies"
-    monkeypatch.setattr("jobclaw.auth.browser_login.COOKIE_DIR", cookie_dir)
+    legacy_dir = tmp_path / "legacy-cookies"
+    monkeypatch.setattr("jobagent.auth.browser_login.COOKIE_DIR", cookie_dir)
+    monkeypatch.setattr("jobagent.auth.browser_login.LEGACY_COOKIE_DIR", legacy_dir)
     return cookie_dir
 
 
@@ -53,6 +53,22 @@ class TestSaveLoadCookies:
     async def test_load_nonexistent_returns_none(self, tmp_cookie_dir):
         result = await load_cookies("boss")
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_load_falls_back_to_legacy_jobclaw_cookie(self, tmp_path, monkeypatch):
+        current = tmp_path / "current"
+        legacy = tmp_path / "legacy"
+        legacy.mkdir()
+        (legacy / "xhs.json").write_text(
+            json.dumps({"cookies": [{"name": "a1", "value": "legacy"}]}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jobagent.auth.browser_login.COOKIE_DIR", current)
+        monkeypatch.setattr("jobagent.auth.browser_login.LEGACY_COOKIE_DIR", legacy)
+
+        loaded = await load_cookies("xhs")
+
+        assert loaded == [{"name": "a1", "value": "legacy"}]
 
     @pytest.mark.asyncio
     async def test_load_corrupt_json_returns_none(self, tmp_cookie_dir):

@@ -1,0 +1,143 @@
+"""Application configuration loaded from environment variables."""
+
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic import Field, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Runtime settings for the JobAgent agent."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    jobagent_env: str = Field(default="development")
+    jobagent_log_level: str = Field(default="INFO")
+    jobagent_headless: bool = Field(default=True)
+    jobagent_max_jobs: int = Field(default=30, ge=1, le=500)
+    jobagent_request_timeout: int = Field(default=30, ge=5, le=300)
+    jobagent_workspace_root: Path = Field(default=Path("."))
+
+    openai_api_key: str | None = None
+    openai_base_url: str = Field(default="https://api.openai.com/v1")
+    jobagent_llm_provider: str = Field(
+        default="openai-compatible",
+        description="LLM backend; first release supports openai-compatible only.",
+    )
+    jobagent_llm_model: str = Field(default="gpt-4o-mini")
+    jobagent_llm_context_window: int = Field(default=128_000, ge=1)
+    jobagent_llm_max_tokens: int = Field(default=4_096, ge=1)
+    jobagent_llm_timeout: int = Field(default=180, ge=10, le=600)
+    jobagent_llm_reasoning: bool = Field(default=False)
+    jobagent_llm_input_modalities: str = Field(default="text")
+    jobagent_llm_supports_developer_role: bool = Field(default=False)
+    jobagent_llm_thinking_format: str | None = None
+    jobagent_llm_thinking_level: str | None = None
+
+    boss_cookie: str | None = None
+    boss_greeting: str | None = Field(
+        default=None,
+        description="Greeting template for Boss直聘. Supports {company}, {title}, {name}.",
+    )
+    boss_apply_delay_min: float = Field(default=3.0, ge=0.5)
+    boss_apply_delay_max: float = Field(default=8.0, ge=1.0)
+    boss_daily_limit: int = Field(default=100, ge=1, le=150)
+    boss_skip_inactive_days: int = Field(default=7, ge=1)
+    boss_api_rate_period_seconds: float = Field(default=1.0, gt=0)
+    boss_risk_cooldown_seconds: int = Field(default=900, ge=60, le=86_400)
+    linkedin_cookie: str | None = None
+
+    # Xiaohongshu referral channel (see docs/referral-design.md)
+    xhs_cookie: str | None = None
+    xhs_cookie_header: str | None = Field(
+        default=None,
+        description="Complete XHS Cookie header containing at least a1 and web_session.",
+    )
+    spider_xhs_path: Path = Field(
+        default=Path("../xiaohongshu_crawler/Spider_XHS"),
+        description="Local Spider_XHS library source directory.",
+    )
+    xhs_download_dir: Path = Field(
+        default=Path("data/xhs"),
+        description="Root directory for downloaded XHS note bodies and images.",
+    )
+    xhs_referral_max_posts: int = Field(default=30, ge=1, le=100)
+    xhs_referral_stale_days: int = Field(default=90, ge=1)
+    xhs_api_rate_requests: int = Field(
+        default=1,
+        ge=1,
+        description="Maximum XHS API calls in one configured period.",
+    )
+    xhs_api_rate_period_seconds: float = Field(default=1.0, gt=0)
+    xhs_media_rate_requests: int = Field(
+        default=1,
+        ge=1,
+        description="Maximum XHS image downloads in one configured period.",
+    )
+    xhs_media_rate_period_seconds: float = Field(default=1.0, gt=0)
+    xhs_scrape_delay_min: float = Field(
+        default=45.0,
+        ge=5.0,
+        description="Min seconds between XHS page loads",
+    )
+    xhs_scrape_delay_max: float = Field(
+        default=90.0,
+        ge=10.0,
+        description="Max seconds between XHS page loads",
+    )
+    jobagent_state_db: Path = Field(default=Path("data/jobagent.db"))
+    jobagent_checkpoint_db: Path = Field(default=Path("data/jobagent-checkpoints.db"))
+    jobagent_artifact_dir: Path = Field(default=Path("data/journeys"))
+    jobagent_opportunity_dir: Path = Field(default=Path("data/opportunities"))
+    jobagent_ocr_engine: str = Field(default="tesseract")
+    tesseract_cmd: Path = Field(default=Path("tesseract"))
+    jobagent_ocr_language: str = Field(default="chi_sim+eng")
+    jobagent_ocr_psm: int = Field(default=11, ge=3, le=13)
+    jobagent_research_max_iterations: int = Field(default=3, ge=1, le=10)
+    jobagent_research_queries_per_iteration: int = Field(default=4, ge=1, le=6)
+    jobagent_research_results_per_query: int = Field(default=8, ge=1, le=30)
+    jobagent_research_minimum_evidence: int = Field(default=3, ge=1, le=20)
+    jobagent_research_required_topics: int = Field(default=3, ge=1, le=20)
+    jobagent_research_timeout: int = Field(default=300, ge=30, le=1800)
+    jobagent_history_compact_after_messages: int = Field(default=40, ge=5, le=500)
+    jobagent_history_keep_recent_messages: int = Field(default=16, ge=2, le=100)
+    jobagent_history_summary_input_max_chars: int = Field(
+        default=24_000,
+        ge=2_000,
+        le=200_000,
+    )
+    jobagent_history_summary_timeout: int = Field(default=60, ge=5, le=300)
+
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
+    discord_webhook_url: str | None = None
+
+    http_proxy: str | None = None
+    https_proxy: str | None = None
+
+    @model_validator(mode="after")
+    def validate_history_compaction_window(self) -> "Settings":
+        """Ensure every configured compaction leaves an older segment to summarize."""
+
+        if (
+            self.jobagent_history_keep_recent_messages
+            >= self.jobagent_history_compact_after_messages
+        ):
+            raise ValueError(
+                "JOBAGENT_HISTORY_KEEP_RECENT_MESSAGES must be smaller than "
+                "JOBAGENT_HISTORY_COMPACT_AFTER_MESSAGES"
+            )
+        return self
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Return a cached settings instance."""
+
+    return Settings()

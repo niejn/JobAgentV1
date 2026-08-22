@@ -3,14 +3,14 @@ requires = ["hatchling>=1.24.2"]
 build-backend = "hatchling.build"
 
 [project]
-name = "jobclaw"
+name = "jobagent"
 version = "0.1.0"
 description = "AI-powered job hunting agent for scraping, matching, applying, and notifying."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [
-  { name = "JobClaw Contributors" }
+  { name = "JobAgent Contributors" }
 ]
 keywords = ["jobs", "automation", "llm", "playwright", "openclaw"]
 classifiers = [
@@ -25,7 +25,7 @@ classifiers = [
 ]
 dependencies = [
   "playwright>=1.50.0",
-  "langchain>=0.3.20",
+  "langchain>=1.3.16,<2.0.0",
   "httpx>=0.28.1",
   "pydantic>=2.10.6",
   "pydantic-settings>=2.7.1",
@@ -35,27 +35,33 @@ dependencies = [
   "loguru>=0.7.3",
   "openpyxl>=3.1.5",
   "requests>=2.32.3",
-  "retry>=0.9.2"
+  "retry>=0.9.2",
+  "pyrate-limiter>=4.4.0,<5.0.0",
+  "langgraph>=1.2.11,<2.0.0",
+  "deepagents>=0.7.8,<0.8.0",
+  "langchain-openai>=1.6.0,<2.0.0",
+  "langgraph-checkpoint-sqlite>=3.1.1,<4.0.0",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
   "pytest>=8.3.4",
   "pytest-asyncio>=0.25.2",
   "ruff>=0.9.7",
-  "mypy>=1.15.0"
+  "mypy>=1.15.0",
+  "types-pyyaml>=6.0.12.20260815,<7.0.0.0",
 ]
 
 [project.urls]
-Homepage = "https://github.com/VPC-byte/jobclaw"
-Repository = "https://github.com/VPC-byte/jobclaw"
-Issues = "https://github.com/VPC-byte/jobclaw/issues"
+Homepage = "https://github.com/VPC-byte/jobagent"
+Repository = "https://github.com/VPC-byte/jobagent"
+Issues = "https://github.com/VPC-byte/jobagent/issues"
 
 [project.scripts]
-jobclaw = "jobclaw.cli:main"
+jobagent = "jobagent.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["jobclaw"]
+packages = ["jobagent"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from jobclaw.scraper.xhs_backend import DownloadedXhsNote, XhsFetchedNote, XhsNoteReference
-from jobclaw.scraper.xhs_discovery import XhsDiscoveryRequest, discover_xhs_notes
+from jobagent.scraper.xhs_backend import DownloadedXhsNote, XhsFetchedNote, XhsNoteReference
+from jobagent.scraper.xhs_discovery import XhsDiscoveryRequest, discover_xhs_notes
 
 SHANGHAI = timezone(timedelta(hours=8))
 

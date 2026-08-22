@@ -1,0 +1,9 @@
+name: Example Candidate
+years_experience: 3
+summary: Backend engineer transitioning toward AI Agent engineering.
+skills:
+  - Python
+  - FastAPI
+  - LangChain
+experiences: []
+projects: []

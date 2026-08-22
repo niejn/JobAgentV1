@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from jobclaw.auth.token_refresh import ensure_valid_token
+from jobagent.auth.token_refresh import ensure_valid_token
 
 
 @pytest.fixture()
@@ -57,7 +57,7 @@ class TestEnsureValidToken:
 
     def test_valid_token_no_refresh(self, valid_creds_file: Path) -> None:
         """Token with plenty of time left should not trigger a refresh."""
-        with patch("jobclaw.auth.token_refresh.httpx.post") as mock_post:
+        with patch("jobagent.auth.token_refresh.httpx.post") as mock_post:
             result = ensure_valid_token(valid_creds_file)
 
         assert result is True
@@ -78,7 +78,10 @@ class TestEnsureValidToken:
             "expires_in": 28800,
         }
 
-        with patch("jobclaw.auth.token_refresh.httpx.post", return_value=mock_response) as mock_post:
+        with patch(
+            "jobagent.auth.token_refresh.httpx.post",
+            return_value=mock_response,
+        ) as mock_post:
             result = ensure_valid_token(creds_file)
 
         assert result is True
@@ -97,7 +100,7 @@ class TestEnsureValidToken:
         mock_response.status_code = 401
         mock_response.text = "Unauthorized"
 
-        with patch("jobclaw.auth.token_refresh.httpx.post", return_value=mock_response):
+        with patch("jobagent.auth.token_refresh.httpx.post", return_value=mock_response):
             result = ensure_valid_token(creds_file)
 
         assert result is False
@@ -105,7 +108,7 @@ class TestEnsureValidToken:
     def test_refresh_failure_network_error(self, creds_file: Path) -> None:
         """Network error during refresh should return False."""
         with patch(
-            "jobclaw.auth.token_refresh.httpx.post",
+            "jobagent.auth.token_refresh.httpx.post",
             side_effect=httpx.ConnectError("Connection refused"),
         ):
             result = ensure_valid_token(creds_file)
@@ -143,7 +146,7 @@ class TestEnsureValidToken:
             )
         )
 
-        with patch("jobclaw.auth.token_refresh.httpx.post") as mock_post:
+        with patch("jobagent.auth.token_refresh.httpx.post") as mock_post:
             result = ensure_valid_token(path)
 
         assert result is True

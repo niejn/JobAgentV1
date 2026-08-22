@@ -1,4 +1,4 @@
-"""Tests for jobclaw.auth.cookie_manager — priority logic."""
+"""Tests for jobagent.auth.cookie_manager — priority logic."""
 
 from __future__ import annotations
 
@@ -9,14 +9,17 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from jobclaw.auth.cookie_manager import CookieNotFoundError, get_cookies, inject_cookies
+from jobagent.auth.browser_login import inspect_cookie_providers
+from jobagent.auth.cookie_manager import CookieNotFoundError, get_cookies, inject_cookies
 
 
 @pytest.fixture()
 def tmp_cookie_dir(tmp_path: Path, monkeypatch):
     """Redirect COOKIE_DIR to a temp directory."""
     cookie_dir = tmp_path / "cookies"
-    monkeypatch.setattr("jobclaw.auth.browser_login.COOKIE_DIR", cookie_dir)
+    legacy_dir = tmp_path / "legacy-cookies"
+    monkeypatch.setattr("jobagent.auth.browser_login.COOKIE_DIR", cookie_dir)
+    monkeypatch.setattr("jobagent.auth.browser_login.LEGACY_COOKIE_DIR", legacy_dir)
     return cookie_dir
 
 
@@ -40,7 +43,14 @@ class TestGetCookiesPriority:
         tmp_cookie_dir.mkdir(parents=True, exist_ok=True)
         data = {
             "saved_at": time.time(),
-            "cookies": [{"name": "wt2", "value": "from_file", "domain": ".zhipin.com", "path": "/"}],
+            "cookies": [
+                {
+                    "name": "wt2",
+                    "value": "from_file",
+                    "domain": ".zhipin.com",
+                    "path": "/",
+                }
+            ],
         }
         (tmp_cookie_dir / "boss.json").write_text(json.dumps(data))
 
@@ -70,10 +80,92 @@ class TestGetCookiesPriority:
         assert cookies[0]["value"] == "from_file"
 
     @pytest.mark.asyncio
+    async def test_legacy_cookie_export_is_matched_by_domain_not_filename(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        current_dir = tmp_path / "current"
+        legacy_dir = tmp_path / "legacy"
+        legacy_dir.mkdir()
+        monkeypatch.setattr("jobagent.auth.browser_login.COOKIE_DIR", current_dir)
+        monkeypatch.setattr("jobagent.auth.browser_login.LEGACY_COOKIE_DIR", legacy_dir)
+        exported = {
+            "url": "https://www.zhipin.com",
+            "cookies": [
+                {
+                    "name": "wt2",
+                    "value": "from-domain-export",
+                    "domain": ".zhipin.com",
+                    "path": "/",
+                }
+            ],
+        }
+        (legacy_dir / "browser-export-2026.json").write_text(
+            json.dumps(exported),
+            encoding="utf-8",
+        )
+
+        cookies = await get_cookies("boss", _make_settings())
+
+        assert [cookie["name"] for cookie in cookies] == ["wt2"]
+        migrated = current_dir / "boss.json"
+        assert migrated.is_file()
+        migrated_payload = json.loads(migrated.read_text(encoding="utf-8"))
+        assert migrated_payload["cookies"][0]["value"] == "from-domain-export"
+        assert (legacy_dir / "browser-export-2026.json").is_file()
+
+    def test_provider_inspection_reports_expired_cookie_without_rejecting_file(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        current_dir = tmp_path / "current"
+        legacy_dir = tmp_path / "legacy"
+        legacy_dir.mkdir()
+        monkeypatch.setattr("jobagent.auth.browser_login.COOKIE_DIR", current_dir)
+        monkeypatch.setattr("jobagent.auth.browser_login.LEGACY_COOKIE_DIR", legacy_dir)
+        exported = {
+            "url": "https://www.zhipin.com",
+            "cookies": [
+                {
+                    "name": "wt2",
+                    "value": "secret",
+                    "domain": ".zhipin.com",
+                    "path": "/",
+                    "expirationDate": 1_700_000_000.0,
+                },
+                {
+                    "name": "session-only",
+                    "value": "secret",
+                    "domain": ".zhipin.com",
+                    "path": "/",
+                },
+                {
+                    "name": "wt2",
+                    "value": "older-secret",
+                    "domain": "www.zhipin.com",
+                    "path": "/",
+                    "expirationDate": 1_600_000_000.0,
+                },
+            ],
+        }
+        (legacy_dir / "random.json").write_text(json.dumps(exported), encoding="utf-8")
+
+        statuses = inspect_cookie_providers(now_epoch=1_800_000_000.0)
+
+        boss = next(status for status in statuses if status.platform == "boss")
+        assert boss.matched is True
+        assert boss.cookie_count == 3
+        assert boss.expired_count == 2
+        assert boss.key_cookie_expired is True
+        assert (current_dir / "boss.json").is_file()
+
+    @pytest.mark.asyncio
     async def test_no_cookies_raises(self, tmp_cookie_dir):
         """When no cookies are available, raise CookieNotFoundError."""
         settings = _make_settings()
-        with pytest.raises(CookieNotFoundError, match="jobclaw login"):
+        with pytest.raises(CookieNotFoundError, match="jobagent login"):
             await get_cookies("boss", settings)
 
     @pytest.mark.asyncio
@@ -110,3 +202,49 @@ class TestInjectCookies:
 
         with pytest.raises(CookieNotFoundError):
             await inject_cookies(context, "boss", settings)
+
+    @pytest.mark.asyncio
+    async def test_normalizes_browser_extension_export_for_playwright(
+        self,
+        tmp_cookie_dir: Path,
+    ) -> None:
+        tmp_cookie_dir.mkdir(parents=True, exist_ok=True)
+        exported = {
+            "url": "https://www.zhipin.com",
+            "cookies": [
+                {
+                    "name": "wt2",
+                    "value": "secret",
+                    "domain": ".zhipin.com",
+                    "path": "/",
+                    "sameSite": "unspecified",
+                    "expirationDate": 1_900_000_000.5,
+                    "hostOnly": False,
+                    "session": False,
+                    "storeId": "0",
+                    "httpOnly": True,
+                    "secure": True,
+                }
+            ],
+        }
+        (tmp_cookie_dir / "random-export.json").write_text(
+            json.dumps(exported),
+            encoding="utf-8",
+        )
+        context = AsyncMock()
+
+        await inject_cookies(context, "boss", _make_settings())
+
+        context.add_cookies.assert_awaited_once_with(
+            [
+                {
+                    "name": "wt2",
+                    "value": "secret",
+                    "domain": ".zhipin.com",
+                    "path": "/",
+                    "expires": 1_900_000_000.5,
+                    "httpOnly": True,
+                    "secure": True,
+                }
+            ]
+        )

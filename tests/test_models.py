@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from jobclaw.models import (
+from jobagent.models import (
     Application,
     ApplicationStatus,
     Job,

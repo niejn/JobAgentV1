@@ -1,0 +1,6 @@
+# JobAgent startup inputs. Paths are relative to this file.
+job_search_profile: search.example.yaml
+# UTF-8 Markdown/text resumes are loaded automatically. PDF parsing is a later phase.
+resume: ../resume-v5-四大项目版.md
+# Optional: add a user-confirmed structured background after extracting it from the resume.
+# candidate_background: background.example.yaml
