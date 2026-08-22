@@ -40,6 +40,7 @@ from jobagent.tools import (
     CandidateProfileManager,
     InterviewEvidenceDiscovery,
     JobDescriptionReader,
+    SharedUrlSaver,
     UserDocumentReader,
     build_boss_job_discovery_tool,
     build_import_candidate_resume_tool,
@@ -48,6 +49,7 @@ from jobagent.tools import (
     build_save_candidate_background_tool,
     build_save_job_analysis_tool,
     build_save_job_search_profile_tool,
+    build_shared_url_save_tool,
     build_update_application_state_tool,
     build_user_document_tool,
 )
@@ -514,6 +516,8 @@ def _merge_streamed_text(accumulated: str, chunk: str) -> tuple[str, str]:
 
 
 def _tool_start_status(tool_name: str) -> str:
+    if tool_name == "save_shared_url":
+        return "正在读取并保存分享链接中的资料…"
     if tool_name == "discover_boss_jobs":
         return "正在 Boss 搜索并筛选岗位…"
     if tool_name == "discover_interview_evidence":
@@ -584,6 +588,7 @@ def build_job_agent(
             build_interview_evidence_tool(
                 InterviewEvidenceDiscovery(settings, candidate_context=effective_context)
             ),
+            build_shared_url_save_tool(SharedUrlSaver(settings)),
             build_job_description_tool(
                 JobDescriptionReader(settings.jobagent_workspace_root)
             ),

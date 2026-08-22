@@ -524,6 +524,9 @@ def test_main_agent_prompt_contains_critical_contracts() -> None:
     assert "阶段性策略" in SYSTEM_PROMPT
     assert "跳过小红书内推" in SYSTEM_PROMPT
     assert "只追问缺失项" in SYSTEM_PROMPT
+    assert "save_shared_url" in SYSTEM_PROMPT
+    assert "不得先追问公司、岗位" in SYSTEM_PROMPT
+    assert "完整查询字符串" in SYSTEM_PROMPT
 
 
 def test_default_agent_registers_safe_user_document_reader(tmp_path) -> None:
@@ -544,4 +547,5 @@ def test_default_agent_registers_safe_user_document_reader(tmp_path) -> None:
         "save_job_analysis",
         "update_job_application_state",
         "discover_boss_jobs",
+        "save_shared_url",
     } <= tool_names
