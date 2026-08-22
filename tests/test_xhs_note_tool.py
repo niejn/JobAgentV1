@@ -1,6 +1,5 @@
 """Tests for saving one user-supplied URL through chat."""
 
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -31,7 +30,6 @@ def test_default_agent_registers_shared_url_saver(tmp_path) -> None:
 
     assert "save_shared_url" in {tool.name for tool in agent._tools}
     assert "extract_shared_url" in {tool.name for tool in agent._tools}
-    assert "export_shared_url_markdown" in {tool.name for tool in agent._tools}
 
 
 class FakeXhsSaver:
@@ -409,36 +407,3 @@ async def test_xhs_content_reader_materializes_and_reloads_body_and_image_ocr(tm
     assert first["body_text"] == "正文：LangGraph 生产经验"
     assert "OCR image_0" in first["image_ocr_text"]
     assert second["extracted_text"] == first["extracted_text"]
-
-
-@pytest.mark.asyncio
-async def test_xhs_saver_exports_extracted_content_to_controlled_markdown_path(tmp_path) -> None:
-    class FakeContentReader:
-        async def extract_saved(self, url: str) -> dict[str, Any]:
-            return {
-                "status": "completed",
-                "title": "LangGraph 生产落地的 5 个关键坑",
-                "note_id": "note-export-1",
-                "source_url": url,
-                "body_text": "正文为空",
-                "image_ocr_text": "坑一：State 字段并发覆盖",
-                "image_count": 32,
-                "image_ocr_count": 32,
-            }
-
-    saver = XhsNoteSaver(
-        Settings(_env_file=None, jobagent_artifact_dir=tmp_path),
-        content_reader=FakeContentReader(),  # type: ignore[arg-type]
-    )
-
-    result = await saver.export_markdown(
-        XhsNoteSaveRequest(
-            url="https://www.xiaohongshu.com/discovery/item/note-export-1"
-        )
-    )
-
-    path = Path(result["file_path"])
-    assert result["status"] == "completed"
-    assert path.suffix == ".markdown"
-    assert path.parent == (tmp_path / "shared_urls").resolve()
-    assert "坑一：State 字段并发覆盖" in path.read_text(encoding="utf-8")

@@ -68,9 +68,10 @@ Tool。信息足够时直接推进，不反复确认，也不要一次提出大�
 `read_user_document`，不要猜测 `detail.txt`、目录名或工作区路径。该 Tool 会返回正文和已完成的
 图片 OCR；如果 OCR 正在等待本地引擎或来源快照不存在，说明实际状态并停止编造。
 
-用户要求把提取内容写入、导出或保存为 Markdown 时，调用 `export_shared_url_markdown`，不要调用
-候选人文档 Tool，也不要自行拼接文件路径。Tool 会返回受控产物的确切 `file_path`，应在最终答复中
-原样告诉用户。
+用户要求把提取内容写入、导出或保存为 Markdown 时，使用 DeepAgents 内置的 `write_file`，不要调用
+候选人文档 Tool，也不要自行拼接工作区外路径。文件只能写入受控文件系统根目录下的
+`/shared_urls/`，该虚拟路径对应 `JOBAGENT_ARTIFACT_DIR/shared_urls/`；写入成功后应把 Tool 返回的
+路径原样告诉用户。
 
 用户明确说出工作区内的 `.txt` 或 `.md` JD 文件名时，使用 `read_job_description`；用户明确说出
 工作区内的 `.txt` 或 `.md` 简历并要求将它作为基础简历时，使用 `import_candidate_resume` 导入并
