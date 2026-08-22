@@ -10,13 +10,19 @@ from jobagent.agent import build_job_agent
 from jobagent.config import Settings
 from jobagent.interview.ocr import ImageContentExtraction
 from jobagent.interview.snapshot import SnapshotMaterializer
-from jobagent.scraper.xhs_backend import DownloadedXhsNote, XhsAuthenticationError, XhsFetchedNote
+from jobagent.scraper.xhs_backend import (
+    DownloadedXhsNote,
+    XhsAuthenticationError,
+    XhsFetchedNote,
+    XhsNoteReference,
+)
 from jobagent.tools.shared_url import (
     SharedUrlSaver,
     SharedUrlSaveRequest,
     WebPageSaver,
     build_shared_url_save_tool,
 )
+from jobagent.tools.xhs_author import XhsAuthorPostsBrowser, XhsAuthorPostsRequest
 from jobagent.tools.xhs_note import XhsContentReader, XhsNoteSaver, XhsNoteSaveRequest
 
 
@@ -35,6 +41,7 @@ def test_default_agent_registers_shared_url_saver(tmp_path) -> None:
 
     assert "save_shared_url" in {tool.name for tool in agent._tools}
     assert "extract_shared_url" in {tool.name for tool in agent._tools}
+    assert "browse_xhs_author_posts" in {tool.name for tool in agent._tools}
 
 
 class FakeXhsSaver:
@@ -412,3 +419,51 @@ async def test_xhs_content_reader_materializes_and_reloads_body_and_image_ocr(tm
     assert first["body_text"] == "正文：LangGraph 生产经验"
     assert "OCR image_0" in first["image_ocr_text"]
     assert second["extracted_text"] == first["extracted_text"]
+
+
+@pytest.mark.asyncio
+async def test_xhs_author_browser_lists_and_filters_public_posts(tmp_path) -> None:
+    note = XhsFetchedNote(
+        note_id="author-note-1",
+        url="https://www.xiaohongshu.com/explore/author-note-1",
+        title="LangGraph 学习笔记",
+        body="StateGraph 的生产实践",
+        author_id="5c0645200050148e8",
+        author_name="作者",
+        image_urls=(),
+        tags=("LangGraph",),
+        published_at="2026-08-20 12:00:00",
+        normalized={},
+        raw_response={},
+    )
+
+    class FakeBackend:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def list_user_notes(self, user_id: str, *, limit: int | None = None):
+            assert user_id == "5c0645200050148e"
+            return [XhsNoteReference(note.note_id, note.url, {})]
+
+        async def fetch_note(self, url: str):
+            return note
+
+    browser = XhsAuthorPostsBrowser(
+        Settings(_env_file=None),
+        backend_factory=lambda settings: FakeBackend(),
+    )
+
+    result = await browser.browse(
+        XhsAuthorPostsRequest(
+            profile_url="https://www.xiaohongshu.com/user/profile/5c0645200050148e",
+            keyword="LangGraph",
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert result["author_id"] == "5c0645200050148e"
+    assert result["count"] == 1
+    assert result["posts"][0]["title"] == "LangGraph 学习笔记"
