@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from langchain_core.messages import (
     HumanMessage,
     RemoveMessage,
     SystemMessage,
+    ToolMessage,
 )
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -158,6 +160,7 @@ class JobAgent:
         streamed_text: dict[str, str] = {}
         announced_tool_calls: set[str] = set()
         saw_tool_completion = False
+        deterministic_tool_answer = ""
         last_finish_reason: str | None = None
         async for part in graph.astream(
             {"messages": [{"role": "user", "content": message}]},
@@ -188,6 +191,12 @@ class JobAgent:
                                 )
                     elif node == "tools":
                         saw_tool_completion = True
+                        if isinstance(update, dict):
+                            for tool_message in update.get("messages", []):
+                                deterministic_tool_answer = (
+                                    _deterministic_tool_answer(tool_message)
+                                    or deterministic_tool_answer
+                                )
                         yield AgentStreamEvent(
                             "status",
                             "资料处理完成，正在生成回答…",
@@ -226,9 +235,12 @@ class JobAgent:
                 else "模型未生成最终答复，正在自动恢复…"
             )
             yield AgentStreamEvent("status", status)
-            recovered = await self._recover_final_answer(graph, thread_id)
-            if recovered:
-                yield AgentStreamEvent("token", recovered)
+            if deterministic_tool_answer:
+                yield AgentStreamEvent("token", deterministic_tool_answer)
+            else:
+                recovered = await self._recover_final_answer(graph, thread_id)
+                if recovered:
+                    yield AgentStreamEvent("token", recovered)
         yield AgentStreamEvent("done", "")
 
     async def _recover_final_answer(self, graph: Any, thread_id: str) -> str:
@@ -443,6 +455,27 @@ def _visible_text(message: Any) -> str:
         )
     content = getattr(message, "content", None)
     return content if isinstance(content, str) else ""
+
+
+def _deterministic_tool_answer(message: Any) -> str:
+    """Return a safe final answer for tool results whose output is already definitive."""
+
+    if not isinstance(message, ToolMessage):
+        return ""
+    name = str(getattr(message, "name", ""))
+    if name != "export_shared_url_markdown":
+        return ""
+    content = _visible_text(message)
+    try:
+        payload = json.loads(content)
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(payload, dict) or payload.get("status") != "completed":
+        return ""
+    file_path = str(payload.get("file_path") or "").strip()
+    if not file_path:
+        return ""
+    return f"Markdown 文件已生成：{file_path}"
 
 
 def _is_history_summary(message: BaseMessage) -> bool:

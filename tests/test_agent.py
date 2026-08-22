@@ -11,13 +11,14 @@ from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
     SystemMessage,
+    ToolMessage,
 )
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool, tool
 from pydantic import ValidationError
 
-from jobagent.agent import SYSTEM_PROMPT, build_job_agent
+from jobagent.agent import SYSTEM_PROMPT, _deterministic_tool_answer, build_job_agent
 from jobagent.config import Settings
 from jobagent.profile import SQLiteCandidateProfileStore
 
@@ -529,6 +530,18 @@ def test_main_agent_prompt_contains_critical_contracts() -> None:
     assert "export_shared_url_markdown" in SYSTEM_PROMPT
     assert "不要调用" in SYSTEM_PROMPT
     assert "不得先追问公司、岗位" in SYSTEM_PROMPT
+
+
+def test_export_tool_result_has_deterministic_file_path_fallback() -> None:
+    message = ToolMessage(
+        name="export_shared_url_markdown",
+        tool_call_id="export-1",
+        content='{"status":"completed","file_path":"data/journeys/shared_urls/post.markdown"}',
+    )
+
+    assert _deterministic_tool_answer(message) == (
+        "Markdown 文件已生成：data/journeys/shared_urls/post.markdown"
+    )
     assert "完整查询字符串" in SYSTEM_PROMPT
 
 
