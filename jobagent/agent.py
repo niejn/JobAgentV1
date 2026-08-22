@@ -48,6 +48,7 @@ from jobagent.tools import (
     JobDescriptionReader,
     SharedUrlSaver,
     UserDocumentReader,
+    XhsAuthorPostsBrowser,
     build_boss_job_discovery_tool,
     build_import_candidate_resume_tool,
     build_interview_evidence_tool,
@@ -59,6 +60,7 @@ from jobagent.tools import (
     build_shared_url_save_tool,
     build_update_application_state_tool,
     build_user_document_tool,
+    build_xhs_author_posts_tool,
 )
 
 # Backward-compatible import for callers that referenced the old constant.
@@ -693,6 +695,8 @@ def _tool_start_status(tool_name: str) -> str:
         return "正在读取并保存分享链接中的资料…"
     if tool_name == "extract_shared_url":
         return "正在读取已保存内容并执行图片 OCR…"
+    if tool_name == "browse_xhs_author_posts":
+        return "正在浏览作者公开帖子并筛选候选内容…"
     if tool_name == "discover_boss_jobs":
         return "正在 Boss 搜索并筛选岗位…"
     if tool_name == "discover_interview_evidence":
@@ -766,6 +770,7 @@ def build_job_agent(
             ),
             build_shared_url_save_tool(shared_url_saver),
             build_shared_url_extract_tool(shared_url_saver),
+            build_xhs_author_posts_tool(XhsAuthorPostsBrowser(settings)),
             build_job_description_tool(
                 JobDescriptionReader(settings.jobagent_workspace_root)
             ),

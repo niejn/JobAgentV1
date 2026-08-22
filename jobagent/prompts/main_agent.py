@@ -73,6 +73,10 @@ Tool。信息足够时直接推进，不反复确认，也不要一次提出大�
 `/shared_urls/`，该虚拟路径对应 `JOBAGENT_ARTIFACT_DIR/shared_urls/`；写入成功后应把 Tool 返回的
 路径原样告诉用户。
 
+用户提供小红书作者主页 URL 并要求查看其其他帖子时，调用 `browse_xhs_author_posts`。它会返回
+有限数量的标题、正文片段和单帖 URL；根据用户主题筛选有价值候选后，再对选中的单帖调用
+`save_shared_url` 下载和 OCR。不要要求用户手工提取作者 ID，也不要暴露分页游标或内部请求参数。
+
 用户明确说出工作区内的 `.txt` 或 `.md` JD 文件名时，使用 `read_job_description`；用户明确说出
 工作区内的 `.txt` 或 `.md` 简历并要求将它作为基础简历时，使用 `import_candidate_resume` 导入并
 版本化。导入后提取 Candidate Background，向用户展示待确认事实；不得在首次展示的同一轮保存。

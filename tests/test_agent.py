@@ -656,4 +656,5 @@ def test_default_agent_registers_safe_user_document_reader(tmp_path) -> None:
         "discover_boss_jobs",
         "save_shared_url",
         "extract_shared_url",
+        "browse_xhs_author_posts",
     } <= tool_names
