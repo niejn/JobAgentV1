@@ -20,13 +20,18 @@ from jobagent.tools.shared_url import (
 from jobagent.tools.xhs_note import XhsContentReader, XhsNoteSaver, XhsNoteSaveRequest
 
 
+class ToolBindableFakeListChatModel(FakeListChatModel):
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+
 def test_default_agent_registers_shared_url_saver(tmp_path) -> None:
     settings = Settings(
         _env_file=None,
         jobagent_checkpoint_db=tmp_path / "checkpoints.db",
     )
 
-    agent = build_job_agent(settings, model=FakeListChatModel(responses=["ok"]))
+    agent = build_job_agent(settings, model=ToolBindableFakeListChatModel(responses=["ok"]))
 
     assert "save_shared_url" in {tool.name for tool in agent._tools}
     assert "extract_shared_url" in {tool.name for tool in agent._tools}
