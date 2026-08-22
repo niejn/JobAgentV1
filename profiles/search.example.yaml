@@ -1,0 +1,20 @@
+desired_roles:
+  - AI Agent Engineer
+  - Backend Engineer
+preferred_locations:
+  - Beijing
+  - Shanghai
+remote_ok: true
+preferred_industries:
+  - AI
+preferred_company_sizes:
+  - growth
+  - large
+preferred_company_traits:
+  - product-driven
+  - engineering culture
+preferred_job_traits:
+  - AI Agent platform
+  - hands-on individual contributor
+constraints:
+  - Do not apply without human confirmation

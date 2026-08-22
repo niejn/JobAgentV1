@@ -1,14 +1,15 @@
-"""Tests for jobclaw.models.streaming — SSE streaming layer."""
+"""Tests for jobagent.models.streaming — SSE streaming layer."""
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
-from jobclaw.models.streaming import (
+from jobagent.models.streaming import (
+    _OAUTH_BETAS,
     StreamContext,
     StreamOptions,
     UnifiedStreamer,
-    _OAUTH_BETAS,
     is_oauth_token,
 )
 
@@ -59,5 +60,5 @@ async def test_stream_non_retryable_raises() -> None:
         max_retries=1,
     )
 
-    with pytest.raises(Exception):
+    with pytest.raises(httpx.HTTPError):
         await streamer.stream(ctx, opts)

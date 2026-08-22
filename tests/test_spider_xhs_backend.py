@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from jobclaw.config import Settings
-from jobclaw.scraper.xhs_backend import (
+from jobagent.config import Settings
+from jobagent.scraper.xhs_backend import (
     SpiderXhsBackend,
     SpiderXhsBindings,
     XhsAuthenticationError,
@@ -32,6 +32,7 @@ class FakeApi:
     def __init__(self, auth: FakeAuth) -> None:
         self.auth = auth
         self.http = FakeHttpClient()
+        self.detail_calls = 0
 
     def bootstrap(self) -> FakeApi:
         self.bootstrapped = True
@@ -48,6 +49,8 @@ class FakeApi:
         assert require_num == 2
         assert sort_type_choice == 0
         assert note_type == 2
+        self.http.get("https://example.com/search?page=1")
+        self.http.get("https://example.com/search?page=2")
         return (
             True,
             "success",
@@ -63,6 +66,8 @@ class FakeApi:
         )
 
     def get_note_info(self, url: str) -> tuple[bool, str, dict[str, Any]]:
+        self.detail_calls += 1
+        self.http.post("https://example.com/note-detail")
         return (
             True,
             "success",
@@ -131,6 +136,15 @@ class FakeHttpClient:
     def close(self) -> None:
         self.closed = True
 
+    def get(self, url: str, **kwargs: Any) -> None:
+        return None
+
+    def post(self, url: str, **kwargs: Any) -> None:
+        return None
+
+    def put(self, url: str, **kwargs: Any) -> None:
+        return None
+
 
 def fake_handle_note_info(item: dict[str, Any]) -> dict[str, Any]:
     card = item["note_card"]
@@ -152,14 +166,36 @@ def fake_handle_note_info(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def fake_download_note(note: dict[str, Any], path: str, save_choice: str) -> str:
-    assert save_choice == "media-image"
+    assert save_choice == "metadata"
     note_dir = Path(path) / note["note_id"]
     note_dir.mkdir(parents=True)
     (note_dir / "detail.txt").write_text(note["desc"], encoding="utf-8")
     (note_dir / "info.json").write_text(json.dumps(note), encoding="utf-8")
-    (note_dir / "image_0.jpg").write_bytes(b"image-0")
-    (note_dir / "image_1.jpg").write_bytes(b"image-1")
     return str(note_dir)
+
+
+def fake_download_media(path: str, name: str, url: str, media_type: str) -> None:
+    assert media_type == "image"
+    assert url.startswith("https://example.com/")
+    (Path(path) / f"{name}.jpg").write_bytes(name.encode())
+
+
+class RecordingBlockingRateLimiter:
+    def __init__(self, label: str, events: list[str]) -> None:
+        self._label = label
+        self._events = events
+
+    def acquire(self) -> None:
+        self._events.append(self._label)
+
+
+class RecordingAsyncRateLimiter:
+    def __init__(self, label: str, events: list[str]) -> None:
+        self._label = label
+        self._events = events
+
+    async def acquire(self) -> None:
+        self._events.append(self._label)
 
 
 @pytest.fixture()
@@ -169,6 +205,7 @@ def bindings() -> SpiderXhsBindings:
         api_class=FakeApi,
         handle_note_info=fake_handle_note_info,
         download_note=fake_download_note,
+        download_media=fake_download_media,
     )
 
 
@@ -178,6 +215,10 @@ def settings(tmp_path: Path) -> Settings:
         xhs_cookie_header="a1=a-value; web_session=session-value",
         spider_xhs_path=tmp_path,
         xhs_download_dir=tmp_path / "downloads",
+        xhs_api_rate_requests=1_000,
+        xhs_api_rate_period_seconds=1,
+        xhs_media_rate_requests=1_000,
+        xhs_media_rate_period_seconds=1,
     )
 
 
@@ -276,6 +317,44 @@ async def test_download_note_reuses_spider_normalizer_and_downloader(
     assert json.loads(result.raw_response_path.read_text(encoding="utf-8"))["success"] is True
 
 
+@pytest.mark.asyncio
+async def test_download_note_can_reuse_already_fetched_detail(
+    settings: Settings,
+    bindings: SpiderXhsBindings,
+) -> None:
+    backend = SpiderXhsBackend(settings, bindings=bindings)
+    await backend.start()
+    url = "https://www.xiaohongshu.com/explore/note-1?xsec_token=token"
+
+    fetched = await backend.fetch_note(url)
+    result = await backend.download_note(url, fetched_note=fetched)
+
+    assert result.note is fetched
+    assert backend._api.detail_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_backend_rate_limits_each_api_call_and_each_image_download(
+    settings: Settings,
+    bindings: SpiderXhsBindings,
+) -> None:
+    events: list[str] = []
+    backend = SpiderXhsBackend(
+        settings,
+        bindings=bindings,
+        api_limiter=RecordingBlockingRateLimiter("api", events),
+        media_limiter=RecordingAsyncRateLimiter("media", events),
+    )
+    await backend.start()
+
+    await backend.search_notes("字节 后端 面经", limit=2)
+    await backend.download_note(
+        "https://www.xiaohongshu.com/explore/note-1?xsec_token=token"
+    )
+
+    assert events == ["api", "api", "api", "api", "media", "media"]
+
+
 def test_real_spider_library_bindings_can_be_loaded() -> None:
     spider_path = Path(r"D:\mashibing\xiaohongshu_crawler\Spider_XHS")
     if not spider_path.exists():
@@ -287,3 +366,4 @@ def test_real_spider_library_bindings_can_be_loaded() -> None:
     assert real_bindings.api_class.__name__ == "XHS_Apis"
     assert real_bindings.handle_note_info.__name__ == "handle_note_info"
     assert real_bindings.download_note.__name__ == "download_note"
+    assert real_bindings.download_media.__name__ == "download_media"

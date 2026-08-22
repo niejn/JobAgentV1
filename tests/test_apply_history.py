@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from jobclaw.applier.history import ApplyHistory
+from jobagent.applier.history import ApplyHistory
 
 
 @pytest.fixture()

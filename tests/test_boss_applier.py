@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from jobclaw.applier.boss import BossApplier
-from jobclaw.applier.history import ApplyHistory
-from jobclaw.config import Settings
-from jobclaw.models import ApplicationStatus, Job, JobSource, Profile
+from jobagent.applier.boss import BossApplier
+from jobagent.applier.history import ApplyHistory
+from jobagent.config import Settings
+from jobagent.models import ApplicationStatus, Job, JobSource, Profile
 
 
 @pytest.fixture()
@@ -22,7 +21,7 @@ def settings() -> Settings:
         boss_apply_delay_min=0.5,
         boss_apply_delay_max=1.0,
         boss_daily_limit=100,
-        jobclaw_headless=True,
+        jobagent_headless=True,
     )
 
 
@@ -84,11 +83,20 @@ def _make_mock_page(
         # 继续沟通 must match before 立即沟通 — check text precisely
         if "继续沟通" in sel:
             return make_el(True) if has_continue_btn else None
-        if ("立即沟通" in sel or "startchat" in sel or "job_detail_chat" in sel or "job-op" in sel) and has_start_btn:
+        start_selector = any(
+            marker in sel for marker in ("立即沟通", "startchat", "job_detail_chat", "job-op")
+        )
+        if start_selector and has_start_btn:
             return make_el(True)
-        if ("chat-input" in sel or "chat-editor" in sel or "edit-area" in sel or "msg" in sel) and has_chat_input:
+        input_selector = any(
+            marker in sel for marker in ("chat-input", "chat-editor", "edit-area", "msg")
+        )
+        if input_selector and has_chat_input:
             return make_el(True)
-        if ("btn-send" in sel or "发送" in sel or "submit" in sel or "btn-v2" in sel) and has_send_btn:
+        send_selector = any(
+            marker in sel for marker in ("btn-send", "发送", "submit", "btn-v2")
+        )
+        if send_selector and has_send_btn:
             return make_el(True)
         return None
 
@@ -111,7 +119,7 @@ class TestBossApplier:
         page = _make_mock_page()
         applier = BossApplier(settings, history=history)
 
-        with patch("jobclaw.applier.boss.asyncio.sleep", new=AsyncMock()):
+        with patch("jobagent.applier.boss.asyncio.sleep", new=AsyncMock()):
             result = await applier._do_apply(page, job, profile, 0.0)
 
         assert result.status == ApplicationStatus.SUBMITTED
@@ -145,7 +153,7 @@ class TestBossApplier:
         page = _make_mock_page(has_continue_btn=True, has_start_btn=False)
         applier = BossApplier(settings, history=history)
 
-        with patch("jobclaw.applier.boss.asyncio.sleep", new=AsyncMock()):
+        with patch("jobagent.applier.boss.asyncio.sleep", new=AsyncMock()):
             result = await applier._do_apply(page, job, profile, 0.0)
 
         assert result.status == ApplicationStatus.SUBMITTED
@@ -159,7 +167,7 @@ class TestBossApplier:
         page = _make_mock_page(has_captcha=True)
         applier = BossApplier(settings, history=history)
 
-        with patch("jobclaw.applier.boss.asyncio.sleep", new=AsyncMock()):
+        with patch("jobagent.applier.boss.asyncio.sleep", new=AsyncMock()):
             result = await applier._do_apply(page, job, profile, 0.0)
 
         assert result.status == ApplicationStatus.CAPTCHA_BLOCKED
@@ -189,7 +197,7 @@ class TestBossApplier:
         page = _make_mock_page(body_text="今日沟通人数已达上限，明天再来")
         applier = BossApplier(settings, history=history)
 
-        with patch("jobclaw.applier.boss.asyncio.sleep", new=AsyncMock()):
+        with patch("jobagent.applier.boss.asyncio.sleep", new=AsyncMock()):
             result = await applier._do_apply(page, job, profile, 0.0)
         assert result.status == ApplicationStatus.FAILED
         assert result.extra["reason"] == "daily_limit"
@@ -202,7 +210,7 @@ class TestBossApplier:
         page = _make_mock_page(has_start_btn=False)
         applier = BossApplier(settings, history=history)
 
-        with patch("jobclaw.applier.boss.asyncio.sleep", new=AsyncMock()):
+        with patch("jobagent.applier.boss.asyncio.sleep", new=AsyncMock()):
             result = await applier._do_apply(page, job, profile, 0.0)
         assert result.status == ApplicationStatus.FAILED
         assert result.extra["reason"] == "button_not_found"
@@ -216,7 +224,7 @@ class TestBossApplier:
         page = _make_mock_page()
         applier = BossApplier(settings, history=history)
 
-        with patch("jobclaw.applier.boss.asyncio.sleep", new=AsyncMock()):
+        with patch("jobagent.applier.boss.asyncio.sleep", new=AsyncMock()):
             result = await applier._do_apply(page, job, profile, 0.0)
         assert result.status == ApplicationStatus.SUBMITTED
 

@@ -8,13 +8,13 @@
 \____/\____/_.___/\____/_/\__,_/ |__/|__/
 ```
 
-# JobClaw — AI 帮你投简历，你只管躺平
+# JobAgent — AI 帮你投简历，你只管躺平
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./CONTRIBUTING.md)
 
-> **一句话说清楚：** JobClaw 是一个开源的 AI 求职 Agent——自动抓岗位、用大模型帮你匹配、一键批量投递，投完还给你发 Telegram/Discord 消息汇报。  
+> **一句话说清楚：** JobAgent 是一个开源的 AI 求职 Agent——自动抓岗位、用大模型帮你匹配、一键批量投递，投完还给你发 Telegram/Discord 消息汇报。
 > 你要做的，就是写好简历，然后等面试通知。
 
 ---
@@ -34,9 +34,9 @@
 
 ---
 
-## 🦀 JobClaw 帮你做什么？
+## 🦀 JobAgent 帮你做什么？
 
-| 步骤 | 人工操作 | JobClaw |
+| 步骤 | 人工操作 | JobAgent |
 | --- | --- | --- |
 | 🔍 搜岗位 | 多平台来回切，关键词一个个试 | **自动抓取** Boss直聘 + LinkedIn |
 | 📖 看 JD | 一个个点开，人肉阅读判断匹不匹配 | **LLM 智能匹配**，打分 + 给出匹配理由 |
@@ -45,7 +45,7 @@
 | 🧹 过滤垃圾 | 全靠直觉，经常投到僵尸岗 | **HR 活跃度过滤**，跳过僵尸岗 |
 | 📊 跟进状态 | Excel？备忘录？全靠脑子？ | **Telegram / Discord 实时通知** |
 
-**简单说：你配好简历和偏好，JobClaw 帮你 24 小时无休投递。**
+**简单说：你配好简历和偏好，JobAgent 帮你 24 小时无休投递。**
 
 ---
 
@@ -55,19 +55,13 @@
 
 不是简单的关键词匹配，而是用大模型理解你的背景和岗位要求，给出**匹配分数 + 匹配理由**。
 
-**三种 LLM 认证方式（优先级递减）：**
-
-| 优先级 | 方式 | 费用 | 说明 |
-|--------|------|------|------|
-| 🥇 | **Claude OAuth** | **免费** | 白嫖 Claude Code 订阅额度，零 API 费用！ |
-| 🥈 | Anthropic API Key | 按量付费 | 直接调用 Claude API |
-| 🥉 | OpenAI API Key | 按量付费 | 调用 GPT 系列模型 |
-
-> 💡 **省钱秘籍：** 如果你有 Claude Code 订阅（$20/月），JobClaw 可以直接复用你的 OAuth token 调用 Claude，**不额外花一分钱**。Token 过期会自动刷新，完全无感。
+**第一版统一使用 OpenAI-compatible 接口：** 配置 `OPENAI_BASE_URL`、`OPENAI_API_KEY`
+和 `JOBAGENT_LLM_MODEL`，即可接入 DeepSeek、火山方舟、OpenAI 等兼容服务。Claude
+OAuth/Anthropic 列入后期能力，不进入第一版运行路径。
 
 ### 📮 Boss直聘自动投递（核心卖点）
 
-这不是简单的 API 调用——Boss直聘没有公开投递 API。JobClaw 用 **Playwright 模拟真人浏览器操作**，完整复现投递流程：
+这不是简单的 API 调用——Boss直聘没有公开投递 API。JobAgent 用 **Playwright 模拟真人浏览器操作**，完整复现投递流程：
 
 1. 打开岗位页面 → 点击"立即沟通"
 2. 输入打招呼消息 → 点击发送
@@ -91,8 +85,8 @@
 
 ### 🍪 Cookie 管理
 
-- `jobclaw login` — 弹出浏览器，交互式登录，cookie 自动保存到 `~/.jobclaw/cookies/`
-- `jobclaw login --check` — 检查已保存的 cookie 是否还有效
+- `jobagent login` — 弹出浏览器，交互式登录，cookie 自动保存到 `~/.jobagent/cookies/`
+- `jobagent login --check` — 检查已保存的 cookie 是否还有效
 - **优先级**：`.env` 中配置的 cookie > 持久化文件 > 提示你重新 login
 - 支持 Boss直聘 + LinkedIn
 
@@ -110,8 +104,8 @@
 ### 1. 克隆 & 安装
 
 ```bash
-git clone https://github.com/VPC-byte/jobclaw.git
-cd jobclaw
+git clone https://github.com/VPC-byte/jobagent.git
+cd jobagent
 pip install -e .
 ```
 
@@ -125,16 +119,16 @@ playwright install chromium
 
 ```bash
 # 登录 Boss直聘（弹出浏览器，手动扫码/登录）
-jobclaw login --platform boss
+jobagent login --platform boss
 
 # 登录 LinkedIn
-jobclaw login --platform linkedin
+jobagent login --platform linkedin
 
 # 一次性登录所有平台
-jobclaw login --platform all
+jobagent login --platform all
 
 # 检查 cookie 是否有效
-jobclaw login --platform boss --check
+jobagent login --platform boss --check
 ```
 
 ### 4. 配置环境变量
@@ -145,78 +139,83 @@ cp .env.example .env
 
 编辑 `.env`，根据需要填写（详见下方[配置说明](#-配置说明)）。
 
-### 5. 填写求职画像
+### 5. 配置 Agent 启动上下文
 
 ```bash
-cp profiles/example.yaml profiles/me.yaml
+cp profiles/search.example.yaml profiles/search.yaml
+cp profiles/background.example.yaml profiles/background.yaml
+cp profiles/agent.example.yaml profiles/agent.yaml
 ```
 
-编辑 `profiles/me.yaml`——你的技能、期望薪资、偏好城市等。
+`search.yaml` 是期望岗位、城市和约束；`background.yaml` 是从简历提取并由你确认的经历、
+项目和技能。两者不是同一种 Profile。`agent.yaml` 只引用它们；第一阶段暂不自动解析原始简历。
 
 ### 6. 开跑！
 
 ```bash
-# 完整流程：抓取 → 匹配 → 投递 → 通知
-jobclaw run --profile profiles/me.yaml --query "Python 工程师"
+# 启动单 Agent：自然语言描述公司、岗位和 JD
+jobagent chat --config profiles/agent.yaml
 ```
 
-跑起来之后去喝杯咖啡，等 Telegram 通知就行 ☕
+例如输入“帮我准备字节跳动北京后端岗位的面试，JD 是……”。Agent 会动态检索近期小红书
+面经，保存正文和图片，执行 OCR 与证据准入，并生成 Markdown + JSON 准备包。第一阶段是
+只读研究流程，不会自动评论、私信、发送简历或投递。
 
 ---
 
 ## 🔧 CLI 命令全集
 
-### `jobclaw login` — 登录平台
+### `jobagent login` — 登录平台
 
 ```bash
 # 登录 Boss直聘
-jobclaw login --platform boss
+jobagent login --platform boss
 
 # 登录 LinkedIn
-jobclaw login --platform linkedin
+jobagent login --platform linkedin
 
 # 登录所有支持的平台
-jobclaw login --platform all
+jobagent login --platform all
 
 # 设置登录超时（分钟）
-jobclaw login --platform boss --timeout 5
+jobagent login --platform boss --timeout 5
 
 # 检查 cookie 有效性（不弹浏览器）
-jobclaw login --platform boss --check
+jobagent login --platform boss --check
 ```
 
-### `jobclaw scrape` — 只抓取，不投递
+### `jobagent scrape` — 只抓取，不投递
 
 ```bash
 # 抓取 Boss直聘上的岗位
-jobclaw scrape --platform boss --query "后端工程师" --limit 20
+jobagent scrape --platform boss --query "后端工程师" --limit 20
 
 # 抓取 LinkedIn
-jobclaw scrape --platform linkedin --query "AI Engineer" --limit 10
+jobagent scrape --platform linkedin --query "AI Engineer" --limit 10
 
 # 全平台抓取
-jobclaw scrape --platform all --query "Python 开发" --limit 30
+jobagent scrape --platform all --query "Python 开发" --limit 30
 ```
 
 > 💡 先用 `scrape` 看看抓到的岗位质量，再决定要不要跑完整流程。
 
-### `jobclaw run` — 完整流程
+### `jobagent run` — 完整流程
 
 ```bash
 # 基础用法
-jobclaw run --profile profiles/me.yaml --query "AI 工程师"
+jobagent run --profile profiles/me.yaml --query "AI 工程师"
 
 # 指定平台 + 限制数量
-jobclaw run --platform boss --profile profiles/me.yaml --query "大模型工程师" --limit 20
+jobagent run --platform boss --profile profiles/me.yaml --query "大模型工程师" --limit 20
 
 # 全平台
-jobclaw run --platform all --profile profiles/me.yaml --query "后端开发" --limit 50
+jobagent run --platform all --profile profiles/me.yaml --query "后端开发" --limit 50
 ```
 
-### `jobclaw validate-profile` — 校验画像文件
+### `jobagent validate-profile` — 校验画像文件
 
 ```bash
-jobclaw validate-profile --profile profiles/me.yaml
+jobagent validate-profile --profile profiles/me.yaml
 ```
 
 确认你的 YAML 格式没问题再跑，避免跑到一半报错。
@@ -230,17 +229,20 @@ jobclaw validate-profile --profile profiles/me.yaml
 | 变量 | 必填 | 默认值 | 说明 |
 |------|------|--------|------|
 | **核心运行时** | | | |
-| `JOBCLAW_ENV` | 否 | `development` | 运行环境 |
-| `JOBCLAW_LOG_LEVEL` | 否 | `INFO` | 日志级别 |
-| `JOBCLAW_HEADLESS` | 否 | `true` | 浏览器是否无头模式（调试时设 `false` 看操作过程） |
-| `JOBCLAW_MAX_JOBS` | 否 | `30` | 单次最大处理岗位数 |
-| `JOBCLAW_REQUEST_TIMEOUT` | 否 | `30` | 网络请求超时（秒） |
+| `JOBAGENT_ENV` | 否 | `development` | 运行环境 |
+| `JOBAGENT_LOG_LEVEL` | 否 | `INFO` | 日志级别 |
+| `JOBAGENT_HEADLESS` | 否 | `true` | 浏览器是否无头模式（调试时设 `false` 看操作过程） |
+| `JOBAGENT_MAX_JOBS` | 否 | `30` | 单次最大处理岗位数 |
+| `JOBAGENT_REQUEST_TIMEOUT` | 否 | `30` | 网络请求超时（秒） |
+| `JOBAGENT_HISTORY_COMPACT_AFTER_MESSAGES` | 否 | `40` | 达到该消息数时压缩较早历史 |
+| `JOBAGENT_HISTORY_KEEP_RECENT_MESSAGES` | 否 | `16` | 压缩后保留的最近完整消息数 |
+| `JOBAGENT_HISTORY_SUMMARY_INPUT_MAX_CHARS` | 否 | `24000` | 单次摘要读取的历史文本字符上限 |
+| `JOBAGENT_HISTORY_SUMMARY_TIMEOUT` | 否 | `60` | 历史摘要模型调用超时（秒） |
 | **LLM 配置** | | | |
-| `CLAUDE_CREDENTIALS_PATH` | 否 | 自动检测 | Claude OAuth 凭证路径（默认 `~/.claude/.credentials.json`） |
-| `CLAUDE_MODEL` | 否 | `claude-sonnet-4-6` | Claude OAuth 使用的模型 |
-| `ANTHROPIC_API_KEY` | 否 | - | Anthropic API Key |
-| `OPENAI_API_KEY` | 否 | - | OpenAI API Key |
-| `JOBCLAW_LLM_MODEL` | 否 | `gpt-4o-mini` | OpenAI 使用的模型 |
+| `JOBAGENT_LLM_PROVIDER` | 否 | `openai-compatible` | 第一版仅支持 OpenAI-compatible |
+| `JOBAGENT_LLM_MODEL` | 否 | `gpt-4o-mini` | 当前 provider 的模型名或火山方舟 Endpoint/Model ID |
+| `OPENAI_BASE_URL` | 否 | `https://api.openai.com/v1` | OpenAI-compatible 服务地址，可配置 DeepSeek、火山方舟等 |
+| `OPENAI_API_KEY` | OpenAI-compatible 时是 | - | 对应服务的 API Key |
 | **平台 Cookie** | | | |
 | `BOSS_COOKIE` | 否 | - | Boss直聘 cookie（优先于持久化文件） |
 | `LINKEDIN_COOKIE` | 否 | - | LinkedIn cookie |
@@ -250,6 +252,11 @@ jobclaw validate-profile --profile profiles/me.yaml
 | `BOSS_APPLY_DELAY_MAX` | 否 | `8.0` | 投递间隔最大秒数 |
 | `BOSS_DAILY_LIMIT` | 否 | `100` | 每日投递上限（1-150） |
 | `BOSS_SKIP_INACTIVE_DAYS` | 否 | `7` | 跳过 HR 多少天未活跃的岗位 |
+| **小红书只读采集** | | | |
+| `XHS_API_RATE_REQUESTS` | 否 | `1` | 一个限流周期内允许的搜索、详情等 API 调用数 |
+| `XHS_API_RATE_PERIOD_SECONDS` | 否 | `1` | API 限流周期（秒）；默认即最多每秒 1 次 |
+| `XHS_MEDIA_RATE_REQUESTS` | 否 | `1` | 一个限流周期内允许的图片下载数 |
+| `XHS_MEDIA_RATE_PERIOD_SECONDS` | 否 | `1` | 图片限流周期（秒）；默认即最多每秒 1 张 |
 | **通知** | | | |
 | `TELEGRAM_BOT_TOKEN` | 否 | - | Telegram Bot Token |
 | `TELEGRAM_CHAT_ID` | 否 | - | Telegram Chat ID |
@@ -258,7 +265,19 @@ jobclaw validate-profile --profile profiles/me.yaml
 | `HTTP_PROXY` | 否 | - | HTTP 代理 |
 | `HTTPS_PROXY` | 否 | - | HTTPS 代理 |
 
-> 🆓 **Claude OAuth 零成本方案：** 安装 Claude Code CLI（`npm i -g @anthropic-ai/claude-code`）并登录你的订阅账号，JobClaw 会自动检测 `~/.claude/.credentials.json` 中的 OAuth token，**无需任何 API Key，零额外费用**。Token 过期前会自动刷新。
+> Claude OAuth/Anthropic 不属于第一版模型通道，后续在完成 Agent tool-call 适配后再接入。
+
+小红书限流由 `pyrate-limiter` 提供，当前使用进程内存桶，不依赖 Redis。搜索、详情、作者帖子
+和初始化走 API 桶；帖子图片在复用 Spider_XHS 下载函数的同时逐张取得媒体桶许可。以后多实例部署
+时可沿用同一适配接口换成 Redis/PostgreSQL 桶，无需把固定 `sleep` 散落到研究工作流中。
+
+`jobagent chat` 使用 `--thread-id` 恢复 SQLite 中的同一会话。启动时会显示已恢复的近期对话；
+消息达到阈值后，较早内容会生成滚动摘要，最近消息保留原文。摘要与近期消息都会继续参与后续回答。
+
+已成功下载并完成 OCR 的小红书帖子会进入跨岗位的 `Reusable Source Corpus`。帖子即使不符合
+当前公司/JD、被相关性评估拒绝，原始正文、图片、OCR、作者、时间和来源仍会保留；后续 JD
+再次遇到同一帖子时只重新评估相关性，不重复下载和 OCR。第一阶段使用 SQLite 索引和文件系统
+原始快照；后续可以增加全文、Milvus 或其他向量索引，但这些索引不能替代原始资料。
 
 ### `profiles/me.yaml` 求职画像
 
@@ -339,7 +358,7 @@ preferences:
 ## 📂 项目结构
 
 ```text
-jobclaw/
+jobagent/
   applier/                 # 自动投递
     base.py                #   投递器基类
     boss.py                #   Boss直聘投递（打招呼 + 防封策略）

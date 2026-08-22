@@ -41,7 +41,22 @@ test-results/
 
 # Downloaded source artifacts
 data/xhs/
+data/jobagent.db*
+data/jobagent-checkpoints.db*
+data/journeys/
+data/smoke-phase1/
+data/smoke-phase1.db*
 
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local agent tooling artifacts
+.ua/
+--config
+
+# Local runtime data
+data/
+
+# Personal documents
+resume-*.md

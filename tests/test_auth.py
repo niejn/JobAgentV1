@@ -1,4 +1,4 @@
-"""Tests for jobclaw.auth.claude_auth — Claude OAuth credential loading."""
+"""Tests for jobagent.auth.claude_auth — Claude OAuth credential loading."""
 
 from __future__ import annotations
 
@@ -7,8 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from jobclaw.auth.claude_auth import ClaudeToken, get_claude_token
-
+from jobagent.auth.claude_auth import ClaudeToken, get_claude_token
 
 _VALID_CREDENTIALS = {
     "claudeAiOauth": {
