@@ -38,7 +38,13 @@ from jobagent.artifacts import (
 )
 from jobagent.config import Settings
 from jobagent.models.llm_client import build_agent_model
-from jobagent.observability import NodeTraceMiddleware
+from jobagent.observability import (
+    NodeTraceMiddleware,
+    begin_trace,
+    current_trace_id,
+    log_decision,
+    reset_trace,
+)
 from jobagent.profile import SQLiteCandidateProfileStore
 from jobagent.profile.context import CandidateContext
 from jobagent.prompts import MAIN_AGENT_SYSTEM_PROMPT
@@ -162,12 +168,27 @@ class JobAgent:
         *,
         thread_id: str = "default",
     ) -> AsyncIterator[AgentStreamEvent]:
+        trace_token = begin_trace()
+        try:
+            async for event in self._stream_reply_events(message, thread_id=thread_id):
+                yield event
+        finally:
+            reset_trace(trace_token)
+
+    async def _stream_reply_events(
+        self,
+        message: str,
+        *,
+        thread_id: str,
+    ) -> AsyncIterator[AgentStreamEvent]:
         """Stream safe progress and final-answer tokens without hidden reasoning."""
 
         yield AgentStreamEvent("status", "正在分析你的请求…")
         request_started = time.perf_counter()
         if self._debug_trace:
-            yield AgentStreamEvent("status", "[debug] Agent 请求开始")
+            yield AgentStreamEvent(
+                "status", f"[debug] Agent 请求开始 trace_id={current_trace_id()}"
+            )
         graph = await self._ensure_graph()
         yield AgentStreamEvent(
             "status",
@@ -233,6 +254,16 @@ class JobAgent:
                                     continue
                                 announced_tool_calls.add(call_id)
                                 tool_started = time.perf_counter()
+                                log_decision(
+                                    logger,
+                                    "agent.tool_selection",
+                                    basis={
+                                        "tool_name": tool_call.get("name"),
+                                        "args": tool_call.get("args", {}),
+                                        "message_count": len(update.get("messages", [])),
+                                    },
+                                    outcome=str(tool_call.get("name") or "unknown"),
+                                )
                                 if self._debug_trace:
                                     yield AgentStreamEvent(
                                         "status",
@@ -307,6 +338,20 @@ class JobAgent:
             yield AgentStreamEvent("token", complete_message_fallback)
             emitted_visible_token = True
         if not emitted_visible_token and saw_tool_completion:
+            log_decision(
+                logger,
+                "agent.final_answer_recovery",
+                basis={
+                    "saw_tool_completion": saw_tool_completion,
+                    "last_finish_reason": last_finish_reason,
+                    "has_deterministic_result": bool(deterministic_tool_answer),
+                },
+                outcome=(
+                    "deterministic_tool_result"
+                    if deterministic_tool_answer
+                    else "model_recovery"
+                ),
+            )
             status = (
                 "模型输出被截断，正在恢复生成最终答复…"
                 if last_finish_reason == "length"

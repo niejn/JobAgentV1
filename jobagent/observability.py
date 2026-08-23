@@ -2,22 +2,28 @@
 
 from __future__ import annotations
 
+import functools
+import inspect
 import json
 import logging
 import logging.config
 import re
 import time
+import uuid
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import yaml
 from langchain.agents.middleware import AgentMiddleware
+
+_TRACE_ID: ContextVar[str | None] = ContextVar("jobagent_trace_id", default=None)
 
 _SENSITIVE_KEY = re.compile(r"token|key|cookie|password|secret|authorization", re.I)
 _SENSITIVE_QUERY = re.compile(
     r"(?i)(xsec_token|token|key|cookie|password|secret|authorization)=([^&\s]+)"
 )
+_NodeCallable = TypeVar("_NodeCallable", bound=Any)
 
 
 class StructuredFormatter(logging.Formatter):
@@ -29,8 +35,13 @@ class StructuredFormatter(logging.Formatter):
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
+            "trace_id": current_trace_id(),
         }
         for key in (
+            "event_type",
+            "decision_name",
+            "basis",
+            "outcome",
             "node_name",
             "phase",
             "duration_ms",
@@ -41,6 +52,103 @@ class StructuredFormatter(logging.Formatter):
             if hasattr(record, key):
                 payload[key] = getattr(record, key)
         return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def begin_trace() -> tuple[ContextVar[str | None], Any]:
+    """Start a request trace and return its reset token."""
+
+    return _TRACE_ID, _TRACE_ID.set(uuid.uuid4().hex)
+
+
+def reset_trace(token: tuple[ContextVar[str | None], Any]) -> None:
+    """Restore the previous trace context after a request completes."""
+
+    variable, context_token = token
+    variable.reset(context_token)
+
+
+def current_trace_id() -> str | None:
+    return _TRACE_ID.get()
+
+
+def log_decision(
+    logger: logging.Logger,
+    decision_name: str,
+    *,
+    basis: dict[str, Any],
+    outcome: str,
+) -> None:
+    """Write a structured decision event with its explicit decision basis."""
+
+    logger.info(
+        "agent.decision",
+        extra={
+            "event_type": "decision",
+            "decision_name": decision_name,
+            "basis": summarize_value(basis),
+            "outcome": outcome,
+            "trace_id": current_trace_id(),
+        },
+    )
+
+
+def trace_node(node_func: _NodeCallable) -> _NodeCallable:
+    """Decorate a sync or async LangGraph node with structured entry/exit tracing."""
+
+    node_name = getattr(node_func, "__name__", "anonymous_node")
+    if inspect.iscoroutinefunction(node_func):
+
+        @functools.wraps(node_func)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            started = time.perf_counter()
+            input_value = args[0] if args else kwargs
+            _log_node_event(node_name, "entry", input_value=input_value)
+            try:
+                output = await node_func(*args, **kwargs)
+            except Exception as exc:
+                _log_node_event(
+                    node_name,
+                    "exit",
+                    duration_ms=_duration_ms(started),
+                    output_summary="error",
+                    error_type=type(exc).__name__,
+                )
+                raise
+            _log_node_event(
+                node_name,
+                "exit",
+                duration_ms=_duration_ms(started),
+                output_summary=summarize_value(output),
+            )
+            return output
+
+        return async_wrapper  # type: ignore[return-value]
+
+    @functools.wraps(node_func)
+    def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+        started = time.perf_counter()
+        input_value = args[0] if args else kwargs
+        _log_node_event(node_name, "entry", input_value=input_value)
+        try:
+            output = node_func(*args, **kwargs)
+        except Exception as exc:
+            _log_node_event(
+                node_name,
+                "exit",
+                duration_ms=_duration_ms(started),
+                output_summary="error",
+                error_type=type(exc).__name__,
+            )
+            raise
+        _log_node_event(
+            node_name,
+            "exit",
+            duration_ms=_duration_ms(started),
+            output_summary=summarize_value(output),
+        )
+        return output
+
+    return sync_wrapper  # type: ignore[return-value]
 
 
 def setup_logging(config_path: Path | None = None) -> None:
@@ -128,7 +236,12 @@ class NodeTraceMiddleware(AgentMiddleware):
         self._logger.info(
             "agent.node.%s",
             phase,
-            extra={"node_name": node_name, "phase": phase, **fields},
+            extra={
+                "node_name": node_name,
+                "phase": phase,
+                "trace_id": current_trace_id(),
+                **fields,
+            },
         )
 
 
@@ -179,3 +292,19 @@ def _message_text(message: Any) -> str:
 
 def _duration_ms(started: float) -> float:
     return round((time.perf_counter() - started) * 1000, 2)
+
+
+def _log_node_event(node_name: str, phase: str, **fields: Any) -> None:
+    logging.getLogger("jobagent.node").info(
+        "agent.node.%s",
+        phase,
+        extra={
+            "node_name": node_name,
+            "phase": phase,
+            "trace_id": current_trace_id(),
+            "input_summary": summarize_value(fields.pop("input_value"))
+            if "input_value" in fields
+            else None,
+            **fields,
+        },
+    )
