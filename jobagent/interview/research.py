@@ -17,6 +17,7 @@ from jobagent.interview.ocr import ImageContentExtraction
 from jobagent.interview.snapshot import RawSourceSnapshot, SnapshotMaterializer
 from jobagent.interview.source_corpus import SQLiteSourceCorpus
 from jobagent.journey import SQLiteJourneyStore
+from jobagent.observability import log_decision
 from jobagent.scraper.xhs_backend import DownloadedXhsNote, XhsFetchedNote, XhsNoteReference
 from jobagent.scraper.xhs_discovery import is_recent, seller_risk
 
@@ -224,12 +225,46 @@ class InterviewResearchService:
                         if note is None:
                             note = await self._backend.fetch_note(reference.url)
                         if not is_recent(note.published_at, cutoff):
+                            log_decision(
+                                logger,
+                                "interview_research.candidate_gate",
+                                basis={
+                                    "iteration": iteration,
+                                    "note_id": reference.note_id,
+                                    "is_recent": False,
+                                    "seller_risk_score": 0,
+                                },
+                                outcome="reject_stale",
+                            )
                             feedback.append("帖子过旧或发布时间无效")
                             continue
                         risk_flags, risk_score = seller_risk(note)
                         if risk_score >= 2:
+                            log_decision(
+                                logger,
+                                "interview_research.candidate_gate",
+                                basis={
+                                    "iteration": iteration,
+                                    "note_id": reference.note_id,
+                                    "is_recent": True,
+                                    "seller_risk_score": risk_score,
+                                    "risk_flags": risk_flags,
+                                },
+                                outcome="reject_seller_risk",
+                            )
                             feedback.append(f"卖资料风险：{','.join(risk_flags)}")
                             continue
+                        log_decision(
+                            logger,
+                            "interview_research.candidate_gate",
+                            basis={
+                                "iteration": iteration,
+                                "note_id": reference.note_id,
+                                "is_recent": True,
+                                "seller_risk_score": risk_score,
+                            },
+                            outcome="admit_to_snapshot",
+                        )
                         if bundle is None:
                             downloaded = await self._backend.download_note(
                                 reference.url,
@@ -294,9 +329,36 @@ class InterviewResearchService:
                 coverage = self._coverage(evidence)
                 if coverage.sufficient:
                     stop_reason = "coverage_satisfied"
+                    log_decision(
+                        logger,
+                        "interview_research.stop_gate",
+                        basis={
+                            "iteration": iteration,
+                            "new_evidence": new_evidence,
+                            "accepted_a": coverage.accepted_a,
+                            "accepted_b": coverage.accepted_b,
+                            "covered_topics": coverage.covered_topics,
+                            "minimum_evidence": self._minimum_evidence,
+                            "required_topics": self._required_topics,
+                        },
+                        outcome=stop_reason,
+                    )
                     break
                 if new_evidence == 0 and iteration == self._max_iterations:
                     stop_reason = "no_marginal_gain"
+                    log_decision(
+                        logger,
+                        "interview_research.stop_gate",
+                        basis={
+                            "iteration": iteration,
+                            "new_evidence": new_evidence,
+                            "accepted_a": coverage.accepted_a,
+                            "accepted_b": coverage.accepted_b,
+                            "covered_topics": coverage.covered_topics,
+                            "max_iterations": self._max_iterations,
+                        },
+                        outcome=stop_reason,
+                    )
 
             draft = await self._intelligence.prepare(
                 target,

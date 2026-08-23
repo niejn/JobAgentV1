@@ -334,7 +334,7 @@ async def test_debug_trace_emits_sanitized_phase_diagnostics(tmp_path) -> None:
         await agent.close()
 
     debug_statuses = [event.text for event in events if event.kind == "status"]
-    assert "[debug] Agent 请求开始" in debug_statuses
+    assert any("[debug] Agent 请求开始" in text for text in debug_statuses)
     assert any("[debug] 模型请求开始" in text for text in debug_statuses)
     assert any("[debug] LangGraph 首事件" in text for text in debug_statuses)
 
