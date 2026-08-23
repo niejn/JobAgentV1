@@ -10,7 +10,7 @@ import time
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import aiosqlite
 from deepagents import create_deep_agent
@@ -38,6 +38,7 @@ from jobagent.artifacts import (
 )
 from jobagent.config import Settings
 from jobagent.models.llm_client import build_agent_model
+from jobagent.observability import NodeTraceMiddleware
 from jobagent.profile import SQLiteCandidateProfileStore
 from jobagent.profile.context import CandidateContext
 from jobagent.prompts import MAIN_AGENT_SYSTEM_PROMPT
@@ -460,7 +461,7 @@ class JobAgent:
                     model=self._model,
                     tools=list(self._tools),
                     system_prompt=self._system_prompt,
-                    middleware=[filesystem_middleware],
+                    middleware=[filesystem_middleware, cast(Any, NodeTraceMiddleware())],
                     backend=filesystem_backend,
                     checkpointer=saver,
                     name="jobagent",

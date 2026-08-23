@@ -174,6 +174,10 @@ def test_chat_cli_keeps_session_alive_after_one_turn_fails(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    monkeypatch.setattr(
+        "jobagent.cli.get_settings",
+        lambda: Settings(_env_file=None, jobagent_debug_trace=False),
+    )
     startup = tmp_path / "agent.yaml"
     startup.write_text("unused: true", encoding="utf-8")
     agent = FailingStreamingAgent()
