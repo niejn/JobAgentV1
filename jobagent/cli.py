@@ -28,6 +28,7 @@ from jobagent.config import Settings, get_settings
 from jobagent.models import Job, JobSource
 from jobagent.notifier.discord import DiscordNotifier
 from jobagent.notifier.telegram import TelegramNotifier
+from jobagent.observability import setup_logging
 from jobagent.profile.loader import load_profile
 from jobagent.scraper.base import BaseScraper
 from jobagent.scraper.boss import BossScraper
@@ -155,6 +156,7 @@ async def _chat(startup_config: Path | None, thread_id: str | None) -> None:
     from jobagent.profile import SQLiteCandidateContextProvider, load_candidate_context
 
     settings = get_settings()
+    setup_logging()
     context = load_candidate_context(startup_config) if startup_config else None
     agent = build_job_agent(settings, candidate_context=context)
     active_thread_id = thread_id or _new_session_id()
