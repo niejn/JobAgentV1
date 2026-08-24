@@ -1,12 +1,12 @@
-"""Tests for structured rotating logs and node tracing."""
+"""Tests for loguru-based structured logs and node tracing."""
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import yaml
 
 from jobagent.observability import (
     NodeTraceMiddleware,
@@ -14,18 +14,67 @@ from jobagent.observability import (
     current_trace_id,
     log_decision,
     reset_trace,
+    setup_logging,
     summarize_value,
     trace_node,
 )
 
 
-def test_logging_yaml_uses_one_mib_seven_file_rotation() -> None:
-    config = yaml.safe_load(Path("logging.yml").read_text(encoding="utf-8"))
-    handler = config["handlers"]["rotating_file"]
+def test_setup_logging_routes_stdlib_into_loguru_sinks(tmp_path: Path) -> None:
+    log_file = tmp_path / "logs" / "jobagent.log"
+    handler_ids = setup_logging(
+        log_level="INFO",
+        log_file=log_file,
+        console_level="ERROR",
+    )
+    try:
+        logger = logging.getLogger("jobagent.sink-test")
+        logger.setLevel(logging.INFO)
+        logger.info("普通日志行")
+        log_decision(
+            logger,
+            "research.stop_gate",
+            basis={"iteration": 3},
+            outcome="no_marginal_gain",
+        )
+    finally:
 
-    assert handler["class"] == "logging.handlers.RotatingFileHandler"
-    assert handler["maxBytes"] == 1_048_576
-    assert handler["backupCount"] == 7
+        from loguru import logger as loguru_logger
+
+        loguru_logger.complete()
+        for handler_id in handler_ids:
+            loguru_logger.remove(handler_id)
+
+    content = log_file.read_text(encoding="utf-8")
+    plain_line = next(line for line in content.splitlines() if "普通日志行" in line)
+    # Every line carries time, level, logger, function name, and line number.
+    assert "INFO" in plain_line
+    assert "jobagent.sink-test" in plain_line
+    assert "test_setup_logging_routes_stdlib_into_loguru_sinks" in plain_line
+    assert ":" in plain_line  # function:line suffix
+    decision_line = next(
+        line for line in content.splitlines() if "research.stop_gate" in line
+    )
+    assert '"outcome": "no_marginal_gain"' in decision_line
+    assert "iteration" in decision_line
+
+
+def test_setup_logging_suppresses_noisy_third_party_loggers(tmp_path: Path) -> None:
+    handler_ids = setup_logging(
+        log_level="INFO",
+        log_file=tmp_path / "logs" / "jobagent.log",
+        console_level="ERROR",
+    )
+    try:
+        assert logging.getLogger("urllib3").level == logging.WARNING
+        assert logging.getLogger("urllib3.connectionpool").level == logging.ERROR
+        assert logging.getLogger("httpx").level == logging.WARNING
+        assert logging.getLogger("jobagent").level == logging.INFO
+    finally:
+        from loguru import logger as loguru_logger
+
+        for handler_id in handler_ids:
+            loguru_logger.remove(handler_id)
 
 
 @pytest.mark.asyncio

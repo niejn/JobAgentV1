@@ -7,14 +7,13 @@ import json
 import logging
 import re
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
 import aiosqlite
 from deepagents import create_deep_agent
-from deepagents.backends import FilesystemBackend
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import (
@@ -48,7 +47,9 @@ from jobagent.observability import (
 from jobagent.profile import SQLiteCandidateProfileStore
 from jobagent.profile.context import CandidateContext
 from jobagent.prompts import MAIN_AGENT_SYSTEM_PROMPT
+from jobagent.scraper.xhs_backend import SpiderXhsBackend
 from jobagent.tools import (
+    BossGreetingsManager,
     BossJobDiscovery,
     CandidateProfileManager,
     InterviewEvidenceDiscovery,
@@ -56,6 +57,7 @@ from jobagent.tools import (
     SharedUrlSaver,
     UserDocumentReader,
     XhsAuthorPostsBrowser,
+    build_boss_greet_jobs_tool,
     build_boss_job_discovery_tool,
     build_import_candidate_resume_tool,
     build_interview_evidence_tool,
@@ -69,6 +71,7 @@ from jobagent.tools import (
     build_user_document_tool,
     build_xhs_author_posts_tool,
 )
+from jobagent.tools.xhs_note import XhsNoteSaver
 
 # Backward-compatible import for callers that referenced the old constant.
 SYSTEM_PROMPT = MAIN_AGENT_SYSTEM_PROMPT
@@ -86,7 +89,7 @@ _DEBUG_SENSITIVE_QUERY = re.compile(
 class AgentStreamEvent:
     """Stable user-visible projection of internal LangGraph stream events."""
 
-    kind: Literal["status", "token", "done"]
+    kind: Literal["status", "token", "thinking", "tool", "done"]
     text: str
 
 
@@ -146,7 +149,7 @@ class JobAgent:
         self._history_summary_input_max_chars = history_summary_input_max_chars
         self._history_summary_timeout = history_summary_timeout
         self._opportunity_artifacts = opportunity_artifacts
-        self._filesystem_root = (filesystem_root or Path("data/journeys")).expanduser().resolve()
+        self._filesystem_root = (filesystem_root or Path.cwd()).expanduser().resolve()
         self._debug_trace = debug_trace
 
     async def reply(self, message: str, *, thread_id: str = "default") -> str:
@@ -181,7 +184,7 @@ class JobAgent:
         *,
         thread_id: str,
     ) -> AsyncIterator[AgentStreamEvent]:
-        """Stream safe progress and final-answer tokens without hidden reasoning."""
+        """Stream status/tool progress, thinking deltas, and final-answer tokens."""
 
         yield AgentStreamEvent("status", "正在分析你的请求…")
         request_started = time.perf_counter()
@@ -209,6 +212,7 @@ class JobAgent:
         emitted_visible_token = False
         complete_message_fallback = ""
         streamed_text: dict[str, str] = {}
+        streamed_reasoning: dict[str, str] = {}
         announced_tool_calls: set[str] = set()
         saw_tool_completion = False
         deterministic_tool_answer = ""
@@ -283,6 +287,9 @@ class JobAgent:
                                     _deterministic_tool_answer(tool_message)
                                     or deterministic_tool_answer
                                 )
+                        tool_summary = _tool_result_summary(update) if update else ""
+                        if tool_summary:
+                            yield AgentStreamEvent("tool", tool_summary)
                         yield AgentStreamEvent(
                             "status",
                             "资料处理完成，正在生成回答…",
@@ -303,6 +310,21 @@ class JobAgent:
             streamed_message, metadata = part["data"]
             if metadata.get("langgraph_node") != "model":
                 continue
+            reasoning = _reasoning_delta(streamed_message)
+            if reasoning and isinstance(streamed_message, AIMessageChunk):
+                message_key = str(
+                    streamed_message.id
+                    or metadata.get("langgraph_step")
+                    or metadata.get("langgraph_node")
+                    or "model"
+                )
+                accumulated_reasoning, novel_reasoning = _merge_streamed_text(
+                    streamed_reasoning.get(message_key, ""),
+                    reasoning,
+                )
+                streamed_reasoning[message_key] = accumulated_reasoning
+                if novel_reasoning:
+                    yield AgentStreamEvent("thinking", novel_reasoning)
             visible = _visible_text(streamed_message)
             if visible and isinstance(streamed_message, AIMessageChunk):
                 message_key = str(
@@ -487,12 +509,18 @@ class JobAgent:
             )
             try:
                 await saver.setup()
-                filesystem_backend = FilesystemBackend(
+                # LocalShellBackend extends FilesystemBackend with shell
+                # execution; the user opted in to a local development agent.
+                from deepagents.backends.local_shell import LocalShellBackend
+
+                shell_backend = LocalShellBackend(
                     root_dir=self._filesystem_root,
                     virtual_mode=True,
+                    inherit_env=True,
+                    timeout=120,
                 )
                 filesystem_middleware = FilesystemMiddleware(
-                    backend=filesystem_backend,
+                    backend=shell_backend,
                     tools=[
                         "ls",
                         "read_file",
@@ -500,6 +528,7 @@ class JobAgent:
                         "edit_file",
                         "glob",
                         "grep",
+                        "execute",
                     ],
                 )
                 graph = create_deep_agent(
@@ -507,7 +536,7 @@ class JobAgent:
                     tools=list(self._tools),
                     system_prompt=self._system_prompt,
                     middleware=[filesystem_middleware, cast(Any, NodeTraceMiddleware())],
-                    backend=filesystem_backend,
+                    backend=shell_backend,
                     checkpointer=saver,
                     name="jobagent",
                 )
@@ -600,6 +629,33 @@ def _visible_text(message: Any) -> str:
         )
     content = getattr(message, "content", None)
     return content if isinstance(content, str) else ""
+
+
+def _reasoning_delta(message: Any) -> str:
+    """Return recognized provider thinking deltas for the transient display.
+
+    Only well-known reasoning transports are surfaced: deepseek-style
+    ``reasoning_content`` additional kwargs and anthropic-style ``thinking``
+    content blocks. Unrecognized block shapes stay hidden.
+    """
+
+    kwargs = getattr(message, "additional_kwargs", None)
+    if isinstance(kwargs, dict):
+        for key in ("reasoning_content", "reasoning"):
+            value = kwargs.get(key)
+            if isinstance(value, str) and value:
+                return value
+    content = getattr(message, "content", None)
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "thinking":
+                text = block.get("thinking")
+                if isinstance(text, str):
+                    parts.append(text)
+        if parts:
+            return "".join(parts)
+    return ""
 
 
 def _deterministic_tool_answer(message: Any) -> str:
@@ -761,7 +817,26 @@ def _tool_start_status(tool_name: str) -> str:
         return "正在保存 JD 与岗位分析报告…"
     if tool_name == "update_job_application_state":
         return "正在更新岗位投递状态…"
+    if tool_name == "boss_greet_jobs":
+        return "正在向 Boss 招聘方发送打招呼消息…"
     return "正在执行所需工具…"
+
+
+def _xhs_backend_factory_for(
+    settings: Settings,
+) -> Callable[[Settings], Any]:
+    """Return the XHS backend factory for this run.
+
+    Spider_XHS stays the pure default. CDP composition is opt-in: the
+    ``xhs_cdp`` module is imported lazily and only when the user enabled it,
+    so a default deployment loads zero CDP code.
+    """
+
+    if not settings.xhs_cdp_enabled:
+        return SpiderXhsBackend
+    from jobagent.scraper.xhs_cdp import build_xhs_backend
+
+    return build_xhs_backend
 
 
 def build_job_agent(
@@ -784,9 +859,14 @@ def build_job_agent(
     if tools is not None:
         registered_tools = list(tools)
     else:
-        shared_url_saver = SharedUrlSaver(settings)
+        backend_factory = _xhs_backend_factory_for(settings)
+        shared_url_saver = SharedUrlSaver(
+            settings,
+            xhs_saver=XhsNoteSaver(settings, backend_factory=backend_factory),
+        )
         registered_tools = [
             build_boss_job_discovery_tool(BossJobDiscovery(settings)),
+            build_boss_greet_jobs_tool(BossGreetingsManager(settings)),
             build_import_candidate_resume_tool(
                 CandidateProfileManager(
                     workspace_root=settings.jobagent_workspace_root,
@@ -812,11 +892,17 @@ def build_job_agent(
                 LocalOpportunityArtifacts(settings.jobagent_opportunity_dir)
             ),
             build_interview_evidence_tool(
-                InterviewEvidenceDiscovery(settings, candidate_context=effective_context)
+                InterviewEvidenceDiscovery(
+                    settings,
+                    backend_factory=backend_factory,
+                    candidate_context=effective_context,
+                )
             ),
             build_shared_url_save_tool(shared_url_saver),
             build_shared_url_extract_tool(shared_url_saver),
-            build_xhs_author_posts_tool(XhsAuthorPostsBrowser(settings)),
+            build_xhs_author_posts_tool(
+                XhsAuthorPostsBrowser(settings, backend_factory=backend_factory)
+            ),
             build_job_description_tool(
                 JobDescriptionReader(settings.jobagent_workspace_root)
             ),

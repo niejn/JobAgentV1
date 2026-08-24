@@ -5,8 +5,7 @@ from __future__ import annotations
 import pytest
 
 from jobagent.models import Job, JobSource
-from jobagent.scraper.boss import BossDiscoveryRequest
-from jobagent.scraper.boss_http import BossAccessError
+from jobagent.scraper.boss import BossAccessError, BossDiscoveryRequest
 from jobagent.tools.job_discovery import build_boss_job_discovery_tool
 
 

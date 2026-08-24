@@ -166,3 +166,29 @@ _Avoid_: transfer 消息、复制上下文、子智能体自然语言总结
 交接校验失败后返回生产者的结构化问题清单，指出失败规则、受影响产物和允许的修订范围；需要
 新增候选人事实或高影响授权时必须转交用户，不能由 Agent 自行补全。
 _Avoid_: 模糊重试、消费者静默修复、无限 Agent 循环
+
+## 技术约束
+
+### 禁止使用 `curl_cffi` 或类似 TLS 指纹模拟库进行数据采集
+
+网站的反爬策略对 TLS 指纹模拟非常敏感，curl_cffi 的指纹与真实浏览器存在细微差异，极易被
+识别并封锁。所有平台数据采集应优先使用 Playwright 真实浏览器（导航真实页面 + 被动旁听 API
+响应），或通过 CDP 连接用户已登录的 Chrome 实例。这一约束适用于 Boss、小红书及未来可能接入
+的任何平台。
+
+### Skill 系统设计准则：纯文档、跨 Agent 可移植
+
+Skill 只包含 `SKILL.md`（纯文档），不使用自定义代码（无 `tool.py` / `get_tools()`）。
+
+**设计目标**：skill 可以在不同 Agent 之间移植——我们的 skill 可以直接用在 Pi、Claude Code 等
+其他 Agent 上，反之亦然。
+
+**实现方式**：
+- SKILL.md 中的步骤只用通用工具（`execute`、`read_file`、`ls`、`write_file`），
+  不依赖任何 Agent 特有的定制工具或代码加载机制
+- Agent 通过 `read_file` 读 SKILL.md 获取说明，通过 `execute` 执行 Shell 命令完成操作
+- 不需要 `load_skill_tools()`、`importlib`、`get_tools()` 等代码层面的集成
+
+**验证**：ChromeCDP-setup skill 的工作流程（检查端口→查找 Chrome→启动→轮询）全部使用
+PowerShell 命令描述，在 Pi / Claude Code（有 bash 工具）和我们的 JobAgent（有 execute 工具）
+上均可直接执行。

@@ -465,5 +465,70 @@ async def test_xhs_author_browser_lists_and_filters_public_posts(tmp_path) -> No
 
     assert result["status"] == "completed"
     assert result["author_id"] == "5c0645200050148e"
+    assert result["total_found"] == 1
+    assert result["fetched"] == 1
+    assert result["failed"] == 0
     assert result["count"] == 1
     assert result["posts"][0]["title"] == "LangGraph 学习笔记"
+
+
+@pytest.mark.asyncio
+async def test_xhs_author_browser_tolerates_partial_failures() -> None:
+    from jobagent.scraper.xhs_backend import SpiderXhsError, XhsFetchedNote, XhsNoteReference
+
+    note = XhsFetchedNote(
+        note_id="note-1",
+        url="https://www.xiaohongshu.com/explore/note-1",
+        title="LangGraph 学习笔记",
+        body="StateGraph 的生产实践",
+        author_id="5c0645200050148e8",
+        author_name="作者",
+        image_urls=(),
+        tags=("LangGraph",),
+        published_at="2026-08-20 12:00:00",
+        normalized={},
+        raw_response={},
+    )
+
+    class FakeBackendPartial:
+        def __init__(self) -> None:
+            self.fetch_calls = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def list_user_notes(self, user_id: str, *, limit: int | None = None):
+            return [
+                XhsNoteReference("note-ok", "https://xhs/note-ok", {}),
+                XhsNoteReference("note-bad", "https://xhs/note-bad", {}),
+                XhsNoteReference("note-ok-2", "https://xhs/note-ok-2", {}),
+            ]
+
+        async def fetch_note(self, url: str):
+            if "note-bad" in url:
+                raise SpiderXhsError("笔记详情受限：token 过期")
+            return note
+
+    browser = XhsAuthorPostsBrowser(
+        Settings(_env_file=None),
+        backend_factory=lambda settings: FakeBackendPartial(),
+    )
+
+    result = await browser.browse(
+        XhsAuthorPostsRequest(
+            profile_url="https://www.xiaohongshu.com/user/profile/test-user",
+            limit=10,
+        )
+    )
+
+    assert result["status"] == "partial"
+    assert result["total_found"] == 3
+    assert result["fetched"] == 2
+    assert result["failed"] == 1
+    assert result["count"] == 2
+    assert len(result["failed_details"]) == 1
+    assert result["failed_details"][0]["note_id"] == "note-bad"
+    assert "token 过期" in result["failed_details"][0]["message"]

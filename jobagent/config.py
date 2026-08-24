@@ -1,9 +1,11 @@
 """Application configuration loaded from environment variables."""
 
+import ipaddress
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,6 +21,10 @@ class Settings(BaseSettings):
 
     jobagent_env: str = Field(default="development")
     jobagent_log_level: str = Field(default="INFO")
+    jobagent_log_file: Path = Field(
+        default=Path("data/logs/jobagent.log"),
+        description="Rotating loguru file sink target (10 MB x 3 backups).",
+    )
     jobagent_debug_trace: bool = Field(
         default=False,
         description="Show sanitized Agent timing, Tool, OCR, and graph diagnostics in chat.",
@@ -55,6 +61,12 @@ class Settings(BaseSettings):
     boss_skip_inactive_days: int = Field(default=7, ge=1)
     boss_api_rate_period_seconds: float = Field(default=1.0, gt=0)
     boss_risk_cooldown_seconds: int = Field(default=900, ge=60, le=86_400)
+    boss_max_searches_per_session: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description="Max Boss searches before the session is forced to rest.",
+    )
     linkedin_cookie: str | None = None
 
     # Xiaohongshu referral channel (see docs/referral-design.md)
@@ -95,6 +107,26 @@ class Settings(BaseSettings):
         ge=10.0,
         description="Max seconds between XHS page loads",
     )
+    xhs_cdp_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable the read-only Chrome CDP fallback for XHS note/author reads "
+            "when Spider_XHS fails with a token/access-control error."
+        ),
+    )
+    xhs_cdp_endpoint: str = Field(
+        default="http://127.0.0.1:9222",
+        description=(
+            "DevTools endpoint of an already-running, logged-in Chrome. "
+            "Loopback hosts only."
+        ),
+    )
+    xhs_cdp_timeout_seconds: int = Field(
+        default=30,
+        ge=5,
+        le=120,
+        description="Bounded time budget in seconds for one CDP fallback read.",
+    )
     jobagent_state_db: Path = Field(default=Path("data/jobagent.db"))
     jobagent_checkpoint_db: Path = Field(default=Path("data/jobagent-checkpoints.db"))
     jobagent_artifact_dir: Path = Field(default=Path("data/journeys"))
@@ -124,6 +156,35 @@ class Settings(BaseSettings):
 
     http_proxy: str | None = None
     https_proxy: str | None = None
+
+    @field_validator("xhs_cdp_endpoint")
+    @classmethod
+    def validate_loopback_cdp_endpoint(cls, value: str) -> str:
+        """Allow only loopback Chrome DevTools endpoints.
+
+        Chrome remote debugging grants full browser control, so the endpoint
+        must never point at another host.
+        """
+
+        cleaned = value.strip()
+        parsed = urlsplit(cleaned)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("XHS_CDP_ENDPOINT must be an http(s) URL such as http://127.0.0.1:9222")
+        host = parsed.hostname.lower()
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+        if address is None:
+            if host != "localhost":
+                raise ValueError(
+                    "XHS_CDP_ENDPOINT must be a loopback address (127.0.0.1, ::1, or localhost)"
+                ) from None
+        elif not address.is_loopback:
+            raise ValueError(
+                "XHS_CDP_ENDPOINT must be a loopback address (127.0.0.1, ::1, or localhost)"
+            )
+        return cleaned
 
     @model_validator(mode="after")
     def validate_history_compaction_window(self) -> "Settings":

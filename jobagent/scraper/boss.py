@@ -1,19 +1,13 @@
-"""Boss直聘 (zhipin.com) scraper using Playwright."""
+"""Boss直聘 discovery domain models and shared parsing helpers."""
 
 from __future__ import annotations
 
-import logging
-from hashlib import sha256
-from typing import Self
-from urllib.parse import urlencode
+import re
+from typing import Any
 
-from playwright.async_api import Browser, Playwright, async_playwright
 from pydantic import BaseModel, Field, HttpUrl
 
 from jobagent.models import Job, JobSource, SalaryRange
-from jobagent.scraper.base import BaseScraper
-
-logger = logging.getLogger(__name__)
 
 _CITY_CODES = {
     "全国": "100010000",
@@ -26,160 +20,139 @@ _CITY_CODES = {
 
 
 class BossDiscoveryRequest(BaseModel):
-    """User-level filters for read-only Boss job discovery."""
+    """User-level filters for read-only Boss job discovery.
 
-    query: str = Field(min_length=1)
-    city: str = "全国"
-    area: str | None = None
-    company_sizes: list[str] = Field(default_factory=list)
+    Filter parameters mirror Boss's own ``/web/geek/job`` URL query string.
+    """
+
+    query: str = Field(min_length=1, description="Search keyword(s)")
+    city: str = Field(default="全国", description="City name (e.g. 上海, 北京)")
+    area: str | None = Field(
+        default=None,
+        description="Business district filter (e.g. 五角场, 漕河泾)",
+    )
+    company_sizes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Company size bands: 0-20人, 20-99人, 100-499人, "
+            "500-999人, 1000-9999人, 10000人以上"
+        ),
+    )
+    job_type: str | None = Field(
+        default=None,
+        description=(
+            "Job type: 1901=全职, 1902=兼职, 1903=实习, "
+            "1904=全职/兼职, 1905=校招"
+        ),
+    )
+    salary: str | None = Field(
+        default=None,
+        description=(
+            "Salary range code: 402=3K以下, 403=3-5K, 404=5-10K, "
+            "405=10-20K, 406=20-50K, 407=50K+"
+        ),
+    )
+    experience: str | None = Field(
+        default=None,
+        description=(
+            "Experience code: 108=在校生, 102=应届生, 101=经验不限, "
+            "103=1年以内, 104=1-3年, 105=3-5年, 106=5-10年, 107=10年+"
+        ),
+    )
+    degree: str | None = Field(
+        default=None,
+        description=(
+            "Education code: 209=初中及以下, 208=中专/中技, 206=高中, "
+            "202=大专, 203=本科, 204=硕士, 205=博士"
+        ),
+    )
+    industry: str | None = Field(
+        default=None,
+        description="Industry code (e.g. 1001=互联网, 1002=电商, 1003=金融)",
+    )
+    stage: str | None = Field(
+        default=None,
+        description=(
+            "Funding stage code: 801=未融资, 802=天使轮, 803=A轮, "
+            "804=B轮, 805=C轮, 806=D轮及以上, 807=已上市, 808=不需要融资"
+        ),
+    )
     limit: int = Field(default=20, ge=1, le=100)
 
+    def _filter_query_params(self) -> dict[str, str]:
+        """Map filter fields to Boss URL query parameters (skip empty)."""
 
-class BossScraper(BaseScraper):
-    """Scrape job listings from Boss直聘."""
-
-    source = JobSource.BOSS
-
-    def __init__(self, settings: object) -> None:
-        self._settings = settings
-        self._playwright: Playwright | None = None
-        self._browser: Browser | None = None
-
-    async def __aenter__(self) -> Self:
-        self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(
-            headless=getattr(self._settings, "jobagent_headless", True),
-        )
-        return self
-
-    async def __aexit__(self, *args: object) -> None:
-        if self._browser:
-            await self._browser.close()
-        if self._playwright:
-            await self._playwright.stop()
-
-    async def scrape_jobs(
-        self,
-        query: str,
-        location: str | None = None,
-        limit: int = 20,
-    ) -> list[Job]:
-        """Scrape Boss直聘 for jobs matching query.
-
-        Uses cookie-based auth from settings.boss_cookie.
-        """
-        city = location if location in _CITY_CODES else "全国"
-        area = location if location and location not in _CITY_CODES else None
-        return await self.discover_jobs(
-            BossDiscoveryRequest(query=query, city=city, area=area, limit=limit)
-        )
-
-    async def discover_jobs(self, request: BossDiscoveryRequest) -> list[Job]:
-        """Discover and post-filter jobs by city, area, and company-size bands."""
-
-        if not self._browser:
-            raise RuntimeError("Scraper not initialized. Use 'async with' context.")
-        city_code = _CITY_CODES.get(request.city)
-        if city_code is None:
-            raise ValueError(f"Unsupported Boss city: {request.city}")
-
-        context = await self._browser.new_context()
-        try:
-            from jobagent.auth.cookie_manager import inject_cookies
-            await inject_cookies(context, "boss", self._settings)
-        except Exception as e:
-            logger.warning("Cookie injection failed (continuing without auth): %s", e)
-
-        page = await context.new_page()
-        search_url = "https://www.zhipin.com/web/geek/job?" + urlencode(
-            {"query": request.query, "city": city_code}
-        )
-
-        jobs: list[Job] = []
-        try:
-            await page.goto(search_url, wait_until="networkidle", timeout=30000)
-            cards = await page.query_selector_all(".job-card-wrapper")
-
-            for card in cards:
-                try:
-                    title_el = await card.query_selector(".job-name")
-                    company_el = await card.query_selector(".company-name a")
-                    salary_el = await card.query_selector(".salary")
-                    link_el = await card.query_selector(".job-card-left a")
-                    area_el = await card.query_selector(".job-area")
-                    tags_els = await card.query_selector_all(
-                        ".tag-list span, .tag-list li"
-                    )
-                    company_tags_els = await card.query_selector_all(
-                        ".company-tag-list span, .company-tag-list li"
-                    )
-                    desc_el = await card.query_selector(".job-card-desc")
-
-                    title = await title_el.inner_text() if title_el else "Unknown"
-                    company = await company_el.inner_text() if company_el else "Unknown"
-                    salary_text = await salary_el.inner_text() if salary_el else ""
-                    href = await link_el.get_attribute("href") if link_el else ""
-                    tags = [await t.inner_text() for t in tags_els]
-                    company_tags = [await t.inner_text() for t in company_tags_els]
-                    desc = await desc_el.inner_text() if desc_el else ""
-                    job_area = await area_el.inner_text() if area_el else request.city
-                    company_size = _extract_company_size(company_tags)
-
-                    if request.area and request.area not in job_area:
-                        continue
-                    if (
-                        request.company_sizes
-                        and company_size not in request.company_sizes
-                    ):
-                        continue
-
-                    url = f"https://www.zhipin.com{href}" if href else "https://www.zhipin.com"
-
-                    salary = _parse_boss_salary(salary_text)
-
-                    jobs.append(Job(
-                        id=f"boss:{sha256(url.encode('utf-8')).hexdigest()[:20]}",
-                        source=JobSource.BOSS,
-                        title=title.strip(),
-                        company=company.strip(),
-                        location=job_area.strip(),
-                        url=HttpUrl(url),
-                        description=desc.strip(),
-                        salary=salary,
-                        tags=tags,
-                        metadata={
-                            "company_size": company_size,
-                            "company_tags": company_tags,
-                            "city": request.city,
-                            "area_filter": request.area,
-                        },
-                    ))
-                    if len(jobs) >= request.limit:
-                        break
-                except Exception as e:
-                    logger.warning("Failed to parse Boss card: %s", e)
-                    continue
-
-        except Exception as e:
-            logger.error("Boss scrape failed: %s", e)
-        finally:
-            await context.close()
-
-        logger.info("Boss: scraped %d jobs for query '%s'", len(jobs), request.query)
-        return jobs
+        params: dict[str, str] = {}
+        if self.job_type:
+            params["jobType"] = self.job_type
+        if self.salary:
+            params["salary"] = self.salary
+        if self.experience:
+            params["experience"] = self.experience
+        if self.degree:
+            params["degree"] = self.degree
+        if self.industry:
+            params["industry"] = self.industry
+        if self.stage:
+            params["stage"] = self.stage
+        if self.company_sizes:
+            params["scale"] = ",".join(
+                _COMPANY_SCALE_CODES.get(size, size) for size in self.company_sizes
+            )
+        return params
 
 
-def _extract_company_size(company_tags: list[str]) -> str | None:
-    for value in company_tags:
-        normalized = value.strip().replace(" ", "")
-        if "人" in normalized and any(character.isdigit() for character in normalized):
-            return normalized
-    return None
+class BossAccessError(RuntimeError):
+    """Boss rejected a read request; callers must not retry without cooldown."""
+
+
+def _normalize_job(raw: dict[str, Any]) -> Job:
+    """Map a raw Boss API joblist item to a normalized ``Job``."""
+
+    external_id = str(raw.get("encryptJobId") or "").strip()
+    if not external_id:
+        raise ValueError("Boss job result is missing encryptJobId")
+    city = str(raw.get("cityName") or "").strip()
+    district = str(raw.get("areaDistrict") or "").strip()
+    business = str(raw.get("businessDistrict") or "").strip()
+    location = "·".join(value for value in (city, district, business) if value)
+    labels = _string_list(raw.get("jobLabels"))
+    skills = _string_list(raw.get("skills"))
+    tags = list(dict.fromkeys([*labels, *skills]))
+    title = str(raw.get("jobName") or "Unknown").strip()
+    return Job(
+        id=f"boss:{external_id}",
+        source=JobSource.BOSS,
+        title=title,
+        company=str(raw.get("brandName") or "Unknown").strip(),
+        location=location or city or "Unknown",
+        url=HttpUrl(f"https://www.zhipin.com/job_detail/{external_id}.html"),
+        description="；".join([title, *tags]),
+        salary=_parse_boss_salary(str(raw.get("salaryDesc") or "")),
+        tags=tags,
+        metadata={
+            "company_size": raw.get("brandScaleName"),
+            "company_stage": raw.get("brandStageName"),
+            "company_industry": raw.get("brandIndustry"),
+            "city": city,
+            "district": district,
+            "business_district": business,
+            "experience": raw.get("jobExperience"),
+            "degree": raw.get("jobDegree"),
+            "listing_summary_only": True,
+            "security_id": raw.get("securityId"),
+        },
+    )
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _parse_boss_salary(text: str) -> SalaryRange | None:
     """Parse Boss salary text like '25-50K·16薪' into SalaryRange."""
-    import re
 
     match = re.search(r"(\d+)-(\d+)K", text)
     if not match:
@@ -188,7 +161,6 @@ def _parse_boss_salary(text: str) -> SalaryRange | None:
     low = int(match.group(1)) * 1000
     high = int(match.group(2)) * 1000
 
-    # Check for bonus months (e.g. 16薪)
     months = 12
     bonus_match = re.search(r"(\d+)薪", text)
     if bonus_match:
@@ -199,3 +171,13 @@ def _parse_boss_salary(text: str) -> SalaryRange | None:
         max_annual=high * months,
         currency="CNY",
     )
+
+
+_COMPANY_SCALE_CODES = {
+    "0-20人": "301",
+    "20-99人": "302",
+    "100-499人": "303",
+    "500-999人": "304",
+    "1000-9999人": "305",
+    "10000人以上": "306",
+}

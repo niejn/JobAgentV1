@@ -1,4 +1,12 @@
-"""Structured logging and node tracing for the JobAgent runtime."""
+"""Structured logging and node tracing for the JobAgent runtime.
+
+Logging is powered by loguru: stdlib ``logging.getLogger(...)`` calls across
+the codebase (and loguru calls inside Spider_XHS) are routed through one
+``InterceptHandler`` into two loguru sinks - a colored console stream and a
+rotating file. Every line carries time, level, logger, function name, and
+line number; decision/node events additionally append their structured
+fields as JSON so machine parsing keeps working.
+"""
 
 from __future__ import annotations
 
@@ -6,16 +14,17 @@ import functools
 import inspect
 import json
 import logging
-import logging.config
 import re
+import sys
 import time
+import traceback
 import uuid
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, TypeVar
 
-import yaml
 from langchain.agents.middleware import AgentMiddleware
+from loguru import logger as loguru_logger
 
 _TRACE_ID: ContextVar[str | None] = ContextVar("jobagent_trace_id", default=None)
 
@@ -25,33 +34,175 @@ _SENSITIVE_QUERY = re.compile(
 )
 _NodeCallable = TypeVar("_NodeCallable", bound=Any)
 
+_DEFAULT_LOG_FILE = Path("data/logs/jobagent.log")
+_LOG_ROTATION = "10 MB"
+_LOG_RETENTION = 3
+_CONSOLE_FORMAT = (
+    "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+    "<level>{level: <8}</level> | "
+    "<cyan>{extra[logger_name]}</cyan>:"
+    "<blue>{function}</blue>:<cyan>{line}</cyan> - "
+    "<level>{message}</level>"
+)
+_FILE_FORMAT = (
+    "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | "
+    "[{thread.name}] {extra[logger_name]}:{function}:{line} | {message}"
+)
+_STRUCTURED_KEYS = (
+    "event_type",
+    "decision_name",
+    "basis",
+    "outcome",
+    "node_name",
+    "phase",
+    "duration_ms",
+    "input_summary",
+    "output_summary",
+    "error_type",
+)
+# Standard-library LogRecord attributes; everything else in ``record.__dict__``
+# came from ``extra={...}`` and must be forwarded to loguru.
+_STDLIB_RECORD_FIELDS = frozenset(
+    logging.LogRecord("", 0, "", 0, "", None, None).__dict__
+) | {"message", "asctime", "taskName"}
 
-class StructuredFormatter(logging.Formatter):
-    """Format node events as compact JSON while preserving ordinary log messages."""
+# Third-party noise that must not reach the console/file at INFO.
+_NOISY_LOGGERS = {
+    "urllib3": logging.WARNING,
+    "urllib3.connectionpool": logging.ERROR,
+    "urllib3.util.retry": logging.ERROR,
+    "httpx": logging.WARNING,
+    "httpcore": logging.WARNING,
+    "asyncio": logging.WARNING,
+    "playwright": logging.WARNING,
+}
 
-    def format(self, record: logging.LogRecord) -> str:
-        payload: dict[str, Any] = {
-            "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"),
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-            "trace_id": current_trace_id(),
+
+class InterceptHandler(logging.Handler):
+    """Route stdlib logging records into loguru with full caller context."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level: str | int = loguru_logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+
+        # Find the frame where the logged message originated so loguru
+        # reports the real function name and line number.
+        frame, depth = inspect.currentframe(), 0
+        while frame and (depth == 0 or frame.f_code.co_filename == logging.__file__):
+            frame = frame.f_back
+            depth += 1
+
+        extras = {
+            key: value
+            for key, value in record.__dict__.items()
+            if key not in _STDLIB_RECORD_FIELDS
         }
-        for key in (
-            "event_type",
-            "decision_name",
-            "basis",
-            "outcome",
-            "node_name",
-            "phase",
-            "duration_ms",
-            "input_summary",
-            "output_summary",
-            "error_type",
-        ):
-            if hasattr(record, key):
-                payload[key] = getattr(record, key)
-        return json.dumps(payload, ensure_ascii=False, default=str)
+        message = record.getMessage()
+        error = record.exc_info[1] if record.exc_info else None
+        has_exception = error is not None
+        if has_exception:
+            # loguru's callable format templates do not auto-append
+            # tracebacks, so embed the formatted exception in the message.
+            message += "\n" + "".join(
+                traceback.format_exception(error)
+            ).rstrip()
+        loguru_logger.opt(depth=depth).bind(
+            logger_name=record.name,
+            has_exception=has_exception,
+            **extras,
+        ).log(level, message)
+
+
+def _default_logger_name(record: Any) -> None:
+    """Patcher: native loguru records (e.g. Spider_XHS) use their module name."""
+
+    record["extra"].setdefault("logger_name", record["name"])
+
+
+def _file_format(record: Any) -> str:
+    """Readable file lines; structured events append their fields as JSON."""
+
+    extras = {
+        key: record["extra"][key]
+        for key in _STRUCTURED_KEYS
+        if record["extra"].get(key) is not None
+    }
+    if extras.get("event_type") in {"decision", "node"} or "decision_name" in extras:
+        extras.setdefault("trace_id", current_trace_id())
+        suffix = json.dumps(extras, ensure_ascii=False, default=str)
+        # The returned template is formatted with the record, so literal
+        # braces from the JSON payload must be escaped.
+        escaped = suffix.replace("{", "{{").replace("}", "}}")
+        return _FILE_FORMAT + "  " + escaped + "\n"
+    return _FILE_FORMAT + "\n"
+
+
+def setup_logging(
+    *,
+    log_level: str | None = None,
+    log_file: Path | None = None,
+    console_level: str | None = None,
+) -> list[int]:
+    """Configure loguru sinks and route all stdlib logging into them.
+
+    Args:
+        log_level: File/console verbosity for ``jobagent`` loggers; defaults to
+            ``JOBAGENT_LOG_LEVEL`` (INFO).
+        log_file: Rotating log target; defaults to ``JOBAGENT_LOG_FILE``.
+        console_level: Console sink level; defaults to WARNING so the chat
+            interface stays clean while the file keeps the full trace.
+
+    Returns:
+        The list of loguru handler ids (useful for tests to remove sinks).
+    """
+
+    from jobagent.config import get_settings
+
+    settings = get_settings()
+    level = (log_level or settings.jobagent_log_level).upper()
+    log_path = (log_file or settings.jobagent_log_file).expanduser()
+    console = (console_level or "WARNING").upper()
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    loguru_logger.remove()
+    loguru_logger.configure(patcher=_default_logger_name)
+    handler_ids = [
+        loguru_logger.add(
+            sys.stdout,
+            level=console,
+            format=_CONSOLE_FORMAT,
+            # Structured node/decision events stay file-only; records carrying
+            # an exception keep their traceback out of the chat console too
+            # (the CLI prints its own friendly error message instead).
+            filter=lambda record: (
+                not record["extra"].get("event_type")
+                and record["exception"] is None
+                and not record["extra"].get("has_exception")
+            ),
+            backtrace=False,
+            diagnose=False,
+        ),
+        loguru_logger.add(
+            log_path,
+            level=level,
+            format=_file_format,
+            rotation=_LOG_ROTATION,
+            retention=_LOG_RETENTION,
+            encoding="utf-8",
+            backtrace=False,
+            diagnose=False,
+        ),
+    ]
+
+    # All stdlib logging across the codebase flows through the intercept
+    # handler into the loguru sinks above.
+    logging.basicConfig(handlers=[InterceptHandler()], level=logging.WARNING, force=True)
+    logging.getLogger("jobagent").setLevel(level)
+    for name, noisy_level in _NOISY_LOGGERS.items():
+        logging.getLogger(name).setLevel(noisy_level)
+    return handler_ids
 
 
 def begin_trace() -> tuple[ContextVar[str | None], Any]:
@@ -149,22 +300,6 @@ def trace_node(node_func: _NodeCallable) -> _NodeCallable:
         return output
 
     return sync_wrapper  # type: ignore[return-value]
-
-
-def setup_logging(config_path: Path | None = None) -> None:
-    """Load logging.yml and create its rotating log directory if necessary."""
-
-    path = (config_path or Path("logging.yml")).expanduser().resolve()
-    if not path.is_file():
-        logging.basicConfig(level=logging.INFO)
-        return
-    with path.open(encoding="utf-8") as handle:
-        config = yaml.safe_load(handle)
-    handlers = config.get("handlers", {}) if isinstance(config, dict) else {}
-    file_handler = handlers.get("rotating_file") if isinstance(handlers, dict) else None
-    if isinstance(file_handler, dict) and isinstance(file_handler.get("filename"), str):
-        (path.parent / file_handler["filename"]).parent.mkdir(parents=True, exist_ok=True)
-    logging.config.dictConfig(config)
 
 
 class NodeTraceMiddleware(AgentMiddleware):
