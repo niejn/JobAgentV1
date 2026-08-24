@@ -20,6 +20,21 @@ class JobSearchProfile(BaseModel):
     preferred_locations: list[str] = Field(default_factory=list)
     salary_expectation: SalaryRange | None = None
     remote_ok: bool = True
+    prefer_online_interview: bool = Field(
+        default=True,
+        description=(
+            "True = prefer online/video interviews; "
+            "False = willing to commute for on-site interviews"
+        ),
+    )
+    home_address: str | None = Field(
+        default=None,
+        description=(
+            "User's home/residential address or district "
+            "(e.g. '上海浦东新区张江'), used to filter nearby jobs "
+            "and estimate commute"
+        ),
+    )
     preferred_industries: list[str] = Field(default_factory=list)
     preferred_company_sizes: list[str] = Field(default_factory=list)
     preferred_company_traits: list[str] = Field(default_factory=list)

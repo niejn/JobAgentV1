@@ -137,6 +137,12 @@ class VisibleStreamingFakeModel(ToolBindableFakeModel, BaseChatModel):
     ) -> AsyncIterator[ChatGenerationChunk]:
         yield ChatGenerationChunk(
             message=AIMessageChunk(
+                content="",
+                additional_kwargs={"reasoning_content": "模型思考：先理解用户意图"},
+            )
+        )
+        yield ChatGenerationChunk(
+            message=AIMessageChunk(
                 content=[{"type": "reasoning", "reasoning": "hidden chain of thought"}]
             )
         )
@@ -315,6 +321,8 @@ async def test_agent_streams_visible_tokens_without_hidden_reasoning(tmp_path) -
     assert any("模型已返回事件" in event.text for event in events if event.kind == "status")
     assert any("正式答案开始输出" in event.text for event in events if event.kind == "status")
     assert "".join(event.text for event in events if event.kind == "token") == "你好"
+    thinking = "".join(event.text for event in events if event.kind == "thinking")
+    assert thinking == "模型思考：先理解用户意图"
     assert all("hidden chain of thought" not in event.text for event in events)
     assert events[-1].kind == "done"
 
@@ -361,6 +369,10 @@ async def test_agent_streams_safe_tool_lifecycle_without_arguments(tmp_path) -> 
     assert "资料处理完成，正在生成回答…" in statuses
     assert all("示例公司" not in status for status in statuses)
     assert "".join(event.text for event in events if event.kind == "token") == "研究完成"
+    tool_summaries = [event.text for event in events if event.kind == "tool"]
+    assert tool_summaries
+    assert all("示例公司" not in summary for summary in tool_summaries)
+    assert all(len(summary) <= 1_200 for summary in tool_summaries)
 
 
 @pytest.mark.asyncio

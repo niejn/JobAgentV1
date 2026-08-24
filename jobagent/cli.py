@@ -23,7 +23,7 @@ from jobagent.auth.browser_login import (
     inspect_cookie_providers,
     interactive_login,
 )
-from jobagent.cli_status import RichStatusSpinner
+from jobagent.cli_status import TypewriterTranscript
 from jobagent.config import Settings, get_settings
 from jobagent.models import Job, JobSource
 from jobagent.notifier.discord import DiscordNotifier
@@ -31,7 +31,6 @@ from jobagent.notifier.telegram import TelegramNotifier
 from jobagent.observability import setup_logging
 from jobagent.profile.loader import load_profile
 from jobagent.scraper.base import BaseScraper
-from jobagent.scraper.boss import BossScraper
 from jobagent.scraper.linkedin import LinkedInScraper
 from jobagent.scraper.xhs_backend import SpiderXhsBackend
 from jobagent.scraper.xhs_discovery import XhsDiscoveryRequest, discover_xhs_notes
@@ -373,11 +372,16 @@ async def _render_streaming_reply(
     message: str,
     thread_id: str,
 ) -> None:
-    """Render safe Agent events while preserving token-level output."""
+    """Render thinking and tool progress transiently, then the final answer.
 
+    Reasoning deltas and tool summaries stream into a transient typewriter
+    region (erased once the formal answer begins, like pi/Claude Code);
+    answer tokens keep printing durably so the transcript stays intact.
+    """
+
+    transcript = TypewriterTranscript(stream=click.get_text_stream("stdout"))
     answer_line_open = False
     emitted_answer = False
-    spinner = RichStatusSpinner(stream=click.get_text_stream("stdout"))
     try:
         async for event in agent.stream_reply(message, thread_id=thread_id):
             kind = getattr(event, "kind", "")
@@ -386,16 +390,22 @@ async def _render_streaming_reply(
                 if answer_line_open:
                     click.echo()
                     answer_line_open = False
-                spinner.update(text)
+                # Mid-answer tool activity re-activates the animated spinner;
+                # it is erased again when the answer continues.
+                transcript.update_status(text)
+            elif kind == "thinking" and text:
+                transcript.show_thinking(text)
+            elif kind == "tool" and text:
+                transcript.show_tool(text)
             elif kind == "token" and text:
-                spinner.stop()
                 emitted_answer = True
+                transcript.begin_answer()
                 if not answer_line_open:
                     click.echo("JobAgent> ", nl=False)
                     answer_line_open = True
                 click.echo(text, nl=False)
     finally:
-        spinner.stop()
+        transcript.close()
     if answer_line_open:
         click.echo()
     elif not emitted_answer:
@@ -595,8 +605,6 @@ async def _scrape(platform: str, query: str, location: str | None, limit: int) -
 
     settings = get_settings()
     scrapers: list[BaseScraper] = []
-    if platform in {"boss", "all"}:
-        scrapers.append(BossScraper(settings))
     if platform in {"linkedin", "all"}:
         scrapers.append(LinkedInScraper(settings))
 
@@ -632,8 +640,6 @@ async def _run_pipeline(
     matcher = LLMMatcher(settings=settings)
 
     scrapers: list[BaseScraper] = []
-    if platform in {"boss", "all"}:
-        scrapers.append(BossScraper(settings))
     if platform in {"linkedin", "all"}:
         scrapers.append(LinkedInScraper(settings))
 

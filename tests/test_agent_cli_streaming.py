@@ -58,6 +58,22 @@ class FakeStreamingAgent:
         )
 
 
+class ThinkingStreamingAgent(FakeStreamingAgent):
+    async def stream_reply(
+        self,
+        message: str,
+        *,
+        thread_id: str,
+    ) -> AsyncIterator[AgentStreamEvent]:
+        yield AgentStreamEvent("status", "正在分析你的请求…")
+        yield AgentStreamEvent("thinking", "模型思考：先理解")
+        yield AgentStreamEvent("thinking", "用户意图")
+        yield AgentStreamEvent("tool", "save_shared_url {'status': 'completed'}")
+        yield AgentStreamEvent("token", "你")
+        yield AgentStreamEvent("token", "好")
+        yield AgentStreamEvent("done", "")
+
+
 class FailingStreamingAgent(FakeStreamingAgent):
     async def stream_reply(
         self,
@@ -361,3 +377,32 @@ def test_status_command_renders_weekly_opportunity_summary_without_llm(monkeypat
     assert "适合 1" in result.output
     assert "已投递 1" in result.output
     assert "示例科技 · AI Engineer" in result.output
+
+
+def test_chat_cli_prints_thinking_and_tool_lines_before_final_answer(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    agent = ThinkingStreamingAgent()
+    monkeypatch.setattr("jobagent.agent.build_job_agent", lambda *args, **kwargs: agent)
+    monkeypatch.setattr(
+        "jobagent.cli.get_settings",
+        lambda: Settings(
+            _env_file=None,
+            jobagent_state_db=tmp_path / "profile.db",
+            jobagent_checkpoint_db=tmp_path / "checkpoints.db",
+        ),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["chat", "--thread-id", "stream-test"],
+        input="你好\n/exit\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    thinking_at = result.output.index("模型思考：先理解用户意图")
+    tool_at = result.output.index("工具结果 save_shared_url")
+    answer_at = result.output.index("JobAgent> 你好")
+    assert thinking_at < answer_at
+    assert tool_at < answer_at

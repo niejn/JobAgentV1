@@ -156,7 +156,7 @@ def fake_handle_note_info(item: dict[str, Any]) -> dict[str, Any]:
         "nickname": card["user"]["nickname"],
         "title": card["title"],
         "desc": card["desc"],
-        "image_list": ["https://example.com/0.webp", "https://example.com/1.webp"],
+        "image_list": ["http://example.com/0.webp", "https://example.com/1.webp"],
         "tags": ["面经"],
         "upload_time": "2025-01-02 03:04:05",
         "liked_count": "12",
@@ -174,9 +174,14 @@ def fake_download_note(note: dict[str, Any], path: str, save_choice: str) -> str
     return str(note_dir)
 
 
+MEDIA_DOWNLOAD_CALLS: list[dict[str, str]] = []
+
+
 def fake_download_media(path: str, name: str, url: str, media_type: str) -> None:
     assert media_type == "image"
-    assert url.startswith("https://example.com/")
+    MEDIA_DOWNLOAD_CALLS.append(
+        {"path": path, "name": name, "url": url, "media_type": media_type}
+    )
     (Path(path) / f"{name}.jpg").write_bytes(name.encode())
 
 
@@ -301,6 +306,7 @@ async def test_download_note_reuses_spider_normalizer_and_downloader(
     settings: Settings,
     bindings: SpiderXhsBindings,
 ) -> None:
+    MEDIA_DOWNLOAD_CALLS.clear()
     backend = SpiderXhsBackend(settings, bindings=bindings)
     await backend.start()
 
@@ -315,6 +321,13 @@ async def test_download_note_reuses_spider_normalizer_and_downloader(
     assert [path.name for path in result.images] == ["image_0.jpg", "image_1.jpg"]
     assert result.body_path.read_text(encoding="utf-8") == "面试正文"
     assert json.loads(result.raw_response_path.read_text(encoding="utf-8"))["success"] is True
+    # Thin adapter contract: Spider_XHS owns URL handling, so the backend
+    # forwards image URLs untouched instead of rewriting their scheme.
+    assert [call["url"] for call in MEDIA_DOWNLOAD_CALLS] == [
+        "http://example.com/0.webp",
+        "https://example.com/1.webp",
+    ]
+    assert all(call["media_type"] == "image" for call in MEDIA_DOWNLOAD_CALLS)
 
 
 @pytest.mark.asyncio

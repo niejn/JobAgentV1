@@ -69,7 +69,6 @@ class XhsAuthorPostsBrowser:
                     request.author_id,
                     limit=request.limit,
                 )
-                notes = [await backend.fetch_note(reference.url) for reference in references]
         except XhsAuthenticationError:
             return {
                 "status": "blocked",
@@ -83,16 +82,44 @@ class XhsAuthorPostsBrowser:
                 "message": "小红书作者主页读取被拒绝或暂时不可用，未尝试绕过。",
             }
 
+        # 逐篇 fetch_note，单篇失败不阻塞整批
+        successful: list[XhsFetchedNote] = []
+        failed_details: list[dict[str, str]] = []
+        for ref in references:
+            try:
+                note = await backend.fetch_note(ref.url)
+                successful.append(note)
+            except Exception as exc:
+                failed_details.append(
+                    {
+                        "note_id": ref.note_id,
+                        "error_type": type(exc).__name__,
+                        "message": str(exc)[:200],
+                    }
+                )
+
         keyword = request.keyword.strip().lower() if request.keyword else ""
-        selected = [note for note in notes if not keyword or _contains_keyword(note, keyword)]
-        return {
-            "status": "completed",
+        selected = [
+            note for note in successful if not keyword or _contains_keyword(note, keyword)
+        ]
+        result: dict[str, Any] = {
+            "status": "completed" if successful else "failed",
             "author_id": request.author_id,
             "profile_url": request.profile_url,
+            "total_found": len(references),
+            "fetched": len(successful),
+            "failed": len(failed_details),
             "count": len(selected),
             "posts": [_post_payload(note) for note in selected],
             "next_action": "Choose valuable post URLs and call save_shared_url for download/OCR.",
         }
+        if failed_details:
+            result["failed_details"] = failed_details
+        if successful:
+            result["status"] = (
+                "partial" if failed_details else "completed"
+            )
+        return result
 
 
 def build_xhs_author_posts_tool(browser: XhsAuthorPostsBrowser) -> BaseTool:
