@@ -740,6 +740,31 @@ def build_system_prompt(
 ) -> str: ...
 ```
 
+### LangGraph / deepagents 对接结构（2026-08-27 记录，PS-4 设计依据）
+
+```text
+jobagent/agent.py（我们的代码）
+  JobAgent.reply() / reply_stream()
+    │
+    │ graph = create_deep_agent(model, tools, system_prompt,   ← deepagents 层
+    │                         checkpointer=AsyncSqliteSaver)     中间件装配器+预制骨架
+    │
+    │ async for part in graph.astream(                          ← LangGraph 层
+    │     input, config={"configurable": {"thread_id": ...},
+    │                     "recursion_limit": 90})          ← 预算在此设置
+```
+
+要点：
+1. `create_deep_agent()` 返回值就是 LangGraph `CompiledStateGraph`——deepagents 不运行
+   agent，它把中间件（文件系统/子agent/记忆/HITL）编织成标准 LangGraph 图后把图交还。
+   astream/checkpointer/thread_id/recursion_limit 全是 LangGraph 原生概念。
+2. 控制面三个插值点分层：工具集/prompt/记忆 → 构造时传 create_deep_agent（图形状）；
+   运行预算 recursion_limit → 每次 astream 的 config（本次步数）；
+   会话连续性 thread_id + checkpointer → config 与构造各一半。
+3. Hermes 自写主循环（while + IterationBudget + 裸调 LLM）；我们把循环交给 LangGraph，
+   因此 Hermes 预算设计到我们这里**翻译**成 recursion_limit + 异常收尾，不是照抄计数器。
+   我们不需要线程安全计数器（无 delegate_task 并发消费）。
+
 ### 切片（2026-08-27 用户定级：三件全部采纳，PS-1/PS-2 高优先级）
 
 | 切片 | 内容 | 优先级 |
@@ -747,6 +772,7 @@ def build_system_prompt(
 | PS-1 | `build_system_prompt()` builder：**条件注入**（工具集驱动，policy 段跟随工具注册状态，程序性保证非手工同步）+ **元数据层**（当前日期/模型/平台提示，首轮注入随会话冻结——agent 才能算"下周三"、判断"打招呼三天没回"是否超时） | 🔴 高 |
 | PS-2 | **注入检测器** `_scan_context_threat()`（Hermes _CONTEXT_THREAT_PATTERNS 同款：ignore previous instructions / do not tell the user / sys prompt override / exfil curl / read secrets...）；接入 candidate_context 及将来 JD/HR 消息入 prompt 的所有路径；命中整块替换 `[BLOCKED: potential prompt injection]`。我们比 Hermes 更需要：HR 消息/JD 都是外部文本，injection 入口更多 | 🔴 高 |
 | PS-3 | 与 F7 记忆快照合流（CM-3 同步实施） | 🟡 随 F7 |
+| PS-4 | **迭代预算与优雅收尾**（2026-08-27 增，借鉴 Hermes IterationBudget）：① 显式配置 `settings.jobagent_recursion_limit`（默认 90，astream config 传入；现状是 LangGraph 隐式默认 25 ≈ 仅 6-12 轮工具循环；单位换算：超步≠模型轮，deepagents 一轮工具循环 ≈ 2-4 超步，Hermes 90 轮 ≈ 200+ 超步，但 90 超步已覆盖绝大多数任务）；② 捕获 `GraphRecursionError` → 无工具配置再调一次模型做纯总结收尾（"以下是目前为止的结论…"，对应 Hermes _budget_grace_call 思路）；③ 预算可见：流事件报剩余步数，复杂任务用户有感知 | 🟢 低 |
 
 ---
 
