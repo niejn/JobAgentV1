@@ -122,22 +122,169 @@ def run_command(
     "--platform",
     default="xhs",
     show_default=True,
-    help="Platform to log in to. [xhs, linkedin, all]",
+    help="Platform to log in to. [xhs, linkedin, wechat, all]",
 )
 @click.option("--timeout", type=int, default=5, show_default=True, help="Login timeout in minutes.")
 @click.option("--check", is_flag=True, help="Only check if existing cookies are valid.")
 def login_command(platform: str, timeout: int, check: bool) -> None:
     """Interactive browser login to save cookies."""
-    valid = {"xhs", "linkedin", "all"}
+    valid = {"xhs", "linkedin", "wechat", "all"}
     if platform == "boss":
         click.echo("Boss 直聘使用 CDP 连接真实 Chrome 浏览器，不需要登录。")
         return
     if platform not in valid:
-        raise click.UsageError(f"无效平台 '{platform}'，可选: xhs, linkedin, all")
+        raise click.UsageError(
+            f"无效平台 '{platform}'，可选: xhs, linkedin, wechat, all"
+        )
+    if platform == "wechat":
+        asyncio.run(_wechat_login(check_only=check, timeout_minutes=timeout))
+        return
     platforms = [
         p for p in PLATFORM_CONFIG.keys() if p != "boss"
     ] if platform == "all" else [platform]
     asyncio.run(_login(platforms=platforms, timeout=timeout, check_only=check))
+
+
+async def _wechat_login(*, check_only: bool, timeout_minutes: int) -> None:
+    """QR-scan login for the WeChat iLink bot account (no browser needed)."""
+
+    from jobagent.wechat import (
+        QRLoginState,
+        WeixinAccount,
+        WeixinAccountStore,
+        WeixinBotClient,
+        WeixinSessionExpired,
+    )
+
+    store = WeixinAccountStore()
+    if check_only:
+        account = store.load()
+        if account is None:
+            click.echo("JobAgent · 微信 Bot 尚未登录；运行 jobagent login --platform wechat 扫码。")
+            return
+        try:
+            async with WeixinBotClient(account=account) as client:
+                _, _ = await client.get_updates("")
+        except WeixinSessionExpired:
+            click.echo("JobAgent · 微信 Bot 登录已过期（errcode -14），请重新扫码登录。")
+        except Exception as exc:  # noqa: BLE001 - diagnostics must not crash
+            click.echo(f"JobAgent · 微信 Bot 状态检查失败：{exc}")
+        else:
+            click.echo(
+                f"JobAgent · 微信 Bot 登录有效（bot_id={account.bot_id or 'N/A'}）。"
+            )
+        return
+
+    click.echo("JobAgent · 微信 Bot 扫码登录（iLink 官方 API，无封号风险）")
+    async with WeixinBotClient() as client:
+        qr = await client.request_qr_code()
+        _render_wechat_qr(qr.img_content)
+        poll_base: str | None = None
+        refresh_count = 0
+        deadline = asyncio.get_event_loop().time() + timeout_minutes * 60
+        while asyncio.get_event_loop().time() < deadline:
+            status = await client.poll_qr_status(qr.key, base_url=poll_base)
+            if status.state is QRLoginState.CONFIRMED:
+                store.save(
+                    WeixinAccount(
+                        bot_token=status.bot_token,
+                        base_url=status.base_url,
+                        bot_id=status.bot_id,
+                        owner_user_id=status.owner_user_id,
+                        login_at=datetime.now().astimezone().isoformat(),
+                    )
+                )
+                click.echo(
+                    f"JobAgent · 微信 Bot 登录成功（bot_id={status.bot_id or 'N/A'}），"
+                    f"凭证已保存到 {store.path}。"
+                )
+                click.echo(
+                    "提示：iLink bot 无法主动发起会话；"
+                    "请在微信里给 bot 发一条消息激活对话，之后运行 jobagent watch。"
+                )
+                return
+            if status.state is QRLoginState.REDIRECT and status.redirect_host:
+                poll_base = f"https://{status.redirect_host}"
+                continue
+            if status.state is QRLoginState.EXPIRED:
+                refresh_count += 1
+                if refresh_count > 3:
+                    click.echo("JobAgent · 二维码多次过期，请重新运行登录命令。")
+                    return
+                click.echo(f"JobAgent · 二维码已过期，自动刷新 ({refresh_count}/3)…")
+                qr = await client.request_qr_code()
+                _render_wechat_qr(qr.img_content)
+                continue
+            if status.state is QRLoginState.SCANNED:
+                click.echo("已扫码，请在手机微信中确认…")
+            await asyncio.sleep(2)
+        click.echo("JobAgent · 登录超时，未完成扫码确认。")
+
+
+def _render_wechat_qr(img_content: str) -> None:
+    """Render the scannable liteapp URL as a terminal ASCII QR code."""
+
+    click.echo("请用微信扫描下方二维码（或在手机微信中长按识别）：\n")
+    try:
+        import qrcode
+
+        matrix = qrcode.QRCode(border=1)
+        matrix.add_data(img_content)
+        matrix.print_ascii(invert=True)
+    except ImportError:
+        click.echo(f"    二维码链接: {img_content}")
+
+
+@main.command("watch")
+@click.option(
+    "--channel",
+    "channels",
+    multiple=True,
+    type=click.Choice(["wechat"]),
+    default=["wechat"],
+    show_default=True,
+    help="Gateway channels to run (more coming: boss message monitor).",
+)
+def watch_command(channels: tuple[str, ...]) -> None:
+    """Run the HR Gateway process: WeChat bot + job progress commands."""
+
+    asyncio.run(_watch(channels=channels))
+
+
+async def _watch(channels: tuple[str, ...]) -> None:
+    """Gateway entry: run all requested channels until Ctrl+C."""
+
+    from jobagent.gateway import WeChatChannel, build_registry_command_handler
+    from jobagent.wechat import WeixinAccountStore
+
+    settings = get_settings()
+    running: list[WeChatChannel] = []
+    if "wechat" in channels:
+        account = WeixinAccountStore().load()
+        if account is None:
+            click.echo(
+                "JobAgent · 微信 Bot 未登录；先运行 jobagent login --platform wechat。"
+            )
+            return
+        running.append(
+            WeChatChannel(
+                account=account,
+                handler=build_registry_command_handler(settings.jobagent_state_db),
+            )
+        )
+    if not running:
+        click.echo("JobAgent · 没有可运行的通道。")
+        return
+    click.echo(
+        f"JobAgent · HR Gateway 已启动（通道: {', '.join(channels)}），Ctrl+C 退出。"
+    )
+    try:
+        await asyncio.gather(*(channel.run() for channel in running))
+    except KeyboardInterrupt:
+        click.echo("\nJobAgent · HR Gateway 已停止。")
+    finally:
+        for channel in running:
+            await channel.aclose()
 
 
 @main.command("chat")

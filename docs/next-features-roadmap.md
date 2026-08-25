@@ -312,14 +312,70 @@ JobAgent 与 HR 的对话，两者不直接通信，只通过 SQLite 交接状�
 
 ---
 
+## F6. 微信通知与交互通道（iLink Bot）🚧
+
+**调研结论（2026-08-25）**：微信个人号已有官方 Bot API（iLink 协议，域名
+`ilinkai.weixin.qq.com`），纯 HTTP/JSON，无 WebSocket/公网/客户端 hook，无封号风险；
+腾讯自己维护 OpenClaw 官方插件，底层即此协议。选定方案：**移植 Hermes
+`gateway/platforms/weixin.py`（MIT）核心为 `jobagent/wechat/`**，不引入 OpenClaw
+sidecar（Node.js 全家桶过重），Email 仅作兑底。
+
+**关键限制**：`context_token` 机制下 bot 不能对从未发过消息的用户主动推送，
+长时间无对话后主动通知可能失败 -> 通知主通道用桌面 toast（watch 进程本机必达），
+微信通道承担双向交互（用户先发消息，bot 回复详情/草稿/确认）。
+
+### 已交付（WX-1，2026-08-25）✅
+
+- `jobagent/wechat/ilink.py`：文本版 iLink 客户端（httpx，无 aiohttp 依赖）——QR 扫码登录、
+  35s 长轮询 + 游标、发消息（强制回显 context_token）、errcode -14 会话过期、
+  X-WECHAT-UIN 防重放头；`WeixinAccountStore`（~/.jobagent/wechat/）、
+  `ContextTokenStore`（重启后回复连续性）、`MessageDeduplicator`（5 分钟滑动窗口）。
+- `jobagent login --platform wechat`：终端 ASCII 二维码扫码登录；`--check` 检查 token 有效性。
+- 隐藏诊断命令 `jobagent wechat-echo`：echo bot 真机冒烟（/help /ping /time）。
+- 新增依赖：`qrcode>=8.2`（纯 Python 终端二维码）。
+- 验证：17 项单测全过（httpx.MockTransport，零真实网络）。
+
+### 后续切片 📋
+
+| 切片 | 内容 | 备注 |
+|---|---|---|
+| WX-2 | 真机验收：扫码登录 + gateway /status 双向收发 | 用户手机实测 |
+| WX-3 | watch 集成：新 HR 消息 -> 桌面 toast + 微信回复（用户主动询问时）；context_token 失效降级 | 依赖 HG-1 |
+| WX-4 | 微信确认流：草稿推送 + 用户回 "ok/改/拒" -> outbound_authorization -> 发送 | 即原 HG-6，双向交互模式下可行 |
+| WX-5 | 媒体消息（AES-128-ECB CDN）/ typing 状态/ markdown 分块 | 按需后置 |
+
+### 已交付（WX-3-GW，2026-08-26）✅
+
+原 WX-3 优先拆出 gateway 本体（先用注册表命令，再接 Boss 消息）：
+
+- 参照 HermesAgent 本机源码核实 iLink 真实协议，修正三处移植偏差：QR 状态机
+  （`wait`/`scaned`(API 自身拼写)/`scaned_but_redirect`→`redirect_host` 换 base_url/
+  `expired` 自动刷新最多 3 次/`confirmed` 载荷含 `ilink_bot_id`+`ilink_user_id`）、
+  消息去重字段为 `message_id`、轮询响应 `longpolling_timeout_ms`（对 MVP 固定 40s 足够）。
+- `jobagent/gateway/wechat_channel.py`（WeChatChannel）：生产级轮询回路——游标持久化
+  （sync-buf.json 重启恢复）、errcode -14 会话过期暂停 10 分钟、连续失败退避 + 会话回收、
+  消息去重（message_id + 内容指纹双通道）、owner 白名单（默认仅扫码用户）、
+  context_token 跨进程/跨重启保存（回复连续性）。
+- `jobagent watch`（gateway 入口，`--channel wechat`）：命令处理——`/status` 岗位进度
+  概览、`/progress <job_id|公司>` 事件时间线、`/ping`、`/help`；自由文本不回复
+  （引导 `jobagent chat`），保持 chat/watch 职能清晰。
+- `login --platform wechat` 升级：支持 `scaned_but_redirect` 换域、过期自动刷新二维码、
+  保存 owner_user_id（扫码用户，即白名单来源）。
+- 删除过渡期 `wechat-echo` 命令（watch 已取代其冒烟职责）。
+- 验证：23 项 gateway 测试 + 17 项 iLink 测试全过（MockTransport，零真实网络）；
+  `311 passed, 1 skipped`；Ruff、mypy 全绿。
+
+---
+
 ## 推荐实施顺序
 
 ```text
 F3 TR-1/TR-2（简历版本库，面试刚需，零风险）
   -> F4 HG-1/HG-2（消息监控 + 通知，信息流入口）
+  -> F6 WX-2（微信真机验收）
   -> F5 IV-1/IV-2（面试记录 + 转写）
   -> F3 TR-3/TR-4（Boss 站内简历/PDF 写操作，需真机校准）
-  -> F4 HG-3/HG-4（回复草稿 + HITL 发送）
+  -> F4 HG-3/HG-4 + F6 WX-3/WX-4（回复草稿 + 双通道确认发送）
   -> F5 IV-3~IV-5（错题集/打分/经验贴）
   -> F2 G1/G2、F1 R1~R4 穿插进行
 ```
