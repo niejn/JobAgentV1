@@ -143,6 +143,14 @@ class Settings(BaseSettings):
     jobagent_research_timeout: int = Field(default=300, ge=30, le=1800)
     jobagent_history_compact_after_messages: int = Field(default=40, ge=5, le=500)
     jobagent_history_keep_recent_messages: int = Field(default=16, ge=2, le=100)
+    # 运行预算：deep_agent 每次调用的最大超步数（supersteps）。
+    # LangGraph 的隐式默认是 25 —— 约仅 6-12 轮“模型→工具→模型”循环，复合任务
+    # （连续调研+对比+写工件）会中途裸崩 GraphRecursionError。
+    # 换算参考：deepagents 一轮工具循环 ≈ 2-4 超步，90 超步 ≈ 22-45 轮，
+    # 已覆盖绝大多数任务（Hermes 的 90 轮模型调用 ≈ 200+ 超步，无需对齐）。
+    # 超限时的收尾行为见 JobAgent.reply_stream 的 GraphRecursionError 分支
+    # （无工具纯总结，对应 Hermes _budget_grace_call 思路）。
+    jobagent_recursion_limit: int = Field(default=90, ge=1, le=500)
     jobagent_history_summary_input_max_chars: int = Field(
         default=24_000,
         ge=2_000,

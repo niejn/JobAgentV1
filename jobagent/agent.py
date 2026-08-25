@@ -30,6 +30,7 @@ from langchain_core.messages import (
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.errors import GraphRecursionError
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from jobagent.artifacts import (
@@ -152,6 +153,10 @@ class JobAgent:
         checkpoint_db: Path,
         history_compact_after_messages: int = 40,
         history_keep_recent_messages: int = 16,
+        # 每次调用的最大超步数；不传时回退 LangGraph 默认 25（仅约 6-12 轮工具循环）。
+        # 超限时不裸抛 GraphRecursionError，而是无工具再调一次模型做总结收尾
+        # （见 _graceful_budget_exhaustion，对应 Hermes _budget_grace_call）。
+        recursion_limit: int = 90,
         history_summary_input_max_chars: int = 24_000,
         history_summary_timeout: int = 60,
         opportunity_artifacts: LocalOpportunityArtifacts | None = None,
@@ -168,6 +173,7 @@ class JobAgent:
         self._history_lock = asyncio.Lock()
         self._history_compact_after_messages = history_compact_after_messages
         self._history_keep_recent_messages = history_keep_recent_messages
+        self._recursion_limit = recursion_limit
         self._history_summary_input_max_chars = history_summary_input_max_chars
         self._history_summary_timeout = history_summary_timeout
         self._opportunity_artifacts = opportunity_artifacts
@@ -197,6 +203,20 @@ class JobAgent:
         try:
             async for event in self._stream_reply_events(message, thread_id=thread_id):
                 yield event
+        except GraphRecursionError:
+            # 运行预算耗尽（recursion_limit 超步，见 settings 注释）：不裸抛异常，
+            # 而是用已完成的 checkpoint 状态做一次无工具纯总结收尾，
+            # 让用户拿到"目前为止的结论"而不是报错（Hermes _budget_grace_call 思路）。
+            logger.warning(
+                "jobagent.recursion_limit_exhausted",
+                extra={"thread_id": thread_id, "recursion_limit": self._recursion_limit},
+            )
+            yield AgentStreamEvent("status", "已达最大运行步数，正在总结目前的结论…")
+            deep_agent = await self._ensure_deep_agent()
+            summary = await self._graceful_budget_exhaustion(deep_agent, thread_id)
+            if summary:
+                yield AgentStreamEvent("token", summary)
+            yield AgentStreamEvent("done", "")
         finally:
             reset_trace(trace_token)
 
@@ -247,7 +267,12 @@ class JobAgent:
         tool_started = time.perf_counter()
         async for part in deep_agent.astream(
             {"messages": [{"role": "user", "content": message}]},
-            config={"configurable": {"thread_id": thread_id}},
+            config={
+                "configurable": {"thread_id": thread_id},
+                # 运行预算：不传则 LangGraph 隐式默认 25 超步（≈6-12 轮工具循环），
+                # 复合任务会中途裸崩。默认 90 ≈ 22-45 轮，见 settings 注释与 PS-4 设计。
+                "recursion_limit": self._recursion_limit,
+            },
             stream_mode=["messages", "updates"],
             version="v2",
         ):
@@ -431,6 +456,44 @@ class JobAgent:
                 "jobagent.debug_trace.complete",
                 extra={"elapsed_seconds": round(time.perf_counter() - request_started, 3)},
             )
+
+    async def _graceful_budget_exhaustion(self, deep_agent: Any, thread_id: str) -> str:
+        """预算耗尽后的收尾：无工具再调一次模型，总结已有进展。
+
+        与 `_recover_final_answer`（工具已完成但答案被截断）不同，这里面对的是
+        递归上限内**未完成**的任务：模型循环中途被切新。收尾要求模型基于
+        checkpoint 中已有的部分结果给出阶段性结论与未完成项，不得再调工具。
+        结果写回 checkpoint（同恢复路径），保证下一轮对话上下文连贯。
+        """
+
+        config = {"configurable": {"thread_id": thread_id}}
+        try:
+            snapshot = await deep_agent.aget_state(config)
+            messages = tuple(snapshot.values.get("messages", ()))
+            closing_messages: list[BaseMessage] = [
+                SystemMessage(
+                    content=(
+                        f"{self._system_prompt}\n\n"
+                        "<budget_exhaustion_policy>运行步数预算已耗尽，当前任务未完成。"
+                        "基于以上已有进展，用中文给出阶段性总结：已完成什么、得到哪些"
+                        "关键结论、还有什么未完成。不得调用任何工具，不要输出隐藏推理，"
+                        "直接给出简洁、诚实、可执行的收尾说明，并建议用户如何继续"
+                        "（例如换个更小的任务或分步进行）。</budget_exhaustion_policy>"
+                    )
+                ),
+                *messages,
+            ]
+            closing_model = self._model.bind(max_tokens=4096, temperature=0.0)
+            async with asyncio.timeout(60):
+                response = await closing_model.ainvoke(closing_messages)
+            summary = _visible_text(response).strip()
+            if not summary or not isinstance(response, AIMessage):
+                return ""
+            await deep_agent.aupdate_state(config, {"messages": [response]})
+            return summary
+        except Exception:
+            logger.warning("Budget-exhaustion closing summary failed", exc_info=True)
+            return "本轮已达最大运行步数（未能在预算内完成）。建议拆分为更小的任务分别进行。"
 
     async def _recover_final_answer(self, deep_agent: Any, thread_id: str) -> str:
         """Retry once without Tools when a completed Tool turn has no visible answer."""
@@ -991,6 +1054,7 @@ def build_job_agent(
         checkpoint_db=settings.jobagent_checkpoint_db,
         history_compact_after_messages=settings.jobagent_history_compact_after_messages,
         history_keep_recent_messages=settings.jobagent_history_keep_recent_messages,
+        recursion_limit=settings.jobagent_recursion_limit,
         history_summary_input_max_chars=settings.jobagent_history_summary_input_max_chars,
         history_summary_timeout=settings.jobagent_history_summary_timeout,
         opportunity_artifacts=LocalOpportunityArtifacts(
