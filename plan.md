@@ -393,3 +393,36 @@ JobAgent Supervisor
 - 实施顺序：BCDP-1 单页 tracer bullet → BCDP-2 分页/去重 → BCDP-3 完整 JD → BCDP-4 默认
   切换与 Windows 真机验收 → BCDP-5 HITL 投递/MCP。
 - 详细设计：`docs/boss-integration-design.md`。
+
+### 8.7 岗位进度登记册与 JD 定制招呼（2026-08-25）✅
+
+- ✅ `jobagent/journey/job_registry.py`：SQLite 岗位登记册（`job_records` + `job_status_events`），
+  按稳定岗位身份 `boss:<encryptJobId>` 去重；状态机 `discovered -> recommended -> greeted ->
+  hr_replied / no_response -> interviewing -> offer / rejected -> closed`，closed 可重开，
+  非法流转抛 `JobTransitionError`。
+- ✅ `discover_boss_jobs` 自动入册并给每个岗位标注 `progress_status`/`is_new`/`greeted_at`；
+  已打招呼/面试中的岗位 Agent 不再重复推荐；新增 `new_count`/`already_known` 汇总。
+- ✅ `boss_greet_jobs` 发送成功自动标 `greeted`；`BossApplier.apply` 支持 per-JD 个性化招呼语
+  （`GreetingTarget.greeting` 字段），优先于模板；registry 记录失败不阻断批次。
+- ✅ 新 Agent Tools：`update_job_progress` / `get_job_progress`（完整事件历史）/ `list_job_records`
+  （按状态/公司筛选，`discovered` 查漏）。
+- ✅ System prompt 新增 `<job_progress_policy>`（长周期状态落库、去重、查漏）与
+  `<greeting_policy>`（JD 定制招呼语、HITL 确认、禁止模板播报与虚构经历）。
+- ✅ `jobagent chat --sessions` 列出历史会话（消息数 + 最后使用时间）；退出时打印恢复命令。
+- ✅ `validate-profile` 隐藏为内部批量测试入口；`discover_boss_jobs` 在缺少 Job Search Profile
+  或候选人资料时返回 `missing_candidate_data`，Agent 先收集资料再爬取（工具层硬约束）。
+- ✅ 测试日志隔离：conftest 将 CLI 入口的 `setup_logging()` 重定向到 `data/logs/tests/`，
+  测试 traceback 不再写入 `data/logs/jobagent.log`（含回归测试）。
+- 验证基线：`271 passed, 1 skipped`；Ruff、mypy 全绿。
+
+### 8.8 下一阶段功能路线图（2026-08-25 定稿）📋
+
+五个已讨论功能的分阶段交付计划见 **`docs/next-features-roadmap.md`**：
+
+1. F1 岗位进度登记册（✅ 核心已交付；后续：/status 合并视图、投递资格策略、周报）
+2. F2 JD 定制打招呼语（✅ 管道已交付；后续：招呼语历史库 + 回复率复盘）
+3. F3 定制简历版本库 + Boss 站内简历同步/PDF 上传（TR-1~5，写操作全 HITL）
+4. F4 HR 消息流轻量 Gateway（复用 CDP 被动监听，`jobagent watch` 后台进程，HG-1~5）
+5. F5 面试录音复盘 + 错题集（IV-1~5，转写/错题本/多维打分/经验贴）
+
+推荐顺序：TR-1/2 -> HG-1/2 -> IV-1/2 -> TR-3/4 -> HG-3/4 -> IV-3~5。

@@ -369,8 +369,9 @@ class NodeTraceMiddleware(AgentMiddleware):
 
     def _emit(self, node_name: str, phase: str, **fields: Any) -> None:
         self._logger.info(
-            "agent.node.%s",
+            "agent.node.%s node=%s",
             phase,
+            node_name,
             extra={
                 "node_name": node_name,
                 "phase": phase,

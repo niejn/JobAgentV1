@@ -60,7 +60,7 @@ def main() -> None:
     """Root CLI group."""
 
 
-@main.command("validate-profile")
+@main.command("validate-profile", hidden=True)
 @click.option(
     "--profile",
     "profile_path",
@@ -120,16 +120,23 @@ def run_command(
 @main.command("login")
 @click.option(
     "--platform",
-    type=click.Choice(["boss", "linkedin", "xhs", "all"]),
-    default="boss",
+    default="xhs",
     show_default=True,
-    help="Platform to log in to.",
+    help="Platform to log in to. [xhs, linkedin, all]",
 )
 @click.option("--timeout", type=int, default=5, show_default=True, help="Login timeout in minutes.")
 @click.option("--check", is_flag=True, help="Only check if existing cookies are valid.")
 def login_command(platform: str, timeout: int, check: bool) -> None:
     """Interactive browser login to save cookies."""
-    platforms = list(PLATFORM_CONFIG.keys()) if platform == "all" else [platform]
+    valid = {"xhs", "linkedin", "all"}
+    if platform == "boss":
+        click.echo("Boss 直聘使用 CDP 连接真实 Chrome 浏览器，不需要登录。")
+        return
+    if platform not in valid:
+        raise click.UsageError(f"无效平台 '{platform}'，可选: xhs, linkedin, all")
+    platforms = [
+        p for p in PLATFORM_CONFIG.keys() if p != "boss"
+    ] if platform == "all" else [platform]
     asyncio.run(_login(platforms=platforms, timeout=timeout, check_only=check))
 
 
@@ -142,10 +149,40 @@ def login_command(platform: str, timeout: int, check: bool) -> None:
     help="Optional YAML import for search profile and resume/background.",
 )
 @click.option("--thread-id", default=None, help="Existing session ID; omitted creates one.")
-def chat_command(startup_config: Path | None, thread_id: str | None) -> None:
+@click.option("--sessions", "list_sessions", is_flag=True, help="List saved sessions and exit.")
+def chat_command(
+    startup_config: Path | None, thread_id: str | None, list_sessions: bool
+) -> None:
     """Start a conversational JobAgent session."""
 
+    if list_sessions:
+        asyncio.run(_list_sessions_only())
+        return
     asyncio.run(_chat(startup_config=startup_config, thread_id=thread_id))
+
+
+async def _list_sessions_only() -> None:
+    """Print saved sessions without entering the interactive chat loop."""
+
+    from jobagent.agent import build_job_agent
+
+    settings = get_settings()
+    setup_logging()
+    agent = build_job_agent(settings)
+    try:
+        sessions = await agent.list_sessions()
+    finally:
+        await agent.close()
+    if not sessions:
+        click.echo("JobAgent · 暂无已保存的历史会话。")
+        return
+    click.echo("JobAgent · 历史会话（最近优先）：")
+    for index, session in enumerate(sessions, start=1):
+        click.echo(
+            f"  {index}. {session.thread_id} "
+            f"({session.message_count} 条消息, {session.last_used_at})"
+        )
+    click.echo("\n用 `jobagent chat --thread-id <session ID>` 恢复某个会话。")
 
 
 async def _chat(startup_config: Path | None, thread_id: str | None) -> None:
@@ -198,6 +235,14 @@ async def _chat(startup_config: Path | None, thread_id: str | None) -> None:
                     )
                 )
     finally:
+        click.echo()
+        click.echo(
+            click.style("会话已保存: ", fg="cyan") + active_thread_id
+        )
+        click.echo(
+            click.style("下次继续: ", fg="cyan")
+            + f"jobagent chat --thread-id {active_thread_id}"
+        )
         await agent.close()
 
 
@@ -272,9 +317,10 @@ async def _choose_session(agent: StreamingJobAgent, current_thread_id: str) -> s
     click.echo("JobAgent · 历史会话（最近优先）：")
     for index, session in enumerate(sessions, start=1):
         thread_id = str(getattr(session, "thread_id", ""))
-        checkpoint_count = int(getattr(session, "checkpoint_count", 0))
+        msg_count = int(getattr(session, "message_count", 0))
+        last_used = str(getattr(session, "last_used_at", ""))
         marker = " [当前]" if thread_id == current_thread_id else ""
-        click.echo(f"  {index}. {thread_id} ({checkpoint_count} checkpoints){marker}")
+        click.echo(f"  {index}. {thread_id} ({msg_count} 条消息, {last_used}){marker}")
     try:
         selection = click.prompt(
             "选择序号或输入 session ID（直接回车取消）",

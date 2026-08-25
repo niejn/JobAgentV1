@@ -7,8 +7,10 @@ import json
 import logging
 import re
 import time
+import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -44,7 +46,7 @@ from jobagent.observability import (
     log_decision,
     reset_trace,
 )
-from jobagent.profile import SQLiteCandidateProfileStore
+from jobagent.profile import SQLiteCandidateContextProvider, SQLiteCandidateProfileStore
 from jobagent.profile.context import CandidateContext
 from jobagent.prompts import MAIN_AGENT_SYSTEM_PROMPT
 from jobagent.scraper.xhs_backend import SpiderXhsBackend
@@ -59,15 +61,18 @@ from jobagent.tools import (
     XhsAuthorPostsBrowser,
     build_boss_greet_jobs_tool,
     build_boss_job_discovery_tool,
+    build_get_job_progress_tool,
     build_import_candidate_resume_tool,
     build_interview_evidence_tool,
     build_job_description_tool,
+    build_list_job_records_tool,
     build_save_candidate_background_tool,
     build_save_job_analysis_tool,
     build_save_job_search_profile_tool,
     build_shared_url_extract_tool,
     build_shared_url_save_tool,
     build_update_application_state_tool,
+    build_update_job_progress_tool,
     build_user_document_tool,
     build_xhs_author_posts_tool,
 )
@@ -112,10 +117,27 @@ class ConversationHistory:
 
 @dataclass(frozen=True, slots=True)
 class ConversationSession:
-    """One durable conversation session projected from LangGraph checkpoints."""
+    """One durable conversation session derived from checkpoint data."""
 
     thread_id: str
-    checkpoint_count: int
+    message_count: int
+    last_used_at: str
+
+
+def _decode_ulid_time(checkpoint_id: str) -> str:
+    """Decode timestamp from UUID v6 checkpoint_id."""
+    try:
+        u = uuid.UUID(checkpoint_id)
+        hex_str = u.hex
+        time_high = int(hex_str[0:8], 16)
+        time_mid = int(hex_str[8:12], 16)
+        time_low = int(hex_str[13:16], 16)
+        ts_100ns = (time_high << 28) | (time_mid << 12) | time_low
+        uuid_epoch = datetime(1582, 10, 15, tzinfo=UTC)
+        dt = uuid_epoch + timedelta(microseconds=ts_100ns // 10)
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return checkpoint_id.split("-")[0] if "-" in checkpoint_id else "?"
 
 
 class JobAgent:
@@ -214,6 +236,8 @@ class JobAgent:
         streamed_text: dict[str, str] = {}
         streamed_reasoning: dict[str, str] = {}
         announced_tool_calls: set[str] = set()
+        latest_tool_name: str = ""
+        latest_tool_args: dict[str, Any] = {}
         saw_tool_completion = False
         deterministic_tool_answer = ""
         last_finish_reason: str | None = None
@@ -257,6 +281,8 @@ class JobAgent:
                                 if call_id in announced_tool_calls:
                                     continue
                                 announced_tool_calls.add(call_id)
+                                latest_tool_name = str(tool_call.get("name") or "unknown")
+                                latest_tool_args = tool_call.get("args", {}) or {}
                                 tool_started = time.perf_counter()
                                 log_decision(
                                     logger,
@@ -289,6 +315,19 @@ class JobAgent:
                                 )
                         tool_summary = _tool_result_summary(update) if update else ""
                         if tool_summary:
+                            log_decision(
+                                logger,
+                                "agent.tool_completion",
+                                basis={
+                                    "tool_name": latest_tool_name,
+                                    "args": _safe_debug_args(latest_tool_args),
+                                    "duration_seconds": round(
+                                        time.perf_counter() - tool_started, 3
+                                    ),
+                                    "result_summary": tool_summary,
+                                },
+                                outcome=latest_tool_name,
+                            )
                             yield AgentStreamEvent("tool", tool_summary)
                         yield AgentStreamEvent(
                             "status",
@@ -446,7 +485,7 @@ class JobAgent:
         return ConversationHistory(summary=summary, recent=recent, compacted=compacted)
 
     async def list_sessions(self, *, limit: int = 50) -> tuple[ConversationSession, ...]:
-        """List durable sessions newest-first without exposing checkpoint internals."""
+        """List durable sessions newest-first by decoding UUID v6 checkpoint_id."""
 
         if limit < 1:
             raise ValueError("session limit must be positive")
@@ -455,26 +494,37 @@ class JobAgent:
         if connection is None:
             return ()
         cursor = await connection.execute(
-            """SELECT thread_id, COUNT(*) AS checkpoint_count,
-                      MAX(checkpoint_id) AS latest_checkpoint
-               FROM checkpoints
-               WHERE checkpoint_ns = ''
-               GROUP BY thread_id
-               ORDER BY latest_checkpoint DESC
-               LIMIT ?""",
+            """
+            SELECT thread_id,
+                   COUNT(*) AS total_cps,
+                   SUM(CASE WHEN json_extract(CAST(metadata AS TEXT), '$.source') = 'input'
+                        THEN 1 ELSE 0 END) AS user_msgs,
+                   MAX(checkpoint_id) AS latest_cp
+            FROM checkpoints
+            WHERE checkpoint_ns = ''
+            GROUP BY thread_id
+            ORDER BY latest_cp DESC
+            LIMIT ?
+            """,
             (limit,),
         )
         try:
             rows = await cursor.fetchall()
         finally:
             await cursor.close()
-        return tuple(
-            ConversationSession(
-                thread_id=str(row[0]),
-                checkpoint_count=int(row[1]),
+        sessions: list[ConversationSession] = []
+        for row in rows:
+            thread_id = str(row[0])
+            message_count = int(row[2])
+            last_used_at = _decode_ulid_time(str(row[3]))
+            sessions.append(
+                ConversationSession(
+                    thread_id=thread_id,
+                    message_count=message_count,
+                    last_used_at=last_used_at,
+                )
             )
-            for row in rows
-        )
+        return tuple(sessions)
 
     async def opportunity_status(self, period: StatusPeriod) -> OpportunityStatusBoard:
         """Return a local Opportunity status summary without invoking the LLM."""
@@ -864,9 +914,22 @@ def build_job_agent(
             settings,
             xhs_saver=XhsNoteSaver(settings, backend_factory=backend_factory),
         )
+        # Job discovery reads the latest persisted context at tool-call time
+        # so it refuses to crawl until the Job Search Profile and the resume /
+        # confirmed background have been collected and saved by the Agent.
+        context_provider = SQLiteCandidateContextProvider(state_db)
         registered_tools = [
-            build_boss_job_discovery_tool(BossJobDiscovery(settings)),
-            build_boss_greet_jobs_tool(BossGreetingsManager(settings)),
+            build_boss_job_discovery_tool(
+                BossJobDiscovery(settings),
+                context_loader=context_provider.load,
+                registry_path=state_db,
+            ),
+            build_boss_greet_jobs_tool(
+                BossGreetingsManager(settings, registry_path=state_db)
+            ),
+            build_update_job_progress_tool(state_db),
+            build_get_job_progress_tool(state_db),
+            build_list_job_records_tool(state_db),
             build_import_candidate_resume_tool(
                 CandidateProfileManager(
                     workspace_root=settings.jobagent_workspace_root,

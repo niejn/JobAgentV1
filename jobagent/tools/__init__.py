@@ -27,6 +27,11 @@ from jobagent.tools.job_description import (
     build_user_document_tool,
 )
 from jobagent.tools.job_discovery import BossJobDiscovery, build_boss_job_discovery_tool
+from jobagent.tools.job_progress import (
+    build_get_job_progress_tool,
+    build_list_job_records_tool,
+    build_update_job_progress_tool,
+)
 from jobagent.tools.opportunity_artifacts import (
     ApplicationStateUpdateInput,
     JobAnalysisArtifactInput,
@@ -60,6 +65,9 @@ __all__ = [
     "InterviewEvidenceTarget",
     "build_interview_evidence_tool",
     "build_boss_job_discovery_tool",
+    "build_get_job_progress_tool",
+    "build_list_job_records_tool",
+    "build_update_job_progress_tool",
     "JobDescriptionFile",
     "JobDescriptionReader",
     "build_job_description_tool",

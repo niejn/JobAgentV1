@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -12,18 +13,31 @@ from pydantic import BaseModel, Field, field_validator
 from jobagent.applier.boss import BossApplier
 from jobagent.config import Settings
 from jobagent.domain import HttpUrl, Job, JobSource, Profile
+from jobagent.journey.job_registry import (
+    JobProgressStatus,
+    JobTransitionError,
+    SQLiteJobRegistry,
+)
 from jobagent.profile import SQLiteCandidateContextProvider
+from jobagent.scraper.boss import get_boss_cooldown
 
 logger = logging.getLogger(__name__)
 
 
 class GreetingTarget(BaseModel):
-    """One Boss job to greet — minimal fields the agent already has."""
+    """One Boss job to greet - minimal fields the agent already has."""
 
     url: str = Field(min_length=1, description="Full Boss job-detail URL")
     company: str = Field(min_length=1, description="Company name")
     title: str = Field(min_length=1, description="Job title")
     job_id: str = Field(default="", description="Unique job ID if known")
+    greeting: str | None = Field(
+        default=None,
+        description=(
+            "Per-JD personalized greeting text (recommended). When omitted, "
+            "the configured template or Boss's default greeting is sent."
+        ),
+    )
 
     @field_validator("url")
     @classmethod
@@ -57,11 +71,31 @@ class BossGreetJobsRequest(BaseModel):
 class BossGreetingsManager:
     """Batch-send greetings on Boss using the existing Playwright applier."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        registry_path: Path | None = None,
+    ) -> None:
         self._settings = settings
+        # When set, every successfully submitted greeting is recorded in the
+        # job registry so future discovery runs never re-recommend the job.
+        self._registry_path = registry_path
 
     async def greet(self, request: BossGreetJobsRequest) -> dict[str, Any]:
         """Execute greetings for up to ``max_greetings`` jobs."""
+
+        # Greeting while rate-limited would fail and deepen the block.
+        allowed, remaining_min, _ = get_boss_cooldown().check()
+        if not allowed:
+            return {
+                "status": "blocked",
+                "error_type": "cooldown_active",
+                "message": (
+                    f"Boss 风控冷却中（约剩 {remaining_min} 分钟），本次未发送任何招呼。"
+                    "请稍后再试。"
+                ),
+            }
 
         profile = self._load_profile()
         if profile is None:
@@ -72,6 +106,11 @@ class BossGreetingsManager:
 
         targets = request.jobs[: request.max_greetings]
         results: list[dict[str, Any]] = []
+        registry = (
+            SQLiteJobRegistry(self._registry_path)
+            if self._registry_path is not None
+            else None
+        )
 
         async with BossApplier(self._settings) as applier:
             for target in targets:
@@ -84,19 +123,22 @@ class BossGreetingsManager:
                     url=HttpUrl(target.url),
                     description="",
                 )
-                application = await applier.apply(job, profile)
+                application = await applier.apply(job, profile, greeting=target.greeting)
                 status = application.status.value
                 extra = application.extra or {}
-                results.append(
-                    {
-                        "job_id": target.job_id or target.url,
-                        "company": target.company,
-                        "title": target.title,
-                        "status": status,
-                        "reason": extra.get("reason", ""),
-                        "greeting_sent": extra.get("greeting_sent"),
-                    }
-                )
+                entry = {
+                    "job_id": target.job_id or target.url,
+                    "company": target.company,
+                    "title": target.title,
+                    "status": status,
+                    "reason": extra.get("reason", ""),
+                    "greeting_sent": extra.get("greeting_sent"),
+                }
+                if registry is not None and status == "submitted":
+                    entry["progress_recorded"] = self._record_greeted(
+                        registry, target
+                    )
+                results.append(entry)
                 # Stop on daily limit or captcha — further jobs won't work.
                 if status in ("failed", "captcha_blocked"):
                     reason = extra.get("reason", "")
@@ -104,6 +146,8 @@ class BossGreetingsManager:
                         break
 
         succeeded = sum(1 for r in results if r["status"] == "submitted")
+        if registry is not None:
+            registry.close()
         result: dict[str, Any] = {
             "status": "completed" if succeeded > 0 else "failed",
             "total": len(targets),
@@ -115,6 +159,26 @@ class BossGreetingsManager:
         if interview_mode:
             result["interview_mode_note"] = interview_mode
         return result
+
+    def _record_greeted(
+        self, registry: SQLiteJobRegistry, target: GreetingTarget
+    ) -> bool:
+        """Persist one submitted greeting; never let registry errors fail the batch."""
+
+        job_id = target.job_id or target.url
+        try:
+            registry.upsert_discovered(
+                job_id=job_id,
+                source="boss",
+                company=target.company,
+                title=target.title,
+                url=target.url,
+            )
+            registry.mark(job_id, JobProgressStatus.GREETED)
+            return True
+        except (JobTransitionError, KeyError, ValueError) as exc:
+            logger.warning("Failed to record greeted status for %s: %s", job_id, exc)
+            return False
 
     def _load_interview_preference(self) -> str | None:
         """Return a note about the user's interview-mode preference, if set."""
