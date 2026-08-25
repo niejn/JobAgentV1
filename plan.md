@@ -490,3 +490,15 @@ JobAgent Supervisor
   两对等进程共享同一 checkpoint DB（chat/watch 互不依赖存活）。
 - roadmap F6 已重写该节并附修正声明；后续若 watch 需断点续跑 agent 回合，可借鉴
   Hermes 的标记-扫描-续跑思路。
+### 8.14 控制面/数据面分发设计（2026-08-27，借鉴 Hermes slash 命令层）📋
+
+- 研究 Hermes 入口层的结论：其 slash 命令层存在的理由不是省 token，而是控制面/数据面
+  分离——/stop 要停的正是运行中的 agent（不能让它自己停自己）；/approve//deny 回答
+  agent 正在阻塞等待的问题，路由给 LLM 是循环论证。
+- 修正 §8.11 中"删命令分发层"的过度简化：删的是"token 省钱型"分发
+  （RegistryCommandHandler）；必须新建"控制面型"分发——WX-4/HG-6 草稿确认流
+  （ok/改：xxx/拒）是 outbound_authorizations 的确定性状态转换，可审计，不能进 LLM。
+- 分发顺序：待确认草稿→确认词解析（有状态拦截）/ping→pong/其余→agent（B 模式）。
+  E1-E6 边界用例入 roadmap F6（代际过期、逐字改写零漂移、FIFO 串行确认等）。
+- 与 chat CLI 的关系：同一状态机两个入口（终端确认 + 微信确认），"入口不同，
+  终点相同"与 Hermes 同构。
