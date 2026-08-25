@@ -457,3 +457,17 @@ JobAgent Supervisor
   - 新增验证：`tests/test_wechat_gateway.py` 23 项（MockTransport 零真实网络）。
 - 验证：`311 passed, 1 skipped`；Ruff、mypy 全绿。
 - 后续：Boss 消息监控（HG-1）接入 watch；桌面 toast；微信确认流（WX-4/HG-6）。
+### 8.11 网关设计定稿三件套（2026-08-26，纯设计未开工）📋
+
+- **Boss 三方对话设计**（roadmap F4「Boss 通道三方对话设计」）：多租户隔离单元 =
+  job_id；驾驶权状态机 agent_hitl/user_direct；Agent = 无状态起草服务（每次从库重建，
+  驾驶权转移免费）；用户手打检测 = 出站消息对账（无 authorization 记录 = 手打）；
+  sender 三分（hr/agent_on_behalf/user）；U/M/H 三类 13 个用例矩阵。
+- **网关技术选型定稿**（roadmap F4「网关技术选型分析」）：Hermes 分层借鉴——协议层
+  已移植，框架层不用（含 proxy 模式/monkey-patch 两条可行但被否路线的完整分析）；
+  ChannelAdapter 接口形状对齐 BasePlatformAdapter 保留可逆性。
+- **微信 B 模式定稿**（roadmap F6「微信通道模式定稿」）：不省 token，微信 = 完整移动端
+  聊天入口；Agent 常驻（wechat:<owner> thread）；实现时删 RegistryCommandHandler
+  分发层（其"省 token"前提用户从未要求，已废弃）。
+- HG 切片表修订：HG-3 改为驾驶权状态机，HG-2 弃 Telegram 改桌面 toast，HG-5 注记
+  watch 骨架已交付；推荐顺序重排。
