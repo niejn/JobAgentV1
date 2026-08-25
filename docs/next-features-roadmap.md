@@ -418,9 +418,10 @@ BossChannel）可近乎原样插进 Hermes 式 runner——迁移成本是换骨
 - **体验细节**：收到消息立即回"⏳ 思考中…"（agent 带 tool call 要 5-30 秒）；长回复
   按微信 4000 字限制分段发送；system prompt 注入微信通道提示（回复短、少 markdown，
   微信不渲染代码块）。
-- **历史遗留**：`RegistryCommandHandler` 命令分发层基于"为 /status 省 token"前提（用户
-  从未要求），该前提已废弃 → 实现时删除分发层，保留 /ping 心跳；命令与自由文本
-  一律进 agent（agent 自有 job progress 工具可查）。
+- **历史遗留（2026-08-27 修订）**：`RegistryCommandHandler` 命令分发层基于"为 /status
+  省 token"前提（用户从未要求），该前提已废弃 → 实现时删除该层，命令与自由文本
+  一律进 agent（agent 自有 job progress 工具可查）。但注意：删除的是"token 省
+  钱型"分发；**控制面型**分发必须保留并新建，见下节。
 - **对比微信与 Boss 的 Agent 角色**：微信 = 常驻对话者（checkpoint 记忆）；Boss =
   无状态起草服务（每次从库重建，见 F4 三方对话设计）。同一 agent 两种服务形态。
 
@@ -458,6 +459,45 @@ checkpoint 天然共享状态——chat 不依赖 watch 存活，watch 不依赖
 是 31k 行里真实有价值的部分，比我们当前 watch 设计更完善。若将来 watch 需要
 "断点续跑 agent 回合"（如微信对话中进程崩溃），可直接借鉴其思路：崩溃前标记、
 重启后扫描标记会话、从 checkpoint 尾部续跑。
+
+#### 控制面与数据面分发（2026-08-27，借鉴 Hermes slash-command 设计）
+
+来源：研究 Hermes 入口层发现，其 slash 命令（/stop /new /approve /deny /restart）
+存在的理由**不是省 token**，而是这些消息在定义上就不能经过 agent——
+`/stop` 要停的正是运行中的 agent（不能让它自己停自己）；`/approve`/`/deny`
+回答的是 agent 正在阻塞等待的问题，路由给 LLM 是循环论证。这是控制面/数据面
+分离：控制信令与业务流量分道，因为信令控制的是承载业务的那个东西。
+
+对我们的映射：微信 B 模式"一切进 agent"只覆盖数据面；已定稿的 WX-4/HG-6
+确认流天然是控制面消息——草稿推送后用户回 "ok"，是 `outbound_authorizations`
+的确定性状态转换（user_decision/decided_at，可审计），不能让 agent 去猜。
+
+分发顺序（watch 进程，微信通道）：
+
+```text
+1. 有待确认草稿？（pending 的 outbound_authorization）
+   → ok/发/同意 -> approved -> 触发发送链（HG-4）
+   → 改：<新文本> -> edited（逐字采用，零漂移）
+   → 拒/不要/取消 -> rejected
+2. /ping -> pong（心跳）
+3. 其余一切 -> agent（B 模式，数据面）
+```
+
+第 1 步判定是**有状态的**：无待确认草稿时 "ok" 落到第 3 步当普通聊天——对应
+Hermes `should_bypass_active_session` 的精神（是否拦截取决于会话当前状态，
+不只消息文本）。同一逻辑将来在 chat CLI 侧同样适用（Boss 草稿也可在终端确认），
+两个入口、同一状态机，与 Hermes "入口不同，终点相同" 同构。
+
+边界用例：
+
+| # | 用例 | 设计响应 |
+|---|---|---|
+| E1 | 草稿待确认时 HR 又发新消息 | 草稿代际过期：作废重拟，提示"草稿已因 HR 新消息更新"，此时 ok 回复的是新草稿 |
+| E2 | 无待确认草稿时发 ok | 落到 agent 当普通聊天 |
+| E3 | 改：时间换成周三 | v1 逐字策略：冒号后即最终文本原样发送（发送内容零漂移）；指令式修改（"改客气点"）v1 拒绝并提示格式；将来可走 agent 改写→再确认一轮 |
+| E4 | ok 后立刻反悔 | v1 限制：确认即入发送队列不可撤回（文档明示）；将来可加 3-5s 撤回窗口 |
+| E5 | 两岗位同时待确认 | v1 串行 FIFO：一次只推一个待确认，避免歧义 |
+| E6 | 用户想停运行中的 agent | MVP 无中断（服务器排队已定稿）；将来 /stop 必须走控制面——Hermes 先例 |
 
 #### 中断语义：MVP 采用服务器排队（2026-08-26 定稿）
 
