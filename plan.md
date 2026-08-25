@@ -514,3 +514,15 @@ JobAgent Supervisor
   tool-tail / flush_pending_to_file。
 - 触发条件（不立即实施）：WX-B 上线使用后，崩溃导致会话中断实际发生且重发体验
   可感知时再动工。
+### 8.16 候选人成长记忆 + Prompt 分层组装设计（2026-08-27，纯设计）📋
+
+- **F7 候选人成长记忆**（用户需求：记住求职状态并随成长更新，如小公司→中小厂、
+  远程→现场）：核心是演化链而非覆盖——ProfileMemory 带 superseded/superseded_by
+  状态，旧偏好不删除只失效，保留成长曲线供 F5 复盘。四难点：代际失效/触发更新/
+  记忆与 registry 事实边界/快照冻结时机。技术选型：v1 用 LangGraph Store + 结构化
+  演化链（deepagents MemoryMiddleware 已验证为文件追加型，不解决代际，但其 prompt
+  指南文案可借鉴）；文件型可作将来人类可读导出层。切片 CM-1~4。
+- **F8 System Prompt 分层组装**（借鉴 Hermes 七层）：已有身份层/用户自定义层/
+  cache 纪律等价物；补三件——工具条件注入（policy 段跟随工具注册，程序性保证）、
+  注入检测（_CONTEXT_THREAT_PATTERNS 同款，我们入口比 Hermes 多更需要）、元数据层
+  （日期首轮冻结）。builder 接口草案 + tools=/prompt 正交性结论已入 roadmap。PS-1~3。

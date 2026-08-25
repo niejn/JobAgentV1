@@ -606,6 +606,150 @@ sidecar（Node.js 全家桶过重），Email 仅作兑底。
 
 ---
 
+## F7. 候选人成长记忆（Candidate Profile Memory）📋
+
+**用户需求（2026-08-27 提出）**：记住用户当前求职状态并随成长更新——例如刚开始
+以小公司+远程面试为主，能力提升后转向中小厂+接受现场。记忆不是静态档案，是会被
+现实推翻的动态状态。
+
+### 四个设计难点（源自需求拆解）
+
+1. **记忆有代际**："小公司为主"终会失效。纯追加式记忆会让 agent 同时看到新旧矛盾
+   偏好——需要失效机制，不只是累积机制。
+2. **谁触发更新**：用户很少主动说"请更新偏好"；状态变化藏在对话里（"感觉基础扎实
+   了，想试试中型公司"）。
+3. **记忆 vs 事实边界**："偏好远程面试"是可变偏好（记忆）；"投了字节后端 336"是
+   旅程事实（registry，已有确定性的家）。两套系统边界必须清晰，否则两个状态源打架，
+   违反 state_and_handoff_policy 第一原则。
+4. **进 prompt 的时机**：记忆快照进 system prompt 就必须跨轮冻结（cache 纪律，见
+   F6 prompt 组装设计）。
+
+### 存储：演化链而非覆盖
+
+```python
+@dataclass
+class ProfileMemory:
+    key: str            # 'target_company_size' | 'interview_location_pref' | ...
+    value: str          # '中小厂为主' | '接受现场面试'
+    status: str         # 'active' | 'superseded'   ← 不删，改状态
+    source_thread: str  # 哪个对话发现的（可追溯）
+    observed_at: str
+    superseded_at: str  # 被推翻时间
+    superseded_by: str  # 新值 entry id（演化链）
+```
+
+"小公司为主 → 中小厂"是 supersede 链而非覆盖。查询只取 active；链保留——将来接 F5
+错题集/复盘：**成长曲线本身就是复盘素材**（"三个月前定位和现在差在哪"）。
+
+### 更新：双通道
+
+- **通道 1（MVP，主动）**：新 agent 工具 `update_profile_memory`，对话中识别到状态
+  信号时调用（例：用户说想试中型公司 → agent 记 key='target_company_size'，同 key
+  active 条目自动 superseded + 链接）。配套 prompt 段 `<candidate_memory_policy>`：
+  识别求职状态变化主动调用；不确定先问用户。接入 F6 的工具条件注入（memory 工具
+  注册时才注入此段）。
+- **通道 2（v2，被动）**：会话结束离线提炼，扫本轮对话发现未入册信号。非 MVP。
+
+### 边界划分（写进 policy 段）
+
+```
+1. 偏好、定位、成长状态 → profile memory（本工具）
+2. 岗位旅程事实（投递/面试/offer）→ job registry（update_job_progress），绝不进记忆
+3. 记忆与 registry 冲突时：registry 是事实源，记忆只描述"用户怎么想"
+```
+
+### 技术选型：deepagents MemoryMiddleware（已验证）
+
+`create_deep_agent(memory=...)` 原生支持（`MemoryMiddleware`，backend + sources 参数）：
+**基于文件的记忆**——记忆是文件系统里的 Markdown，agent 用 `edit_file` 更新，内置
+"何时更新/何时不更新"指南与信任规则（记忆是参考材料非指令；与用户消息/工具证据
+冲突时以后者为准）。与 Hermes MEMORY.md/USER.md 同构。
+
+选型决策：**v1 不用文件型，用 LangGraph Store + 演化链条目**（上式 ProfileMemory）。
+原因：文件型是追加式，不解决难点 1（代际）；演化链需要结构化状态（superseded/
+superseded_by），Markdown 无此语义。MemoryMiddleware 的 prompt 指南文案可直接借鉴进
+`<candidate_memory_policy>`。文件型将来可作人类可读导出层（把 active 链导出为
+MEMORY.md 供人查阅）。
+
+### 进 prompt 的时机（cache 纪律）
+
+```
+会话首轮（graph 构造）: 读 active 记忆 → 拼快照进 system prompt → 冻结
+后续轮次: checkpoint 恢复原 prompt（cache 命中，纪律不破）
+记忆更新: 本轮不重拼；下一轮新会话自然带新快照
+watch 进程: Boss 起草每次从零构造 → 天然取最新 active 快照；
+          微信长会话用首轮快照——两边语义都正确，零额外机器
+```
+
+### 切片
+
+| 切片 | 内容 | 风险 |
+|---|---|---|
+| CM-1 | ProfileMemory 存储层：LangGraph Store namespace + 演化链读写 API（supersede 语义）| 低 |
+| CM-2 | `update_profile_memory` 工具 + `<candidate_memory_policy>` prompt 段（含边界划分三条） | 低 |
+| CM-3 | prompt 快照注入：graph 构造时读 active 拼入，含 cache 纪律验证（跨轮前缀稳定） | 低 |
+| CM-4 | 与 F6 prompt 组装合流：条件注入、注入检测均适用；v2 文件导出层 | 低 |
+
+---
+
+## F8. System Prompt 分层组装（2026-08-27，借鉴 Hermes 七层）📋
+
+研究 Hermes `_build_system_prompt()` 七层组装的结论：我们已有其骨架（MAIN_AGENT_SYSTEM_PROMPT
++ candidate_context 注入），缺四层，其中三层值得立即借鉴。
+
+### 层级映射
+
+| Hermes 层 | JobAgent 现状 | 决策 |
+|---|---|---|
+| 1 身份层 | MAIN_AGENT_SYSTEM_PROMPT 静态部分 | ✅ 已有 |
+| 2 工具条件注入（工具加载才注 guidance） | ❌ 九个 policy 段无条件全量注入 | **借鉴**：Boss 未登录时 greeting_policy 等即死重量 |
+| 3 用户/网关自定义 | candidate_context 注入 | ✅ 已有 |
+| 4 持久记忆 | ❌ | → F7（独立设计，演化链非文件） |
+| 5 Skills 索引 | ❌ | 远期 |
+| 6 上下文文件 + **注入检测** | ❌（candidate_context 已标注不可信但无机器检测） | **借鉴**：我们入口比 Hermes 多（HR 消息/JD 都进起草上下文），更需检测 |
+| 7 元数据（日期/模型/平台提示） | ❌ | **借鉴**：成本一行，收益直接（"周三面试"/超时判断都靠日期） |
+| 缓存一致性 | graph 缓存 + prompt 构造一次，checkpoint 保存首轮 prompt | ✅ 等价且地基更好（checkpoint 天然前缀一致）；只借鉴纪律：动态内容（日期）仅首轮注入并随会话冻结 |
+
+### 注入检测（Hermes _CONTEXT_THREAT_PATTERNS 同款）
+
+上下文文件/外部文本进 prompt 前过模式扫描（ignore previous instructions / do not tell
+the user / sys prompt override / exfil curl / read secrets...），命中整块替换为
+`[BLOCKED: potential prompt injection]`。适用对象：将来的 AGENTS.md 类上下文文件、
+HR 消息摘要、JD 文本——**我们比 Hermes 更需要它**。
+
+### 与 tools= 的关系（正交）
+
+`tools=` 决定机器能调什么；system prompt 只决定 agent 以为能调什么。两层读同一
+事实源（注册工具名单）即永不打架：guidance 段的存在性由代码保证跟随工具注册状态，
+不靠人手工同步（当前 `<job_progress_policy>` 与工具注册是手工同步，借鉴后程序性保证）。
+
+约束：`create_deep_agent` 在 graph 构建时固化 tools+prompt，graph 缓存后不能中途换。
+对我们无影响（进程内稳定）；平台差异（微信 vs CLI）用两个独立 graph 实例解决。
+
+### 接口草案
+
+```python
+# jobagent/prompts/builder.py
+
+def build_system_prompt(
+    registered_tools: set[str],
+    candidate_context: CandidateContext | None,
+    platform_hint: str = "",          # 'wechat' | 'cli'
+    active_memories: list[ProfileMemory] = [],   # F7 快照
+    context_files: list[Path] = [],   # AGENTS.md 类，注入检测后进
+) -> str: ...
+```
+
+### 切片
+
+| 切片 | 内容 |
+|---|---|---|
+| PS-1 | `build_system_prompt()` builder：条件注入（工具集驱动）+ 元数据层（日期/平台提示，首轮冻结语义） | 低 |
+| PS-2 | 注入检测器 `_scan_context_threat()` + 对 candidate_context/将来 JD/HR 消息的接入 | 低 |
+| PS-3 | 与 F7 记忆快照合流（CM-3 同步实施） | 低 |
+
+---
+
 ## 推荐实施顺序
 
 ```text
