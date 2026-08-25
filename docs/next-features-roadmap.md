@@ -424,6 +424,39 @@ BossChannel）可近乎原样插进 Hermes 式 runner——迁移成本是换骨
 - **对比微信与 Boss 的 Agent 角色**：微信 = 常驻对话者（checkpoint 记忆）；Boss =
   无状态起草服务（每次从库重建，见 F4 三方对话设计）。同一 agent 两种服务形态。
 
+#### Agent 实例所有权模型（2026-08-26 补充，源自与 Hermes 对比）
+
+Hermes 网关是 agent 的唯一宿主：AIAgent 实例缓存在网关内存（`_agent_cache`，会话级，
+含 LLM clients/tool schemas，有缓存上限/内存压力清扫/过期回收三重治理），网关挂 =
+agent 死。我们 deliberately 不同：
+
+| | Hermes 网关 | JobAgent |
+|---|---|---|
+| agent 宿主 | 网关进程唯一持有 | **双进程各自召唤同一 agent**：chat（终端 threads）+ watch（wechat:* thread、Boss 起草） |
+| 实例形态 | 会话级缓存，常驻内存 | 按需构造，用完释放（LangGraph agent 构造成本低） |
+| 状态存放 | 网关内存 + 它的 session store | **SQLite checkpoint（唯一事实源）**，不在任何进程内存 |
+| 崩溃影响 | agent 状态随网关死 | 进程挂了 agent 状态毫发无损，另一进程随时接上 |
+
+设计依据：chat 必须独立可用（终端聊天不依赖 watch 存活）；watch 必须独立存活（用户
+睡着时 HR 消息照常监控）。**守护边界是进程，状态边界是 SQLite**。这是 LangGraph
+checkpoint 架构的红利——Hermes 的 agent 状态与网关进程绑死，没有这个选择。
+
+#### 中断语义：MVP 采用服务器排队（2026-08-26 定稿）
+
+问题来源：Hermes 用数千行解决"agent 运行中来新消息 → 中断/排队"（run.py 的会话锁/
+busy policy/interrupt_then_dispatch 机器，服务多用户并发场景）。我们的场景里 agent
+ainvoke 期间（5-30 秒）长轮询游标不推进，新消息**留在微信服务器排队**，agent 完成后
+才被取到。
+
+MVP 决策：**保持现状（服务器排队，串行处理）**。单用户场景消息天然串行不丢失，
+零代码；这是显式设计决策而非疏漏。代价：连续发多条消息时，后续消息的响应延迟
+累加。
+
+升级路径（WX-B 后续优化，非 MVP）：**对话内排队提示**——把 agent 调用改为后台 task，
+轮询循环继续取新消息，运行中来消息先回"⏳ 还在思考上一条，稍等…"，agent 完成后
+继续处理队列。约 50 行 + 并发去重考虑。触发条件：实际使用中排队延迟可感知
+（如连续提问场景频发）再实施。
+
 ---
 
 ## F5. 面试录音复盘 + 错题集 📋

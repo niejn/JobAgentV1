@@ -471,3 +471,12 @@ JobAgent Supervisor
   分发层（其"省 token"前提用户从未要求，已废弃）。
 - HG 切片表修订：HG-3 改为驾驶权状态机，HG-2 弃 Telegram 改桌面 toast，HG-5 注记
   watch 骨架已交付；推荐顺序重排。
+### 8.12 Agent 所有权模型与中断语义补录（2026-08-26，纯设计）📋
+
+- **Agent 实例所有权模型**（roadmap F6「Agent 实例所有权模型」）：对比 Hermes 网关
+  （agent 唯一宿主，AIAgent 实例缓存在网关内存，网关挂 = agent 死）；我们 = 双进程
+  各自召唤同一 agent，状态唯一存 SQLite checkpoint，守护边界是进程、状态边界是
+  SQLite——chat 与 watch 互不依赖存活的架构依据。
+- **中断语义定稿**（roadmap F6「中断语义」）：MVP 采用微信服务器排队（单用户消息
+  天然串行不丢，零代码，显式决策非疏漏）；升级路径 = 对话内排队提示（agent 调用改
+  后台 task + "还在思考上一条"回复，~50 行），触发条件为实际使用中延迟可感知。
