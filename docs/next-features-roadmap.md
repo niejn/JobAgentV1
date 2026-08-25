@@ -167,7 +167,7 @@ CREATE TABLE conversation_messages (
     id INTEGER PRIMARY KEY,
     job_id TEXT NOT NULL,
     channel TEXT NOT NULL,             -- 'hr_chat'
-    sender TEXT NOT NULL,              -- 'hr' | 'agent_on_behalf'
+    sender TEXT NOT NULL,              -- 'hr' | 'agent_on_behalf' | 'user'（2026-08-26 增三分，见驾驶权设计）
     content TEXT NOT NULL,
     message_ref TEXT,                  -- 平台消息 ID，去重
     sent_at TEXT,                      -- 平台时间戳
@@ -261,21 +261,168 @@ JobAgent 与 HR 的对话，两者不直接通信，只通过 SQLite 交接状�
 6. **进程守护**：单实例锁防双开；崩溃后重启从消息游标续读；Windows 下可用计划任务/
    独立终端窗口常驻，不做成系统服务（保持轻量）。
 
-### 切片
+### 切片（2026-08-26 修订：纳入驾驶权设计，弃 Telegram）
 
 | 切片 | 内容 | 风险 | 验收 |
 |---|---|---|---|
-| HG-1 | `BossMessageMonitor`：被动捕获消息列表 + 新消息检测 + `conversation_messages`/`outbound_authorizations` 表（渠道抽象落地）+ registry 联动 `hr_replied` | 低（只读） | 同一消息不重复入册（message_ref 去重）；风控冷却复用 `get_boss_cooldown` |
-| HG-2 | 通知：新消息/新状态变化推 Telegram（复用现有 notifier） | 零 | 用户不在 chat 也能知道 HR 回复 |
+| HG-1 | `BossMessageMonitor`：被动捕获消息列表 + 新消息检测 + `conversation_messages`/`outbound_authorizations` 表（渠道抽象落地，含 sender='user' 手打补录）+ registry 联动 `hr_replied` | 低（只读） | 同一消息不重复入册（message_ref 去重）；风控冷却复用 `get_boss_cooldown` |
+| HG-2 | 桌面 toast 通知（新消息/状态变化），弃 Telegram | 零 | 用户不在 chat 也能知道 HR 回复 |
 | HG-2.5 | `resume_hr_conversation` 重建函数 + 待回复队列扫描（超时提醒） | 零 | 任意时刻重建出完整消息线与派生信号；断电重启后无状态丢失 |
-| HG-3 | 回复草稿：基于重建上下文生成草稿（含时效感知措辞）+ 会话摘要 | 零 | 草稿可追溯引用 journey 数据与历史消息 |
-| HG-4 | HITL 发送：用户确认草稿 -> `outbound_authorizations` 落库 -> 经 CDP 发送 -> 消息线补 `agent_on_behalf` 记录；默认关闭自动发送 | 高 | 每条出站消息有 authorization_id；发送前后状态确认；失败不重试 |
-| HG-5 | `jobagent watch` CLI 命令 + 进程守护（单实例锁、崩溃恢复） | 低 | 重启后从游标续读，不漏不重 |
+| HG-3 | 驾驶权状态机 + 出站对账：user_direct 检测、手打补录、让位/接手指令（无发送能力） | 低 | 用户手打后 Agent 停止起草；接手指令后从库重建接手 |
+| HG-4 | Agent 起草服务（无状态单轮，基于重建上下文+时效感知）+ HITL 发送（authorization 落库 -> CDP 发送 -> 补 agent_on_behalf 记录）；覆盖 U1/U2/U5/U6/U7；默认关闭自动发送 | 高 | 每条出站消息有 authorization_id；发送前后状态确认；失败不重试 |
+| HG-5 | `jobagent watch` CLI 进程守护（单实例锁、崩溃恢复）——已随 WX-3-GW 交付 watch 骨架，待补锁与恢复 | 低 | 重启后从游标续读，不漏不重 |
+| HG-6 | 微信确认流：草稿推微信，回 ok/改/拒 -> outbound_authorization -> 发送（即 WX-4，两者合并实施） | 中 | 草稿在微信可确认；发送后双向记录完整 |
 
 ### 风险与原则
 
 - 读消息列表也可能触发风控：低频 + 抖动 + 冷却共享，捕获不到 API 时安静退出本轮。
 - 全自动回复 HR 长期不做（发送即代表候选人立场，错误代价高）；最多到"草稿 + 一键确认"。
+
+### Boss 通道三方对话设计：驾驶权与多租户（2026-08-26 讨论定稿）
+
+Boss 对话是三方对话（用户 / Agent / HR），但 HR 视角是塌缩的——HR 只看到"候选人"
+一个人格，对驾驶权切换无感知。这决定了它和微信通道（两方、Agent 常驻）是不同的
+会话语义层。
+
+#### 两个根本约束
+
+1. **多租户隔离：会话隔离单元是 job，不是 HR、不是公司**。同一用户在 A 职位聊的
+   内容（薪资期望、可用时间、简历版本）绝不泄进 B 职位；同一 HR 挂两个职位也是两个
+   独立上下文。会话键必须含 `job_id`。
+2. **驾驶权转移（三明治式 HITL）**：Agent 默认起草（HITL 放行）；用户可随时亲自
+   回复（Agent 让位）；用户同意后 Agent 可接手。全程 HR 无感知。
+
+#### 用例矩阵
+
+驾驶权类：
+
+| # | 用例 | 设计响应 |
+|---|---|---|
+| U1 | HR 发消息 → Agent 起草 → 用户批准 → 发送 | 默认路径 = outbound_authorization |
+| U2 | Agent 起草 → 用户改后批准 | `user_decision='edited'` + `final_content` |
+| U3 | 用户正在手打回复，Agent 别插嘴 | `user_direct` 模式下 Agent 只观察不起草 |
+| U4 | 用户聊到一半说"你来接手" | 驾驶权回转：Agent 从库重建上下文后接手 |
+| U5 | 草稿无人批准 → 过期 | 草稿 TTL + 不发送 + 次日提醒，**绝不自动发** |
+| U6 | HR 连发多条，旧草稿还在待批 | 旧草稿作废重拟（上下文已变） |
+| U7 | 用户刚批准，HR 同时又发新话 | 发送前 re-check 对话尾部；发送后归档 authorization |
+
+多租户类：
+
+| # | 用例 | 设计响应 |
+|---|---|---|
+| M1 | 同一公司两个职位 | 按 job 隔离，天然两个上下文 |
+| M2 | 同一 HR 挂两个职位 | 同上 |
+| M3 | A 对话信息不能进 B 起草 | 起草时上下文注入严格按 job_id 过滤 |
+
+HR 无感知类：
+
+| # | 用例 | 设计响应 |
+|---|---|---|
+| H1 | 出站消息都从用户账号发出 | CDP 在用户输入框打字，天然无 bot 身份 |
+| H2 | Agent 回复与用户手打风格差异 | 起草 prompt 注入用户语料风格档（后置优化） |
+| H3 | Agent 秒回 vs 用户节奏 | 拟人化响应节奏（记录在案，先不过度设计） |
+
+#### 核心设计决策
+
+**决策 1：Agent 是"无状态起草服务"而非"对话参与者"**。
+
+微信通道：Agent = 常驻对话者（`thread_id="wechat:owner"`，LangGraph checkpoint 持续
+积累）。Boss 通道：每次 HR 消息到达 → 召唤 Agent → 注入该 job 的全量重建上下文
+（conversation_messages + journey 事实 + 驾驶权状态）→ 输出草稿 → HITL。Agent 自己
+不维持对话状态。**这样驾驶权转移免费**：U4 不需要任何记忆迁移——状态在
+`conversation_messages`（事实源），不在 Agent 脑子里。
+
+**决策 2：驾驶权状态机（每 job 一份）**。
+
+```text
+conversation_control:  mode ∈ { agent_hitl (默认), user_direct }
+进入 user_direct:  出站对账发现用户手打（无 authorization 记录的出站消息）
+回到 agent_hitl:  用户明确指令（chat/微信里说"接手 boss:job:xxx"）
+```
+
+**决策 3：用户手打检测 = 出站消息对账**。
+
+CDP 视角所有出站消息都来自用户账号（Agent 发的也是），区分驾驶者靠对账：Agent 发送
+流程严格先落 `outbound_authorization(approved)` + `conversation_messages
+(sender='agent_on_behalf', authorization_id=xx)` 再 CDP 发送；监听器看到出站消息时查
+conversation_messages——有记录且 ref 对上 = Agent 发的；无记录 = 用户手打 →
+`mode=user_direct`，补录 `sender='user'`，Agent 转入观察。因此 sender 必须三分
+（`hr` / `agent_on_behalf` / `user`），微信通道只要两分。
+
+#### 会话语义层与通道抽象分层
+
+`ChannelAdapter`（transport 接口：connect/send/receive/set_message_handler）对所有通道
+统一；差异在之上的会话语义层：
+
+| | 微信通道 | Boss 通道 |
+|---|---|---|
+| 会话数 | 1（owner） | N（每 job 一个） |
+| Agent 角色 | 常驻对话者（checkpoint 记忆） | 无状态起草服务（每次重建） |
+| 出站身份 | bot 自己 | 伪装成用户（CDP 天然） |
+| 出站前置 | 无 | 强制 authorization（HITL） |
+| 驾驶权 | 无概念 | agent_hitl / user_direct 状态机 |
+
+Hermes 的抽象只覆盖 transport 层；第二层（驾驶权、HITL、多租户）在其世界中不存在
+——它的世界是 bot 以自身身份与用户聊天，没有"bot 代用户与第三方对话"形态。
+
+### 网关技术选型分析：借鉴 Hermes，不用 Hermes 框架（2026-08-26 讨论）
+
+经过对 `D:/mashibing/hermes-agent` 源码的详细分析（gateway/run.py 31,711 行、
+platforms/base.py 7,469 行），定稿：**分层借鉴，只用协议层，不用框架层**。
+
+#### 分层结论
+
+| 层 | 决策 | 状态 |
+|---|---|---|
+| iLink 协议层（weixin.py 的 QR/长轮询/发送/errcode 处理） | 移植（MIT） | ✅ 已进 `jobagent/wechat/ilink.py`，57 测试 |
+| 生产模式层（sync-buf 游标、退避、去重、allowlist） | 移植 | ✅ 已进 `gateway/wechat_channel.py` |
+| Adapter 抽象（BasePlatformAdapter 的 connect/send/handle_message 形状） | 借鉴形状 | 📋 ChannelAdapter 协议（待实现） |
+| Runner 框架（GatewayRunner 31k 行） | 不用 | 自建 ~300 行 |
+
+#### 为什么不用框架层（论据已修正版）
+
+曾考虑过三条路，逐一分析：
+
+1. **直接用（含 proxy 模式接我们 agent）**：Hermes 有 `GATEWAY_PROXY_URL` proxy 模式
+   （run.py:27973），网关只做平台 I/O，agent 工作委托给远程 OpenAI 兼容端点——技术上
+   可以接我们的 LangGraph agent（包一层 OpenAI 兼容 SSE server）。也可以直接 monkey-patch
+   `GatewayRunner._run_agent` 替换为调用我们 agent 的 invoke。**技术上完全可行**，但
+   代价：用户机器装整个 hermes-agent 应用（502 行依赖声明的完整产品，自带
+   config.yaml/HERMES_HOME/profile 体系，与 .jobagent 双状态系统并存）；升级脆弱
+   （补丁内部方法签名无兼容承诺，上游极活跃）；已移植的 57 测试作废。
+2. **改造用（fork 砍成微信 only）**：删 14 平台 + agent 集成 + profile/drain/systemd +
+   改 handle_message 分发链，剩余代码比自己写还多，且背上永久 merge 负担。
+3. **借鉴模式（选定）**：接口形状对齐 Hermes（保留将来换框架的可逆性），runner 自己
+   写 ~300 行。**关键事实：Hermes gateway 能给我们的只有微信连接，而微信连接已从它
+   同一个文件移植过来了。** 其余重量（多用户会话锁 ~8000 行、多租户 profile ~3000 行、
+   systemd/重启编排 ~4000 行、15 平台注册 ~2000 行、跨平台格式化/media ~5000 行、agent
+   会话压缩 ~5000 行）都是为多用户×生产部署场景付费，我们是单用户本地应用。
+
+#### 预留的切换条件（可逆性）
+
+ChannelAdapter 接口形状对齐 BasePlatformAdapter 最小子集（connect/disconnect/send/
+set_message_handler）。将来若达到 5+ 平台/多用户/远程部署规模，所有 adapter（含
+BossChannel）可近乎原样插进 Hermes 式 runner——迁移成本是换骨架，不是重写平台。
+
+若真机验证（WX-2）发现移植有深层协议缺陷且修复成本 > 换框架成本，也可切换到
+"monkey-patch Hermes 网关"路线（~20 行补丁接 agent invoke）。
+
+### 微信通道模式定稿：B 完整聊天入口（2026-08-26 定稿）
+
+用户决策：不纠结 token 成本，微信即完整移动端聊天入口，不做命令/自由文本分流。
+
+- **Agent 角色**：常驻对话者，`thread_id="wechat:<owner_user_id>"`，LangGraph
+  checkpoint 持续积累，与 chat CLI 的 thread 并行（各自独立记忆）。
+- **架构**：watch 进程对自由文本直接构造 agent 调用（SQLite WAL + busy_timeout 双进程
+  并发已就绪），`~100-150 行`。
+- **体验细节**：收到消息立即回"⏳ 思考中…"（agent 带 tool call 要 5-30 秒）；长回复
+  按微信 4000 字限制分段发送；system prompt 注入微信通道提示（回复短、少 markdown，
+  微信不渲染代码块）。
+- **历史遗留**：`RegistryCommandHandler` 命令分发层基于"为 /status 省 token"前提（用户
+  从未要求），该前提已废弃 → 实现时删除分发层，保留 /ping 心跳；命令与自由文本
+  一律进 agent（agent 自有 job progress 工具可查）。
+- **对比微信与 Boss 的 Agent 角色**：微信 = 常驻对话者（checkpoint 记忆）；Boss =
+  无状态起草服务（每次从库重建，见 F4 三方对话设计）。同一 agent 两种服务形态。
 
 ---
 
@@ -340,8 +487,8 @@ sidecar（Node.js 全家桶过重），Email 仅作兑底。
 | 切片 | 内容 | 备注 |
 |---|---|---|
 | WX-2 | 真机验收：扫码登录 + gateway /status 双向收发 | 用户手机实测 |
-| WX-3 | watch 集成：新 HR 消息 -> 桌面 toast + 微信回复（用户主动询问时）；context_token 失效降级 | 依赖 HG-1 |
-| WX-4 | 微信确认流：草稿推送 + 用户回 "ok/改/拒" -> outbound_authorization -> 发送 | 即原 HG-6，双向交互模式下可行 |
+| WX-3 | watch 集成：新 HR 消息 -> 桌面 toast；B 模式（自由文本进 agent）已定稿待实现；context_token 失效降级 | 依赖 HG-1 |
+| WX-4 | 微信确认流：草稿推送 + 用户回 "ok/改/拒" -> outbound_authorization -> 发送 | 与 HG-6 合并实施 |
 | WX-5 | 媒体消息（AES-128-ECB CDN）/ typing 状态/ markdown 分块 | 按需后置 |
 
 ### 已交付（WX-3-GW，2026-08-26）✅
@@ -375,10 +522,13 @@ F3 TR-1/TR-2（简历版本库，面试刚需，零风险）
   -> F6 WX-2（微信真机验收）
   -> F5 IV-1/IV-2（面试记录 + 转写）
   -> F3 TR-3/TR-4（Boss 站内简历/PDF 写操作，需真机校准）
-  -> F4 HG-3/HG-4 + F6 WX-3/WX-4（回复草稿 + 双通道确认发送）
+  -> F4 HG-3（驾驶权状态机 + 出站对账，纯检测零发送风险）
+  -> F6 WX-B（微信 B 模式：自由文本进 agent，完整聊天入口）
+  -> F4 HG-4/HG-6（Agent 起草 + 双通道 HITL 发送）+ F6 WX-4
   -> F5 IV-3~IV-5（错题集/打分/经验贴）
   -> F2 G1/G2、F1 R1~R4 穿插进行
 ```
 
 排序依据：先解决"面试时信息对齐"（TR-1/2）和"信息不漏"（HG-1/2）这两个高价值低风险
-痛点；平台写操作（TR-3/4、HG-4）风险最高、依赖真机校准，放后并全部 HITL。
+痛点；驾驶权检测（HG-3）零发送风险可先于发送链；平台写操作（TR-3/4、HG-4）风险最高、
+依赖真机校准，放后并全部 HITL。
