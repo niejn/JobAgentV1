@@ -502,3 +502,15 @@ JobAgent Supervisor
   E1-E6 边界用例入 roadmap F6（代际过期、逐字改写零漂移、FIFO 串行确认等）。
 - 与 chat CLI 的关系：同一状态机两个入口（终端确认 + 微信确认），"入口不同，
   终点相同"与 Hermes 同构。
+### 8.15 Future Work Track：WX-7 断点续跑 agent 回合（2026-08-27 登记）📋
+
+- 来源：Agent 所有权模型修正（§8.13）时确认 Hermes 崩溃恢复机器比我们 watch 设计
+  完善——watch 若在微信对话 ainvoke 中崩溃，checkpoint 留着已完成步骤但无自动续跑，
+  用户只能重发。已登记为 F6 正式切片 WX-7。
+- 设计要点（借鉴 Hermes startup restore）：崩溃前标记（回合起止写 pending 标记，类比
+  handoff_state='resume_pending'）→ 重启扫描标记会话 → 从 checkpoint 尾部续跑（含
+  tool-tail 检测：末条是 tool result 而 agent 未回复则补跑该步）→ shutdown flush
+  （未发消息落盘）。Hermes 参考位置：run.py startup restore / resume_pending /
+  tool-tail / flush_pending_to_file。
+- 触发条件（不立即实施）：WX-B 上线使用后，崩溃导致会话中断实际发生且重发体验
+  可感知时再动工。

@@ -581,6 +581,7 @@ sidecar（Node.js 全家桶过重），Email 仅作兑底。
 | WX-3 | watch 集成：新 HR 消息 -> 桌面 toast；B 模式（自由文本进 agent）已定稿待实现；context_token 失效降级 | 依赖 HG-1 |
 | WX-4 | 微信确认流：草稿推送 + 用户回 "ok/改/拒" -> outbound_authorization -> 发送 | 与 HG-6 合并实施 |
 | WX-5 | 媒体消息（AES-128-ECB CDN）/ typing 状态/ markdown 分块 | 按需后置 |
+| WX-7 | **断点续跑 agent 回合**（借鉴 Hermes startup restore）：当前 watch 在微信对话中 ainvoke 崩溃时，checkpoint 留着已完成步骤但无任何东西自动续跑，用户只能重发消息。设计要点：① 崩溃前标记（启动/结束 agent 回合时写 pending 标记，类似 Hermes handoff_state='resume_pending'）；② 重启扫描（watch 启动时扫描标记会话）；③ 从 checkpoint 尾部续跑（含 tool-tail 检测：最后一条是 tool result 而 agent 未回复则补跑该步）；④ shutdown flush（未发消息落盘）。Hermes 参考：run.py startup restore / resume_pending / tool-tail / flush_pending_to_file | 触发条件：WX-B 上线使用后，若崩溃导致的会话中断实际发生且重发体验可感知；见 F6「Agent 实例所有权模型」修正节 |
 
 ### 已交付（WX-3-GW，2026-08-26）✅
 
