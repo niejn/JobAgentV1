@@ -426,3 +426,34 @@ JobAgent Supervisor
 5. F5 面试录音复盘 + 错题集（IV-1~5，转写/错题本/多维打分/经验贴）
 
 推荐顺序：TR-1/2 -> HG-1/2 -> IV-1/2 -> TR-3/4 -> HG-3/4 -> IV-3~5。
+
+### 8.9 微信 iLink Bot 通道（2026-08-25）🚧
+
+- 调研定稿：微信个人号官方 Bot API（iLink，`ilinkai.weixin.qq.com`，纯 HTTP/JSON，无封号
+  风险）；OpenClaw 微信支持即腾讯官方插件走此协议；Hermes 适配器为纯 Python MIT 可合法
+  移植。方案：移植核心到 `jobagent/wechat/`，弃 Telegram；Email 仅兜底。
+- 关键限制：context_token 机制下 bot 不能冷启动主动推送 -> 通知主通道为桌面 toast（本机
+  必达），微信承担双向交互（用户先发消息，bot 回复详情/草稿/确认）。
+- ✅ WX-1 已交付：`jobagent/wechat/ilink.py` 文本版客户端（httpx）、QR 扫码登录
+  （`jobagent login --platform wechat`，终端 ASCII 二维码）、`--check` token 检查、
+  隐藏诊断 `wechat-echo`、`ContextTokenStore`/`MessageDeduplicator`、新依赖 `qrcode`。
+- 验证：`288 passed, 1 skipped`；Ruff、mypy 全绿。
+- 后续 WX-2 真机验收 -> WX-3 watch 集成 -> WX-4 微信确认流；详见
+  `docs/next-features-roadmap.md` F6。
+### 8.10 HR Gateway 进程（2026-08-26）🚧
+
+- 设计定稿：`jobagent watch` = gateway 常驻进程，与 `jobagent chat` 仅经 SQLite 通信；
+  不通信、无消息总线、无 Node 网关（沿草稿架构）。
+- 参考 HermesAgent 本机源码（D:/mashibing/hermes-agent，MIT）核实 iLink 真实协议并移植
+  生产模式：QR 状态机（wait/scaned/scaned_but_redirect→redirect_host 换 base_url/
+  expired 自动刷新最多 3 次/confirmed 含 ilink_bot_id+ilink_user_id）、getupdates 长轮询
+  游标（sync-buf 持久化）、errcode -14 会话过期暂停、连续失败退避+回收会话、内容指纹去重。
+- ✅ WX-3-GW 已交付：
+  - `jobagent/gateway/wechat_channel.py`：WeChatChannel 轮询回路（会话过期暂停、
+    退避、去重、owner 白名单=扫码用户、context_token 持久化）；`RegistryCommandHandler`
+    （/status /progress /ping /help，自由文本不回复引导去 chat）。
+  - `jobagent watch` 命令；`login --platform wechat` 升级（redirect/刷新/owner）。
+  - 删除过渡期 `wechat-echo`（watch 已取代）。
+  - 新增验证：`tests/test_wechat_gateway.py` 23 项（MockTransport 零真实网络）。
+- 验证：`311 passed, 1 skipped`；Ruff、mypy 全绿。
+- 后续：Boss 消息监控（HG-1）接入 watch；桌面 toast；微信确认流（WX-4/HG-6）。
