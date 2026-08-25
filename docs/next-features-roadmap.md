@@ -248,8 +248,15 @@ JobAgent 与 HR 的对话，两者不直接通信，只通过 SQLite 交接状�
 3. **草稿生成是无状态单轮 Task Run**：输入 = `resume_hr_conversation` 重建上下文，输出 =
    草稿落库；无对话记忆也不需要，隔多久都能重建。出站发送仍需 chat 内 HITL 确认，
    Gateway 自身不发送（第一版）。
-4. **联系用户 = Telegram 单向通知**（新消息 + 草稿预览 + 提示打开 chat 确认）；Telegram
-   双向回复"ok"即发送是可选后续（HG-6），第一版不做，避免再维护一套 bot 网关。
+4. **联系用户 = 双通道**（2026-08-25 调研后修订，弃 Telegram）：
+   - **桌面通知**（主）：watch 进程跑在用户本机，直接弹 Windows toast，零外部依赖、必达；
+   - **微信 iLink Bot**（交互）：移植 Hermes `gateway/platforms/weixin.py`（MIT）核心为
+     `jobagent/wechat/`，约 600-900 行 Python（aiohttp + cryptography）；QR 扫码登录、
+     HTTP 长轮询、官方协议无封号风险；
+   - iLink 关键限制：`context_token` 机制下 **bot 不能对从未发过消息的用户主动推送**；
+     长时间无对话后通知可能失败，因此桌面通知为必达通道，微信作为双向交互/确认通道；
+     token 有效期需实测，失效则提示用户先给 bot 发一条消息激活会话。
+   - Email（SMTP/IMAP）作为可选兑底，暂不实施。
 5. **没人确认也不丢**：待回复队列扫描超时线程再次提醒；草稿在库中持久等待。
 6. **进程守护**：单实例锁防双开；崩溃后重启从消息游标续读；Windows 下可用计划任务/
    独立终端窗口常驻，不做成系统服务（保持轻量）。
