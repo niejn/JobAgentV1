@@ -424,22 +424,40 @@ BossChannel）可近乎原样插进 Hermes 式 runner——迁移成本是换骨
 - **对比微信与 Boss 的 Agent 角色**：微信 = 常驻对话者（checkpoint 记忆）；Boss =
   无状态起草服务（每次从库重建，见 F4 三方对话设计）。同一 agent 两种服务形态。
 
-#### Agent 实例所有权模型（2026-08-26 补充，源自与 Hermes 对比）
+#### Agent 实例所有权模型（2026-08-27 修正：此前版本对 Hermes 的描述有事实错误）
 
-Hermes 网关是 agent 的唯一宿主：AIAgent 实例缓存在网关内存（`_agent_cache`，会话级，
-含 LLM clients/tool schemas，有缓存上限/内存压力清扫/过期回收三重治理），网关挂 =
-agent 死。我们 deliberately 不同：
+> 修正声明：本节初版错误声称"Hermes 的 agent 状态与网关进程绑死，网关挂 = agent 死"。
+> 经源码核实（用户指正）：Hermes 同样用 SQLite 持久化对话，且有比我们更完善的崩溃
+> 恢复机器。真实差异只在进程拓扑，不在持久化能力。
+
+Hermes 网关的实际架构（源码核实）：
+
+- **对话状态持久化**：消息逐条写入 `~/.hermes/state.db`（SQLite，SessionDB，
+  hermes_state.py 14,637 行）；
+- **AIAgent 实例缓存**（`_agent_cache`）只是性能优化（驻留 LLM clients、
+  tool schemas），不是对话状态——进程挂了重建即可；
+- **崩溃恢复**：看门狗标记被中断的会话（`resume_pending`），网关重启后自动
+  续跑中断的回合；甚至检测 tool-tail 截断（最后一条是 agent 没来得及回复的
+  tool result）并补跑；关机时未发消息 flush 到磁盘（`flush_pending_to_file`）。
+
+修正后的真实对比：
 
 | | Hermes 网关 | JobAgent |
 |---|---|---|
-| agent 宿主 | 网关进程唯一持有 | **双进程各自召唤同一 agent**：chat（终端 threads）+ watch（wechat:* thread、Boss 起草） |
-| 实例形态 | 会话级缓存，常驻内存 | 按需构造，用完释放（LangGraph agent 构造成本低） |
-| 状态存放 | 网关内存 + 它的 session store | **SQLite checkpoint（唯一事实源）**，不在任何进程内存 |
-| 崩溃影响 | agent 状态随网关死 | 进程挂了 agent 状态毫发无损，另一进程随时接上 |
+| 对话状态持久化 | ✅ state.db（SQLite） | ✅ LangGraph checkpoint（SQLite） |
+| 进程崩溃丢失什么 | 仅内存中的 AIAgent 实例缓存（可重建）；重启自动恢复中断会话 | 仅 in-flight agent 调用的结果（checkpoint 保留已完成步骤） |
+| 中断回合自动续跑 | ✅ startup restore + resume_pending + tool-tail 检测 | ❌ MVP 无（用户重发消息即可重新触发；后续可参考 Hermes 思路） |
+| agent 宿主拓扑 | **单一常驻网关进程**承载所有消息通道 | **chat + watch 两个对等进程**共享同一 checkpoint DB |
 
-设计依据：chat 必须独立可用（终端聊天不依赖 watch 存活）；watch 必须独立存活（用户
-睡着时 HR 消息照常监控）。**守护边界是进程，状态边界是 SQLite**。这是 LangGraph
-checkpoint 架构的红利——Hermes 的 agent 状态与网关进程绑死，没有这个选择。
+真正的架构差异（也是唯一站得住的差异）：**拓扑**。Hermes 把所有消息通道收进一个
+常驻网关进程（也因此需要那套会话锁/排队/重启编排机器）；我们把 chat（用户终端入口）
+与 watch（后台通道宿主）拆成两个对等进程，各自按需召唤同一个 agent，靠 SQLite
+checkpoint 天然共享状态——chat 不依赖 watch 存活，watch 不依赖 chat 存活。
+
+附带诚实结论：Hermes 那套崩溃恢复（startup restore、tool-tail 检测、shutdown flush）
+是 31k 行里真实有价值的部分，比我们当前 watch 设计更完善。若将来 watch 需要
+"断点续跑 agent 回合"（如微信对话中进程崩溃），可直接借鉴其思路：崩溃前标记、
+重启后扫描标记会话、从 checkpoint 尾部续跑。
 
 #### 中断语义：MVP 采用服务器排队（2026-08-26 定稿）
 

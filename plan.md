@@ -480,3 +480,13 @@ JobAgent Supervisor
 - **中断语义定稿**（roadmap F6「中断语义」）：MVP 采用微信服务器排队（单用户消息
   天然串行不丢，零代码，显式决策非疏漏）；升级路径 = 对话内排队提示（agent 调用改
   后台 task + "还在思考上一条"回复，~50 行），触发条件为实际使用中延迟可感知。
+### 8.13 Agent 所有权模型修正（2026-08-27，用户指正）📋
+
+- §8.12 初版含事实错误（"Hermes 状态与网关进程绑死，网关挂 = agent 死"）。源码核实：
+  Hermes 消息逐条持久化到 `~/.hermes/state.db`（SQLite），`_agent_cache` 仅是实例性能
+  缓存；网关重启自动恢复中断会话（resume_pending + tool-tail 检测 + shutdown flush），
+  崩溃恢复比我们当前设计更完善。
+- 修正后真实差异只剩拓扑：Hermes 单一常驻网关进程承载所有通道；我们 chat + watch
+  两对等进程共享同一 checkpoint DB（chat/watch 互不依赖存活）。
+- roadmap F6 已重写该节并附修正声明；后续若 watch 需断点续跑 agent 回合，可借鉴
+  Hermes 的标记-扫描-续跑思路。
