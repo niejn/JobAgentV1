@@ -533,3 +533,16 @@ JobAgent Supervisor
 - 推荐实施顺序修订：PS-1/PS-2 提到首位（纯函数级本地改动、零依赖零风险；PS-2 注入
   检测是后续一切外部文本入 prompt 的前置安全件——JD/HR 消息/上下文文件都要过它）；
   F7 成长记忆紧随其后（与 PS-1 共享 builder 接口，PS-3 为合流点）。
+### 8.18 迭代预算设计 PS-4 + LangGraph 对接结构记录（2026-08-27）📋
+
+- **现状诊断**：主 agent 无显式迭代预算——撞的是 LangGraph 隐式默认
+  `recursion_limit=25`（≈6-12 轮工具循环，仅 Hermes 90 轮的 1/10），超限时裸抛
+  GraphRecursionError 无收尾。research_max_iterations=3 只是特定工具护栏。
+- **PS-4 切片**（入 F8）：① settings.jobagent_recursion_limit 默认 90（astream config
+  传入；单位换算已记录：超步≠模型轮，deepagents 一轮工具循环≈2-4 超步）；
+  ② GraphRecursionError → 无工具再调一次模型做纯总结收尾（对应 Hermes
+  _budget_grace_call）；③ 流事件报剩余步数。
+- **LangGraph/deepagents 对接结构**（roadmap F8 新节）：create_deep_agent 返回值就是
+  CompiledStateGraph——deepagents 是中间件装配器非运行时；控制面三插值点分层（图形状
+  =构造参数 / 步数=config / 连续性=thread_id+checkpointer）。Hermes 自写主循环，
+  我们循环交给 LangGraph，预算设计是翻译而非照抄（无线程安全计数器需求）。
