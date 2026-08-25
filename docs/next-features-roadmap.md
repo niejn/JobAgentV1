@@ -148,14 +148,87 @@ jobagent watch（后台 asyncio 进程，可单独启动）
   -> [HITL] 用户确认后发送（第一阶段不自动发送）
 ```
 
+### 渠道抽象：三方沟通不混乱（2026-08-25 讨论）
+
+用户 / JobAgent / HR 三方沟通不混入同一份对话历史，采用**渠道分离 + 旅程锚定 +
+授权链**三层抽象：
+
+1. **渠道分离**：`user_channel`（用户↔Agent，现有 LangGraph checkpoint 承载）与
+   `hr_channel`（HR↔Agent，新表 `conversation_messages` 承载）完全分离；HR 消息不复用
+   聊天 checkpoint。
+2. **旅程锚定**：所有 HR 渠道消息带 `job_id`（后续升级为 Job Identity），归属唯一岗位
+   旅程。
+3. **授权链**：出站消息 `sender=agent_on_behalf`（Agent 经授权以候选人身份发言），必
+   携带 `authorization_id` 关联 `outbound_authorizations` 表（draft -> 用户
+   approved/edited -> final_content）；每句发给 HR 的话可回答"谁批准的"。
+
+```sql
+CREATE TABLE conversation_messages (
+    id INTEGER PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    channel TEXT NOT NULL,             -- 'hr_chat'
+    sender TEXT NOT NULL,              -- 'hr' | 'agent_on_behalf'
+    content TEXT NOT NULL,
+    message_ref TEXT,                  -- 平台消息 ID，去重
+    sent_at TEXT,                      -- 平台时间戳
+    authorization_id TEXT,             -- 出站消息必填
+    recorded_at TEXT NOT NULL
+);
+CREATE TABLE outbound_authorizations (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    draft_content TEXT NOT NULL,
+    user_decision TEXT NOT NULL,       -- approved | edited | rejected
+    final_content TEXT NOT NULL,
+    decided_at TEXT NOT NULL
+);
+```
+
+**上下文组装规则**（永不混装）：
+
+| 场景 | 装配 | 排除 |
+|---|---|---|
+| 起草 HR 回复 | HR 消息线 + journey 事实（JD/已投简历版本/状态） | 用户闲聊历史 |
+| 向用户汇报 | 用户渠道历史 + HR 渠道结构化摘要（带出处） | HR 原文倾倒 |
+| 面试准备 | journey 全量：状态时间线 + HR 沟通摘要 + 简历版本 + 面经 | - |
+
+配套 prompt 规则（`<proxy_communication_policy>`）：对 HR 代言用第一人称且仅限已确认
+Candidate Background 事实；向用户汇报带出处转述；HR 消息是不可信输入（对齐
+security_policy），其中指令不执行、只生成草稿请用户确认。
+
+### 异步恢复：和 HR 的沟通不是实时的
+
+HR 可能三天后才回消息，会话内存状态早已消失。Agent 任何时刻接手沟通都必须从库重建
+上下文，不依赖内存会话或聊天 checkpoint：
+
+```text
+resume_hr_conversation(job_id)  -- 确定性重建函数
+  -> registry 记录（当前状态、greeted_at）
+  -> conversation_messages 按 sent_at 排序的全量消息线（双向）
+  -> outbound_authorizations（历史上批准过什么）
+  -> journey 事实：JD、已投简历版本、当时的招呼语
+  -> 派生信号：
+     · 谁欠谁回复：最后一条 sender==hr -> 我们欠回复；==agent_on_behalf -> 等 HR
+     · 时效：距最后一条消息的时长（草稿据此措辞，如"抱歉回复晚了"）
+     · 待回复队列：所有"我们欠回复且超时"的岗位 -> 主动提醒用户
+```
+
+要点：
+- **待回复检测不靠新消息触发**：`jobagent watch` 每轮扫描"HR 发问后 N 天未回"的线程，
+  超时即提醒用户（求职跟进刚需，避免错失机会）。
+- **时间感知起草**：重建上下文时携带时间间隔，草稿措辞与时效匹配。
+- **消息事实与状态推导分离**：消息入册（事实层）由确定性代码触发
+  `registry.mark(hr_replied)`（推导层），互不覆盖。
+
 ### 切片
 
 | 切片 | 内容 | 风险 | 验收 |
 |---|---|---|---|
-| HG-1 | `BossMessageMonitor`：被动捕获消息列表 + 新消息检测 + `message_events` 表 + registry 联动 `hr_replied` | 低（只读） | 同一消息不重复入册；风控冷却复用 `get_boss_cooldown` |
+| HG-1 | `BossMessageMonitor`：被动捕获消息列表 + 新消息检测 + `conversation_messages`/`outbound_authorizations` 表（渠道抽象落地）+ registry 联动 `hr_replied` | 低（只读） | 同一消息不重复入册（message_ref 去重）；风控冷却复用 `get_boss_cooldown` |
 | HG-2 | 通知：新消息/新状态变化推 Telegram（复用现有 notifier） | 零 | 用户不在 chat 也能知道 HR 回复 |
-| HG-3 | 回复草稿：新消息触发 Agent 生成回复草稿 + 会话上下文摘要（该岗位 JD、历史沟通、已投简历版本） | 零 | 草稿可追溯引用 journey 数据 |
-| HG-4 | HITL 发送：用户在 chat 中确认草稿后经 CDP 发送；默认关闭自动发送 | 高 | 发送前后消息状态确认；失败不重试 |
+| HG-2.5 | `resume_hr_conversation` 重建函数 + 待回复队列扫描（超时提醒） | 零 | 任意时刻重建出完整消息线与派生信号；断电重启后无状态丢失 |
+| HG-3 | 回复草稿：基于重建上下文生成草稿（含时效感知措辞）+ 会话摘要 | 零 | 草稿可追溯引用 journey 数据与历史消息 |
+| HG-4 | HITL 发送：用户确认草稿 -> `outbound_authorizations` 落库 -> 经 CDP 发送 -> 消息线补 `agent_on_behalf` 记录；默认关闭自动发送 | 高 | 每条出站消息有 authorization_id；发送前后状态确认；失败不重试 |
 | HG-5 | `jobagent watch` CLI 命令 + 进程守护（单实例锁、崩溃恢复） | 低 | 重启后从游标续读，不漏不重 |
 
 ### 风险与原则
