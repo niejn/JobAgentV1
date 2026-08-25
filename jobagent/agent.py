@@ -162,7 +162,7 @@ class JobAgent:
         self._tools = tuple(tools)
         self._system_prompt = system_prompt
         self._checkpoint_db = checkpoint_db
-        self._graph: Any | None = None
+        self._deep_agent: Any | None = None
         self._connection: aiosqlite.Connection | None = None
         self._init_lock = asyncio.Lock()
         self._history_lock = asyncio.Lock()
@@ -214,13 +214,13 @@ class JobAgent:
             yield AgentStreamEvent(
                 "status", f"[debug] Agent 请求开始 trace_id={current_trace_id()}"
             )
-        graph = await self._ensure_graph()
+        deep_agent = await self._ensure_deep_agent()
         yield AgentStreamEvent(
             "status",
             f"Agent 已就绪（{time.perf_counter() - request_started:.1f}s）",
         )
         history_started = time.perf_counter()
-        _, compacted = await self._compact_history(graph, thread_id)
+        _, compacted = await self._compact_history(deep_agent, thread_id)
         if compacted:
             yield AgentStreamEvent("status", "较早的会话已整理为摘要…")
         history_elapsed = time.perf_counter() - history_started
@@ -245,7 +245,7 @@ class JobAgent:
         first_model_event_reported = False
         first_visible_token_reported = False
         tool_started = time.perf_counter()
-        async for part in graph.astream(
+        async for part in deep_agent.astream(
             {"messages": [{"role": "user", "content": message}]},
             config={"configurable": {"thread_id": thread_id}},
             stream_mode=["messages", "updates"],
@@ -422,7 +422,7 @@ class JobAgent:
             if deterministic_tool_answer:
                 yield AgentStreamEvent("token", deterministic_tool_answer)
             else:
-                recovered = await self._recover_final_answer(graph, thread_id)
+                recovered = await self._recover_final_answer(deep_agent, thread_id)
                 if recovered:
                     yield AgentStreamEvent("token", recovered)
         yield AgentStreamEvent("done", "")
@@ -432,12 +432,12 @@ class JobAgent:
                 extra={"elapsed_seconds": round(time.perf_counter() - request_started, 3)},
             )
 
-    async def _recover_final_answer(self, graph: Any, thread_id: str) -> str:
+    async def _recover_final_answer(self, deep_agent: Any, thread_id: str) -> str:
         """Retry once without Tools when a completed Tool turn has no visible answer."""
 
         config = {"configurable": {"thread_id": thread_id}}
         try:
-            snapshot = await graph.aget_state(config)
+            snapshot = await deep_agent.aget_state(config)
             messages = tuple(snapshot.values.get("messages", ()))
             recovery_messages: list[BaseMessage] = [
                 SystemMessage(
@@ -457,7 +457,7 @@ class JobAgent:
             recovered = _visible_text(response).strip()
             if not recovered or not isinstance(response, AIMessage):
                 return ""
-            await graph.aupdate_state(config, {"messages": [response]})
+            await deep_agent.aupdate_state(config, {"messages": [response]})
             return recovered
         except Exception:
             logger.warning("Final-answer recovery failed", exc_info=True)
@@ -466,8 +466,8 @@ class JobAgent:
     async def resume_thread(self, thread_id: str) -> ConversationHistory:
         """Restore one thread, compact it if needed, and expose safe visible history."""
 
-        graph = await self._ensure_graph()
-        messages, compacted = await self._compact_history(graph, thread_id)
+        deep_agent = await self._ensure_deep_agent()
+        messages, compacted = await self._compact_history(deep_agent, thread_id)
         summary = next(
             (
                 _visible_text(message)
@@ -489,7 +489,7 @@ class JobAgent:
 
         if limit < 1:
             raise ValueError("session limit must be positive")
-        await self._ensure_graph()
+        await self._ensure_deep_agent()
         connection = self._connection
         if connection is None:
             return ()
@@ -540,16 +540,16 @@ class JobAgent:
         async with self._init_lock:
             connection = self._connection
             self._connection = None
-            self._graph = None
+            self._deep_agent = None
             if connection is not None:
                 await connection.close()
 
-    async def _ensure_graph(self) -> Any:
-        if self._graph is not None:
-            return self._graph
+    async def _ensure_deep_agent(self) -> Any:
+        if self._deep_agent is not None:
+            return self._deep_agent
         async with self._init_lock:
-            if self._graph is not None:
-                return self._graph
+            if self._deep_agent is not None:
+                return self._deep_agent
             checkpoint_path = self._checkpoint_db.expanduser().resolve()
             checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
             connection = await aiosqlite.connect(str(checkpoint_path))
@@ -581,7 +581,11 @@ class JobAgent:
                         "execute",
                     ],
                 )
-                graph = create_deep_agent(
+                # deepagents harness: a ReAct loop (model <-> tools nodes)
+                # compiled as a LangGraph CompiledStateGraph. Named 'deep_agent'
+                # because orchestration lives in the model (harness mode),
+                # not in hand-written graph nodes.
+                deep_agent = create_deep_agent(
                     model=self._model,
                     tools=list(self._tools),
                     system_prompt=self._system_prompt,
@@ -594,17 +598,17 @@ class JobAgent:
                 await connection.close()
                 raise
             self._connection = connection
-            self._graph = graph
-            return graph
+            self._deep_agent = deep_agent
+            return deep_agent
 
     async def _compact_history(
         self,
-        graph: Any,
+        deep_agent: Any,
         thread_id: str,
     ) -> tuple[tuple[BaseMessage, ...], bool]:
         config = {"configurable": {"thread_id": thread_id}}
         async with self._history_lock:
-            snapshot = await graph.aget_state(config)
+            snapshot = await deep_agent.aget_state(config)
             messages = tuple(snapshot.values.get("messages", ()))
             if len(messages) < self._history_compact_after_messages:
                 return messages, False
@@ -622,7 +626,7 @@ class JobAgent:
                 content=summary,
                 additional_kwargs={_HISTORY_SUMMARY_MARKER: True},
             )
-            await graph.aupdate_state(
+            await deep_agent.aupdate_state(
                 config,
                 {
                     "messages": [
