@@ -60,3 +60,9 @@ data/
 
 # Personal documents
 resume-*.md
+
+# External cloned crawler projects (loaded as libraries, not vendored)
+spiders/
+# Personal notes
+.pi-brief-*.txt
+pi代理.md

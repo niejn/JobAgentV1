@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from typing import Any
 
 from pydantic import BaseModel, Field, HttpUrl
@@ -103,7 +104,58 @@ class BossDiscoveryRequest(BaseModel):
 
 
 class BossAccessError(RuntimeError):
-    """Boss rejected a read request; callers must not retry without cooldown."""
+    """Boss access failed; ``code`` tells the Agent what to do next.
+
+    Codes:
+    - ``cdp_not_ready``  - Chrome debug port is down -> follow skills/ChromeCDP-setup/SKILL.md
+    - ``cooldown_active`` - rate-limit cooldown running -> wait, do not retry
+    - ``boss_risk_control`` - server rejected the request -> cooldown started
+    - ``boss_access_denied`` - login expired or automation detected -> check the Chrome window
+    """
+
+    def __init__(self, message: str, *, code: str = "boss_access_denied") -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class BossCooldownManager:
+    """In-memory rate-limit cooldown shared across Boss operations.
+
+    When Boss rejects a read with risk control, all Boss tools should refuse
+    to send further requests until the cooldown expires. Without this the
+    Agent retries the tool, each retry is a real request, and the account
+    gets blocked harder.
+    """
+
+    def __init__(self, cooldown_seconds: int = 3600) -> None:
+        self._cooldown_seconds = cooldown_seconds
+        self._blocked_until = 0.0
+        self._reason = ""
+
+    def trigger(self, reason: str = "risk_control") -> None:
+        self._blocked_until = time.monotonic() + self._cooldown_seconds
+        self._reason = reason
+
+    def check(self) -> tuple[bool, int, str]:
+        """Return ``(allowed, remaining_minutes, reason)``."""
+
+        remaining = self._blocked_until - time.monotonic()
+        if remaining <= 0:
+            return True, 0, ""
+        return False, max(1, int(remaining // 60)), self._reason
+
+    def reset(self) -> None:
+        self._blocked_until = 0.0
+        self._reason = ""
+
+
+_cooldown_manager = BossCooldownManager()
+
+
+def get_boss_cooldown() -> BossCooldownManager:
+    """Process-wide cooldown shared by search and greeting tools."""
+
+    return _cooldown_manager
 
 
 def _normalize_job(raw: dict[str, Any]) -> Job:

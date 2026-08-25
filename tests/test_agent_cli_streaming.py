@@ -121,8 +121,8 @@ class AutoSessionFakeAgent(FakeStreamingAgent):
 class SwitchingSessionFakeAgent(AutoSessionFakeAgent):
     async def list_sessions(self, *, limit: int = 50) -> tuple[ConversationSession, ...]:
         return (
-            ConversationSession("previous-session", 4),
-            ConversationSession("older-session", 2),
+            ConversationSession("previous-session", 4, "2026-08-24 10:00"),
+            ConversationSession("older-session", 2, "2026-08-20 09:00"),
         )
 
     async def resume_thread(self, thread_id: str) -> ConversationHistory:
@@ -184,6 +184,43 @@ def test_chat_cli_renders_status_then_tokens_incrementally(
     assert "You · 之前的问题" in result.output
     assert "JobAgent · 之前的回答" in result.output
     assert agent.closed is True
+
+
+def test_chat_cli_does_not_write_production_log(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Chat CLI runs under pytest must never touch data/logs/jobagent.log.
+
+    Regression guard: ``_chat`` calls ``setup_logging()`` whose default file
+    sink is the production log; the pytest conftest redirects that call into
+    ``data/logs/tests/cli.log``. Without the redirect, this test fails and
+    test tracebacks (e.g. fake "internal secret traceback" exceptions) leak
+    into the production log.
+    """
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "jobagent.cli.get_settings",
+        lambda: Settings(_env_file=None, jobagent_debug_trace=False),
+    )
+    startup = tmp_path / "agent.yaml"
+    startup.write_text("unused: true", encoding="utf-8")
+    agent = FailingStreamingAgent()
+    monkeypatch.setattr("jobagent.agent.build_job_agent", lambda *args, **kwargs: agent)
+    monkeypatch.setattr("jobagent.profile.load_candidate_context", lambda path: None)
+
+    result = CliRunner().invoke(
+        main,
+        ["chat", "--config", str(startup), "--thread-id", "stream-test"],
+        input="开始研究\n/exit\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "本轮处理失败" in result.output
+    production_log = tmp_path / "data" / "logs" / "jobagent.log"
+    assert not production_log.exists()
+    assert not any(tmp_path.glob("data/logs/jobagent.log*"))
 
 
 def test_chat_cli_keeps_session_alive_after_one_turn_fails(

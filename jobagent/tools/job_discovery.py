@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Protocol
 
 from langchain_core.tools import BaseTool, StructuredTool
 
 from jobagent.auth.cookie_manager import CookieNotFoundError
 from jobagent.config import Settings
+from jobagent.journey.job_registry import SQLiteJobRegistry
 from jobagent.models import Job
+from jobagent.profile import CandidateContext
 from jobagent.scraper.boss import BossAccessError, BossDiscoveryRequest
 
 
@@ -30,11 +34,57 @@ class BossJobDiscovery:
             return await backend.discover(request)
         finally:
             await backend.dispose()
-        return await backend.discover(request)
 
 
-def build_boss_job_discovery_tool(discovery: BossDiscovery) -> BaseTool:
-    """Expose safe read-only Boss discovery to JobAgent."""
+def _missing_candidate_data(context: CandidateContext | None) -> list[str]:
+    """Return the missing global inputs job discovery needs before crawling.
+
+    Job discovery derives its search keywords, city and filters from the
+    confirmed Job Search Profile, and judges postings against the candidate
+    background; crawling before both exist produces recommendations the user
+    cannot act on. The Agent must collect these first.
+    """
+
+    missing: list[str] = []
+    if context is None or context.search_profile is None:
+        missing.append("job_search_profile")
+    if context is None or (
+        context.background is None and context.resume_text is None
+    ):
+        missing.append("candidate_background_or_resume")
+    return missing
+
+
+_MISSING_DATA_LABELS = {
+    "job_search_profile": (
+        "全局求职意向（期望岗位、城市、薪资、公司特征、职位特征、排除条件；"
+        "确认后用 save_job_search_profile 保存）"
+    ),
+    "candidate_background_or_resume": (
+        "基础简历或已确认候选人背景（用 import_candidate_resume 导入，"
+        "确认事实后用 save_candidate_background 保存）"
+    ),
+}
+
+
+def build_boss_job_discovery_tool(
+    discovery: BossDiscovery,
+    *,
+    context_loader: Callable[[], CandidateContext | None] | None = None,
+    registry_path: Path | None = None,
+) -> BaseTool:
+    """Expose safe read-only Boss discovery to JobAgent.
+
+    ``context_loader`` supplies the latest persisted candidate context. When
+    the Job Search Profile or the resume/confirmed background is missing, the
+    tool refuses to crawl and returns ``missing_candidate_data`` so the Agent
+    collects the data first instead of producing useless recommendations.
+
+    ``registry_path`` points at the job progress registry: every returned job
+    is recorded (new ones as ``discovered``), and known jobs come back with
+    their live ``progress_status`` so already-greeted or interviewing jobs are
+    never re-recommended.
+    """
 
     async def discover_boss_jobs(
         query: str,
@@ -50,6 +100,22 @@ def build_boss_job_discovery_tool(discovery: BossDiscovery) -> BaseTool:
         limit: int = 20,
     ) -> dict[str, Any]:
         """Find Boss jobs; never contact HR or submit applications."""
+
+        if context_loader is not None:
+            missing = _missing_candidate_data(context_loader())
+            if missing:
+                return {
+                    "status": "missing_candidate_data",
+                    "missing": missing,
+                    "message": (
+                        "岗位发现前需先收集: "
+                        + "；".join(
+                            _MISSING_DATA_LABELS[item] for item in missing
+                        )
+                        + "。请先引导用户补齐资料，资料就绪后再重新发现岗位；"
+                        "不要绕过本检查。"
+                    ),
+                }
 
         try:
             jobs = await discovery.discover(
@@ -67,11 +133,14 @@ def build_boss_job_discovery_tool(discovery: BossDiscovery) -> BaseTool:
                     limit=limit,
                 )
             )
-        except BossAccessError:
+        except BossAccessError as exc:
+            # Pass the real reason through so the Agent can act on it:
+            # cdp_not_ready -> follow skills/ChromeCDP-setup/SKILL.md;
+            # cooldown_active / boss_risk_control -> stop retrying and wait.
             return {
                 "status": "blocked",
-                "error_type": "boss_risk_control",
-                "message": "Boss read access is cooling down; no retry was attempted.",
+                "error_type": getattr(exc, "code", "boss_access_error"),
+                "message": str(exc),
             }
         except CookieNotFoundError:
             return {
@@ -79,10 +148,13 @@ def build_boss_job_discovery_tool(discovery: BossDiscovery) -> BaseTool:
                 "error_type": "boss_cookie_missing",
                 "message": "No matching Boss cookie is available.",
             }
+        payloads, new_count = _record_jobs(jobs, registry_path)
         return {
             "status": "completed",
             "count": len(jobs),
-            "jobs": [_job_payload(job) for job in jobs],
+            "new_count": new_count,
+            "already_known": len(jobs) - new_count,
+            "jobs": payloads,
         }
 
     return StructuredTool.from_function(
@@ -102,6 +174,48 @@ def build_boss_job_discovery_tool(discovery: BossDiscovery) -> BaseTool:
         ),
         args_schema=BossDiscoveryRequest,
     )
+
+
+def _record_jobs(
+    jobs: list[Job], registry_path: Path | None
+) -> tuple[list[dict[str, Any]], int]:
+    """Persist discovered jobs and annotate payloads with journey status.
+
+    New jobs enter the registry as ``discovered``; known jobs keep their
+    current progress status (greeted / interviewing / closed ...) plus
+    ``greeted_at`` when present, so the Agent never re-recommends a job the
+    user already pursued.
+    """
+
+    if registry_path is None:
+        return [_job_payload(job) for job in jobs], len(jobs)
+    payloads: list[dict[str, Any]] = []
+    new_count = 0
+    with SQLiteJobRegistry(registry_path) as registry:
+        for job in jobs:
+            payload = _job_payload(job)
+            created = registry.upsert_discovered(
+                job_id=job.id,
+                source=job.source.value,
+                company=job.company,
+                title=job.title,
+                location=job.location,
+                url=str(job.url),
+            )
+            if created is not None:
+                new_count += 1
+                payload["is_new"] = True
+                payload["progress_status"] = created.status.value
+            else:
+                record = registry.get(job.id)
+                payload["is_new"] = False
+                payload["progress_status"] = (
+                    record.status.value if record is not None else "unknown"
+                )
+                if record is not None and record.greeted_at is not None:
+                    payload["greeted_at"] = record.greeted_at.isoformat()
+            payloads.append(payload)
+    return payloads, new_count
 
 
 def _job_payload(job: Job) -> dict[str, Any]:

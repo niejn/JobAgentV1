@@ -14,7 +14,13 @@ from urllib.parse import urlencode
 
 from jobagent.config import Settings
 from jobagent.models import Job
-from jobagent.scraper.boss import _CITY_CODES, BossAccessError, BossDiscoveryRequest, _normalize_job
+from jobagent.scraper.boss import (
+    _CITY_CODES,
+    BossAccessError,
+    BossDiscoveryRequest,
+    _normalize_job,
+    get_boss_cooldown,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +59,11 @@ class BossCdpBackend:
             except Exception as exc:
                 await driver.stop()
                 raise BossAccessError(
-                    f"Boss CDP: cannot connect to Chrome: {exc}"
+                    "Boss CDP: 无法连接 Chrome--Chrome 调试端口未就绪。请按以下步骤设置:\n"
+                    "1. 读取 skills/ChromeCDP-setup/SKILL.md\n"
+                    "2. 按 SKILL.md 中的 4 个步骤启动 Chrome 调试模式\n"
+                    "3. 重试本次操作",
+                    code="cdp_not_ready",
                 ) from exc
 
             # Find a context that already has pages (has persistent cookies)
@@ -68,7 +78,9 @@ class BossCdpBackend:
                 finally:
                     await driver.stop()
                 raise BossAccessError(
-                    "Boss CDP: no existing browser context found."
+                    "Boss CDP: 未找到已打开页面的浏览器上下文（登录态可能丢失），"
+                    "请在 Chrome 窗口中确认 Boss 已登录。",
+                    code="boss_access_denied",
                 )
 
             self._connection = (browser, context, driver)
@@ -85,6 +97,16 @@ class BossCdpBackend:
         self._connection = None
 
     async def discover(self, request: BossDiscoveryRequest) -> list[Job]:
+        # Refuse immediately while rate-limit cooldown is active - do NOT
+        # send a real request that would deepen the block.
+        allowed, remaining_min, _ = get_boss_cooldown().check()
+        if not allowed:
+            raise BossAccessError(
+                f"Boss 风控冷却中（约剩 {remaining_min} 分钟），本次请求未发出。"
+                "请勿继续重试 Boss 操作；可先处理其他任务，稍后再试。",
+                code="cooldown_active",
+            )
+
         city_code = _CITY_CODES.get(request.city)
         if city_code is None:
             raise ValueError(f"Unsupported Boss city: {request.city}")
@@ -130,15 +152,21 @@ class BossCdpBackend:
             current_url = str(page.url or "")
             logger.warning("Boss CDP: no joblist API (URL: %s)", current_url[:100])
             raise BossAccessError(
-                "Boss CDP: page did not fire a joblist API response; "
-                "Boss may have detected the automation or requires login."
+                "Boss CDP: 页面试图加载但未捕获到 API 响应。\n"
+                "可能原因：Boss 反爬校验或登录态过期。\n"
+                "建议：检查 Chrome 窗口中 Boss 直聘是否已登录，是否触发验证码。",
+                code="boss_access_denied",
             )
 
         payload = captured[0]
         if not isinstance(payload, dict) or payload.get("code") != 0:
+            # Server confirmed risk control - start the shared cooldown so
+            # subsequent tool calls fail fast without hitting Boss again.
+            get_boss_cooldown().trigger("risk_control")
             raise BossAccessError(
-                "Boss risk control rejected the read request; "
-                "stop and wait for cooldown"
+                "Boss 反爬拒绝了本次请求，已进入 60 分钟冷却期。"
+                "冷却期内所有 Boss 请求会被直接拒绝，请稍后再试或改用其他渠道。",
+                code="boss_risk_control",
             )
 
         zp_data = payload.get("zpData")

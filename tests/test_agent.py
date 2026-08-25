@@ -517,7 +517,8 @@ async def test_agent_lists_saved_conversation_sessions_newest_first(tmp_path) ->
         await agent.close()
 
     assert [session.thread_id for session in sessions] == ["session-two", "session-one"]
-    assert all(session.checkpoint_count > 0 for session in sessions)
+    assert all(session.message_count > 0 for session in sessions)
+    assert all(session.last_used_at for session in sessions)
 
 
 class SummarizingFakeModel(ToolBindableFakeModel, BaseChatModel):
