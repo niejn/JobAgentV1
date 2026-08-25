@@ -740,20 +740,22 @@ def build_system_prompt(
 ) -> str: ...
 ```
 
-### 切片
+### 切片（2026-08-27 用户定级：三件全部采纳，PS-1/PS-2 高优先级）
 
-| 切片 | 内容 |
+| 切片 | 内容 | 优先级 |
 |---|---|---|
-| PS-1 | `build_system_prompt()` builder：条件注入（工具集驱动）+ 元数据层（日期/平台提示，首轮冻结语义） | 低 |
-| PS-2 | 注入检测器 `_scan_context_threat()` + 对 candidate_context/将来 JD/HR 消息的接入 | 低 |
-| PS-3 | 与 F7 记忆快照合流（CM-3 同步实施） | 低 |
+| PS-1 | `build_system_prompt()` builder：**条件注入**（工具集驱动，policy 段跟随工具注册状态，程序性保证非手工同步）+ **元数据层**（当前日期/模型/平台提示，首轮注入随会话冻结——agent 才能算"下周三"、判断"打招呼三天没回"是否超时） | 🔴 高 |
+| PS-2 | **注入检测器** `_scan_context_threat()`（Hermes _CONTEXT_THREAT_PATTERNS 同款：ignore previous instructions / do not tell the user / sys prompt override / exfil curl / read secrets...）；接入 candidate_context 及将来 JD/HR 消息入 prompt 的所有路径；命中整块替换 `[BLOCKED: potential prompt injection]`。我们比 Hermes 更需要：HR 消息/JD 都是外部文本，injection 入口更多 | 🔴 高 |
+| PS-3 | 与 F7 记忆快照合流（CM-3 同步实施） | 🟡 随 F7 |
 
 ---
 
 ## 推荐实施顺序
 
 ```text
-F3 TR-1/TR-2（简历版本库，面试刚需，零风险）
+F8 PS-1/PS-2（prompt 组装 + 注入检测，纯本地零风险，用户定高优先级）
+  -> F3 TR-1/TR-2（简历版本库，面试刚需，零风险）
+  -> F7 CM-1/CM-2/CM-3（成长记忆，纯本地，与 PS-1 builder 合流处已在 PS-3 预留）
   -> F4 HG-1/HG-2（消息监控 + 通知，信息流入口）
   -> F6 WX-2（微信真机验收）
   -> F5 IV-1/IV-2（面试记录 + 转写）
@@ -765,6 +767,9 @@ F3 TR-1/TR-2（简历版本库，面试刚需，零风险）
   -> F2 G1/G2、F1 R1~R4 穿插进行
 ```
 
-排序依据：先解决"面试时信息对齐"（TR-1/2）和"信息不漏"（HG-1/2）这两个高价值低风险
+排序依据（2026-08-27 修订：PS 提到首位）：PS-1/PS-2 是纯函数级本地改动（builder +
+正则扫描），零外部依赖零风险，且 PS-2 注入检测是后续一切外部文本入 prompt 的前置
+安全件（JD/HR 消息/上下文文件都要过它）；F7 紧随其后因为它与 PS-1 共享 builder 接口。
+其余不变：先解决"面试时信息对齐"（TR-1/2）和"信息不漏"（HG-1/2）这两个高价值低风险
 痛点；驾驶权检测（HG-3）零发送风险可先于发送链；平台写操作（TR-3/4、HG-4）风险最高、
 依赖真机校准，放后并全部 HITL。
