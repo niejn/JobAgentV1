@@ -41,7 +41,35 @@
 | F1-R1 | `/status` 板与 registry 合并视图：分析板（opportunity artifacts）+ 沟通板（registry）两栏展示 | 聊天内命令扩展 |
 | F1-R2 | Application Eligibility Policy：同公司多岗位、冷却期、人工覆盖的结构化投递资格判定（plan.md §8.4 R4） | 投递前强制 |
 | F1-R3 | 每周推荐长任务 + 周报（plan.md §8.4 R3） | 依赖 F4 消息数据更佳 |
-| F1-R4 | Job Identity 升级：同岗位不同 encryptJobId / 跨平台识别（规范化公司+职位） | 第二阶段 |
+| F1-R4 | Job Identity 分层身份判定（见下节设计） | 第二阶段 |
+
+### F1-R4 设计：Job Identity 分层身份判定（2026-08-25 讨论）📋
+
+**问题**：仅按 `boss:<encryptJobId>` 去重只覆盖同平台同一次发布；跨平台同岗位
+（XHS 内推帖 vs Boss 岗位）和 Boss 下架重发（新 encryptJobId）都会漏判。
+但纯"公司+职位名"确定性合并也不可靠：豆包 vs 火山引擎是同公司不同业务线的不同岗位；
+同名岗位多 HC 并存常见；公司/职位写法归一化有歧义。
+
+**分层判定**：
+
+| 层 | 信号 | 动作 |
+|---|---|---|
+| L1 | 同平台同 platform_id | 自动同一身份（现有逻辑，确定性） |
+| L2 | identity_key = 规范化公司 + 规范化职位 + 业务线（公司别名表 + 职位归一化） | 仅生成"疑似同一岗位"候选，不自动合并 |
+| L3 | LLM + JD 内容比对（相似度、业务线、职级、地点）输出 merge 建议 + 依据 | 用户确认后合并（HITL，绝不自动） |
+
+**存储模型**：`job_records` 拆为 `job_identity`（跨平台稳定身份，挂 greeted/interviewing
+等 journey 状态）+ `job_postings`（各平台各次发布，各自保留 platform_id）。合并后状态随
+identity 走：Boss 重发新 ID、或从小红书内推再转 Boss 投递，去重和状态追踪都不断链。
+
+**切片**：
+
+| 切片 | 内容 |
+|---|---|
+| JI-1 | 公司别名表 + 职位/业务线归一化工具（含测试）；identity 生成与查询 |
+| JI-2 | registry 拆层改造 + 数据迁移；L1/L2 判定接入 discover_boss_jobs |
+| JI-3 | L3 候选合并 Tool：输出 merge 建议 + 依据，用户确认后合并，状态继承 |
+| JI-4 | Boss 重发岗位识别：同 identity 新 platform_id 自动归并（L2 确定性命中时） |
 
 ---
 
