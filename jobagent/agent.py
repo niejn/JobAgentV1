@@ -39,6 +39,12 @@ from jobagent.artifacts import (
     StatusPeriod,
 )
 from jobagent.config import Settings
+from jobagent.crawl import (
+    AsyncChannelLimiter,
+    CrawlGate,
+    SyncChannelLimiter,
+    build_crawl_gate,
+)
 from jobagent.models.llm_client import build_agent_model
 from jobagent.observability import (
     NodeTraceMiddleware,
@@ -941,19 +947,39 @@ def _tool_start_status(tool_name: str) -> str:
 
 def _xhs_backend_factory_for(
     settings: Settings,
+    crawl_gate: CrawlGate | None = None,
 ) -> Callable[[Settings], Any]:
     """Return the XHS backend factory for this run.
 
     Spider_XHS stays the pure default. CDP composition is opt-in: the
     ``xhs_cdp`` module is imported lazily and only when the user enabled it,
     so a default deployment loads zero CDP code.
+
+    ``crawl_gate`` 是进程级共享闸门（桶随进程存活，跨工具调用生效）。
+    传入时 backend 的 api/media 限流器改接共享通道适配器；不传则退回
+    backend 自带的实例级限流器（测试/独立使用）。CDP 组合路径同样把
+    gate 传给 primary 与 CDP fallback（页面加载也吃同一个站桶）。
     """
 
+    def _with_gate(target_settings: Settings) -> Any:
+        if crawl_gate is None:
+            return SpiderXhsBackend(target_settings)
+        return SpiderXhsBackend(
+            target_settings,
+            api_limiter=SyncChannelLimiter(crawl_gate, "xhs-api"),
+            media_limiter=AsyncChannelLimiter(crawl_gate, "xhs-media"),
+        )
+
     if not settings.xhs_cdp_enabled:
-        return SpiderXhsBackend
+        return _with_gate
     from jobagent.scraper.xhs_cdp import build_xhs_backend
 
-    return build_xhs_backend
+    def _with_gate_and_fallback(target_settings: Settings) -> Any:
+        if crawl_gate is None:
+            return build_xhs_backend(target_settings)
+        return build_xhs_backend(target_settings, crawl_gate=crawl_gate)
+
+    return _with_gate_and_fallback
 
 
 def _build_optional_tool(
@@ -1011,7 +1037,11 @@ def build_job_agent(
     if tools is not None:
         registered_tools = list(tools)
     else:
-        backend_factory = _xhs_backend_factory_for(settings)
+        # 进程级爬取闸门：每个站点账号一个共享令牌桶（跨工具调用存活，
+        # 修复“每次调用 new backend = 空桶”的速率失效 bug）+ 每次放行后
+        # 按请求类别的 jitter。构造点是唯一组装处（build_crawl_gate）。
+        crawl_gate = build_crawl_gate(settings)
+        backend_factory = _xhs_backend_factory_for(settings, crawl_gate)
         shared_url_saver = SharedUrlSaver(
             settings,
             xhs_saver=XhsNoteSaver(settings, backend_factory=backend_factory),
@@ -1033,7 +1063,7 @@ def build_job_agent(
             (
                 "discover_boss_jobs",
                 lambda: build_boss_job_discovery_tool(
-                    BossJobDiscovery(settings),
+                    BossJobDiscovery(settings, crawl_gate=crawl_gate),
                     context_loader=context_provider.load,
                     registry_path=state_db,
                 ),

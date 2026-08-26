@@ -27,6 +27,7 @@ from typing import Any, Protocol, cast
 from urllib.parse import urlencode, urlsplit
 
 from jobagent.config import Settings
+from jobagent.crawl import AsyncChannelLimiter, CrawlGate, SyncChannelLimiter
 from jobagent.observability import log_decision
 from jobagent.scraper.xhs_backend import (
     DownloadedXhsNote,
@@ -187,10 +188,12 @@ class XhsCdpBackend:
         *,
         connect: Callable[[str, int], Awaitable[CdpSession]] | None = None,
         decision_logger: logging.Logger | None = None,
+        crawl_gate: CrawlGate | None = None,
     ) -> None:
         self._settings = settings
         self._connect = connect or connect_over_cdp
         self._logger = decision_logger or logger
+        self._crawl_gate = crawl_gate
         self._session: CdpSession | None = None
         self._session_lock = asyncio.Lock()
 
@@ -296,6 +299,10 @@ class XhsCdpBackend:
     async def _load_page_state(self, url: str, ready_expression: str) -> dict[str, Any]:
         if not self.enabled:
             raise XhsCdpUnavailableError("XHS CDP fallback is disabled")
+        if self._crawl_gate is not None:
+            # CDP 页面加载也是该小红书账号的出站请求：与 api/media 共享
+            # 同一个站桶，只走更慢的 page jitter 剖面。
+            await self._crawl_gate.acquire("xhs-page")
         session = await self._ensure_session()
         timeout_ms = self._settings.xhs_cdp_timeout_seconds * 1000
         page = await session.new_xhs_page()
@@ -500,17 +507,29 @@ class FallbackXhsBackend:
         return result
 
 
-def build_xhs_backend(settings: Settings) -> Any:
+def build_xhs_backend(settings: Settings, *, crawl_gate: CrawlGate | None = None) -> Any:
     """Compose the Spider_XHS backend with the optional CDP fallback.
 
     With ``XHS_CDP_ENABLED=false`` (the default) this returns the plain
-    SpiderXhsBackend so existing behavior is untouched.
+    SpiderXhsBackend so existing behavior is untouched. ``crawl_gate`` 是
+    进程级共享闸门：primary 的 api/media 限流器与 CDP 页面加载都接到
+    同一组站桶上。
     """
 
-    primary = SpiderXhsBackend(settings)
+    primary = (
+        SpiderXhsBackend(settings)
+        if crawl_gate is None
+        else SpiderXhsBackend(
+            settings,
+            api_limiter=SyncChannelLimiter(crawl_gate, "xhs-api"),
+            media_limiter=AsyncChannelLimiter(crawl_gate, "xhs-media"),
+        )
+    )
     if not settings.xhs_cdp_enabled:
         return primary
-    return FallbackXhsBackend(primary, XhsCdpBackend(settings))
+    return FallbackXhsBackend(
+        primary, XhsCdpBackend(settings, crawl_gate=crawl_gate)
+    )
 
 
 def _note_id_from_url(url: str) -> str:

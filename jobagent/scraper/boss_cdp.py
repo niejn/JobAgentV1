@@ -13,6 +13,7 @@ from typing import Any, cast
 from urllib.parse import urlencode
 
 from jobagent.config import Settings
+from jobagent.crawl import CrawlGate
 from jobagent.models import Job
 from jobagent.scraper.boss import (
     _CITY_CODES,
@@ -36,8 +37,9 @@ class BossCdpBackend:
     response, keep the tab open for reuse. Never create-then-close a page.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, crawl_gate: CrawlGate | None = None) -> None:
         self._settings = settings
+        self._crawl_gate = crawl_gate
         self._connection: Any = None
         self._connection_lock = asyncio.Lock()
         self._page: Any = None
@@ -133,6 +135,9 @@ class BossCdpBackend:
         search_params.update(request._filter_query_params())
         search_url = f"https://www.zhipin.com/web/geek/job?{urlencode(search_params)}"
 
+        if self._crawl_gate is not None:
+            # Boss 站桶：搜索页导航也计入该账号的出站请求节奏。
+            await self._crawl_gate.acquire("boss-cdp")
         logger.info("Boss CDP: navigating to search page")
         try:
             await page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
