@@ -232,7 +232,8 @@ TOOL_POLICY_PARAGRAPHS: tuple[tuple[str, frozenset[str] | None], ...] = (
     (
         """用户提供小红书作者主页 URL 并要求查看其其他帖子时，调用 `browse_xhs_author_posts`。它会返回
 有限数量的标题、正文片段和单帖 URL；根据用户主题筛选有价值候选后，再对选中的单帖调用
-`save_shared_url` 下载和 OCR。不要要求用户手工提取作者 ID，也不要暴露分页游标或内部请求参数。""",
+`save_shared_url` 下载和 OCR。用户要求拉取作者全部帖子时，用 `fetch_all=true` 按批次抓取，
+中断后用 `resume=true` 续抓。不要要求用户手工提取作者 ID，也不要暴露分页游标或内部请求参数。""",
         frozenset({"browse_xhs_author_posts"}),
     ),
     (

@@ -1,5 +1,6 @@
 """Tests for saving one user-supplied URL through chat."""
 
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -23,7 +24,12 @@ from jobagent.tools.shared_url import (
     WebPageSaver,
     build_shared_url_save_tool,
 )
-from jobagent.tools.xhs_author import XhsAuthorPostsBrowser, XhsAuthorPostsRequest
+from jobagent.tools.xhs_author import (
+    XhsAuthorBrowseCheckpoint,
+    XhsAuthorBrowseCheckpoints,
+    XhsAuthorPostsBrowser,
+    XhsAuthorPostsRequest,
+)
 from jobagent.tools.xhs_note import XhsContentReader, XhsNoteSaver, XhsNoteSaveRequest
 
 
@@ -563,3 +569,285 @@ async def test_xhs_author_browser_tolerates_partial_failures() -> None:
     assert len(result["failed_details"]) == 1
     assert result["failed_details"][0]["note_id"] == "note-bad"
     assert "token 过期" in result["failed_details"][0]["message"]
+
+
+# ---- fetch_all 模式：全量抓取 + checkpoint 断点恢复 ---------------------------
+
+
+def _fetch_all_note(note_id: str) -> XhsFetchedNote:
+    return XhsFetchedNote(
+        note_id=note_id,
+        url=f"https://www.xiaohongshu.com/explore/{note_id}",
+        title=f"帖子 {note_id}",
+        body="Agent 面试经验正文",
+        author_id="author-1",
+        author_name="作者",
+        image_urls=(),
+        tags=("面试",),
+        published_at="2026-08-20 12:00:00",
+        normalized={},
+        raw_response={},
+    )
+
+
+class FakeFetchAllBackend:
+    """list_user_notes 忽略 limit 返回全部；fetch_note 按失败名单拒绝。
+
+    模拟真实工厂语义：每次调用产出一个新实例（共享 refs/fail_ids/调用
+    记录），单例复用会让 closed 状态泄漏到下一次 browse。
+    """
+
+    def __init__(self, refs: list[XhsNoteReference], fail_ids: set[str]) -> None:
+        self._refs = refs
+        self._fail_ids = fail_ids
+        self.closed = False
+        self.list_calls: list[int | None] = []
+
+    async def __aenter__(self) -> "FakeFetchAllBackend":
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        self.closed = True
+
+    def _ensure_open(self) -> None:
+        if self.closed:
+            raise SpiderXhsError(
+                "SpiderXhsBackend is not started; call start() or use `async with`."
+            )
+
+    async def list_user_notes(self, user_id: str, *, limit: int | None = None):
+        self._ensure_open()
+        self.list_calls.append(limit)
+        return list(self._refs)
+
+    async def fetch_note(self, url: str) -> XhsFetchedNote:
+        self._ensure_open()
+        note_id = url.rsplit("/", 1)[-1].split("?", 1)[0]
+        if note_id in self._fail_ids:
+            raise SpiderXhsError(f"笔记详情受限：{note_id}")
+        return _fetch_all_note(note_id)
+
+
+def _fetch_all_refs(count: int) -> list[XhsNoteReference]:
+    return [
+        XhsNoteReference(
+            note_id=f"note-{i}",
+            url=f"https://www.xiaohongshu.com/explore/note-{i}?xsec_token=tok{i}",
+            raw={},
+        )
+        for i in range(count)
+    ]
+
+
+def _fetch_all_settings(tmp_path) -> Settings:
+    return Settings(
+        _env_file=None,
+        jobagent_state_db=tmp_path / "state.db",
+    )
+
+
+def _fresh_backend_factory(
+    refs: list[XhsNoteReference], fail_ids: set[str]
+) -> tuple[Callable[[Settings], FakeFetchAllBackend], list[int | None]]:
+    """每次调用产出新实例（真实工厂语义），共享 list_calls 供断言。"""
+
+    calls: list[int | None] = []
+
+    def factory(settings: Settings) -> FakeFetchAllBackend:
+        backend = FakeFetchAllBackend(refs, fail_ids)
+        backend.list_calls = calls
+        return backend
+
+    return factory, calls
+
+
+@pytest.mark.asyncio
+async def test_fetch_all_fresh_start_returns_first_batch_and_persists_checkpoint(
+    tmp_path,
+) -> None:
+    refs = _fetch_all_refs(5)
+    factory, list_calls = _fresh_backend_factory(refs, set())
+    browser = XhsAuthorPostsBrowser(
+        _fetch_all_settings(tmp_path),
+        backend_factory=factory,
+    )
+
+    result = await browser.browse(
+        XhsAuthorPostsRequest(
+            profile_url="https://www.xiaohongshu.com/user/profile/author-1",
+            fetch_all=True,
+            batch_limit=2,
+        )
+    )
+
+    assert result["status"] == "resumable"
+    assert result["mode"] == "fetch_all"
+    assert result["resumed"] is False
+    assert result["total_found"] == 5
+    assert result["fetched_this_batch"] == 2
+    assert result["remaining"] == 3
+    assert [p["note_id"] for p in result["posts"]] == ["note-0", "note-1"]
+    assert result["next_action"].startswith("More batches remain")
+
+    # 列表一次到底（防御性 cap 传入），断点已持久化剩余 3 篇
+    assert list_calls == [10_000]
+    with XhsAuthorBrowseCheckpoints(tmp_path / "state.db") as store:
+        checkpoint = store.load("author-1")
+    assert checkpoint is not None
+    assert checkpoint.total_found == 5
+    assert checkpoint.completed_count == 2
+    assert [r.note_id for r in checkpoint.remaining_refs] == [
+        "note-2",
+        "note-3",
+        "note-4",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_all_resume_continues_from_checkpoint_and_cleans_up(
+    tmp_path,
+) -> None:
+    # 预置断点：已抓 2 篇，剩余 note-2/3/4
+    with XhsAuthorBrowseCheckpoints(tmp_path / "state.db") as store:
+        store.save(
+            XhsAuthorBrowseCheckpoint(
+                author_id="author-1",
+                keyword="",
+                total_found=5,
+                completed_count=2,
+                failed_count=0,
+                remaining_refs=tuple(_fetch_all_refs(5)[2:]),
+                updated_at="2026-08-26T10:00:00+08:00",
+            )
+        )
+    factory, list_calls = _fresh_backend_factory(_fetch_all_refs(5), set())
+    browser = XhsAuthorPostsBrowser(
+        _fetch_all_settings(tmp_path),
+        backend_factory=factory,
+    )
+
+    result = await browser.browse(
+        XhsAuthorPostsRequest(
+            profile_url="https://www.xiaohongshu.com/user/profile/author-1",
+            fetch_all=True,
+            resume=True,
+        )
+    )
+
+    # batch_limit 默认 50 > 剩余 3：一次收尾
+    assert result["status"] == "completed"
+    assert result["resumed"] is True
+    assert result["completed_total"] == 5
+    assert result["remaining"] == 0
+    assert [p["note_id"] for p in result["posts"]] == ["note-2", "note-3", "note-4"]
+    # 恢复路径不再调列表接口（断点里已有全部引用）
+    assert list_calls == []
+    # 完成后断点删除
+    with XhsAuthorBrowseCheckpoints(tmp_path / "state.db") as store:
+        assert store.load("author-1") is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_all_resume_without_checkpoint_starts_fresh(tmp_path) -> None:
+    factory, list_calls = _fresh_backend_factory(_fetch_all_refs(2), set())
+    browser = XhsAuthorPostsBrowser(
+        _fetch_all_settings(tmp_path),
+        backend_factory=factory,
+    )
+
+    result = await browser.browse(
+        XhsAuthorPostsRequest(
+            profile_url="https://www.xiaohongshu.com/user/profile/author-1",
+            fetch_all=True,
+            resume=True,
+        )
+    )
+
+    assert result["resumed"] is False
+    assert result["status"] == "completed"
+    assert list_calls == [10_000]
+
+
+@pytest.mark.asyncio
+async def test_fetch_all_counts_failures_across_batches(tmp_path) -> None:
+    factory, _calls = _fresh_backend_factory(
+        _fetch_all_refs(4), {"note-1", "note-3"}
+    )
+    browser = XhsAuthorPostsBrowser(
+        _fetch_all_settings(tmp_path),
+        backend_factory=factory,
+    )
+    url = "https://www.xiaohongshu.com/user/profile/author-1"
+
+    first = await browser.browse(
+        XhsAuthorPostsRequest(profile_url=url, fetch_all=True, batch_limit=2)
+    )
+    assert first["status"] == "resumable"
+    assert first["fetched_this_batch"] == 1
+    assert first["failed_this_batch"] == 1
+    assert first["failed_total"] == 1
+
+    second = await browser.browse(
+        XhsAuthorPostsRequest(profile_url=url, fetch_all=True, resume=True, batch_limit=2)
+    )
+    # 全部批次结束：有永久失败 → partial，失败累计跨批
+    assert second["status"] == "partial"
+    assert second["failed_total"] == 2
+    assert second["completed_total"] == 2
+    assert second["remaining"] == 0
+    with XhsAuthorBrowseCheckpoints(tmp_path / "state.db") as store:
+        assert store.load("author-1") is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_all_keyword_filters_posts_but_fetches_everything(tmp_path) -> None:
+    factory, _calls = _fresh_backend_factory(_fetch_all_refs(2), set())
+    browser = XhsAuthorPostsBrowser(
+        _fetch_all_settings(tmp_path),
+        backend_factory=factory,
+    )
+
+    result = await browser.browse(
+        XhsAuthorPostsRequest(
+            profile_url="https://www.xiaohongshu.com/user/profile/author-1",
+            keyword="不存在的关键词",
+            fetch_all=True,
+        )
+    )
+
+    # 全部详情已抓（completed_total=2），keyword 只过滤展示
+    assert result["completed_total"] == 2
+    assert result["count"] == 0
+    assert result["posts"] == []
+    assert result["status"] == "completed"
+
+
+def test_resume_requires_fetch_all_rejected_by_validation() -> None:
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="resume requires fetch_all"):
+        XhsAuthorPostsRequest(
+            profile_url="https://www.xiaohongshu.com/user/profile/author-1",
+            resume=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_bounded_browse_writes_no_checkpoint(tmp_path) -> None:
+    factory, _calls = _fresh_backend_factory(_fetch_all_refs(1), set())
+    browser = XhsAuthorPostsBrowser(
+        _fetch_all_settings(tmp_path),
+        backend_factory=factory,
+    )
+
+    result = await browser.browse(
+        XhsAuthorPostsRequest(
+            profile_url="https://www.xiaohongshu.com/user/profile/author-1",
+            limit=1,
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert "mode" not in result
+    with XhsAuthorBrowseCheckpoints(tmp_path / "state.db") as store:
+        assert store.load("author-1") is None

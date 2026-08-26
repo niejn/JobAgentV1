@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from langchain_core.tools import BaseTool, StructuredTool
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from jobagent.config import Settings
 from jobagent.scraper.xhs_backend import (
@@ -15,7 +20,132 @@ from jobagent.scraper.xhs_backend import (
     SpiderXhsError,
     XhsAuthenticationError,
     XhsFetchedNote,
+    XhsNoteReference,
 )
+
+#: fetch_all 模式的列表上限：游标循环翻到 has_more=false 为止，实际永远
+#: 远小于此值；仅为防御性封顶（防止上游异常时无限翻页）。
+_FETCH_ALL_LIST_CAP = 10_000
+
+
+@dataclass(frozen=True, slots=True)
+class XhsAuthorBrowseCheckpoint:
+    """fetch_all 模式的断点：剩余待抓详情的帖子引用与累计计数。"""
+
+    author_id: str
+    keyword: str
+    total_found: int
+    completed_count: int
+    failed_count: int
+    remaining_refs: tuple[XhsNoteReference, ...]
+    updated_at: str
+
+
+class XhsAuthorBrowseCheckpoints:
+    """SQLite 断点存储（进程级持久：中断/重启后可续抓）。
+
+    与 SQLiteJobRegistry 同模式：同步 sqlite3 + WAL，工具内 with 块短事务
+    使用。remaining_refs 只持久 note_id 与带 token 的 URL——详情重抓只需要
+    这两样，raw 不入（避免膨胀）。
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path.expanduser().resolve()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._connection = sqlite3.connect(self.path)
+        self._connection.row_factory = sqlite3.Row
+        self._connection.execute("PRAGMA journal_mode = WAL")
+        self._connection.execute("PRAGMA busy_timeout = 5000")
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS xhs_author_browse_checkpoints (
+                author_id TEXT PRIMARY KEY,
+                keyword TEXT NOT NULL DEFAULT '',
+                total_found INTEGER NOT NULL,
+                completed_count INTEGER NOT NULL DEFAULT 0,
+                failed_count INTEGER NOT NULL DEFAULT 0,
+                remaining_refs_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        self._connection.commit()
+
+    def close(self) -> None:
+        self._connection.close()
+
+    def __enter__(self) -> XhsAuthorBrowseCheckpoints:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    def load(self, author_id: str) -> XhsAuthorBrowseCheckpoint | None:
+        row = self._connection.execute(
+            "SELECT * FROM xhs_author_browse_checkpoints WHERE author_id = ?",
+            (author_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        raw_refs = json.loads(row["remaining_refs_json"])
+        remaining = tuple(
+            XhsNoteReference(
+                note_id=str(item["note_id"]),
+                url=str(item["url"]),
+                raw={},
+            )
+            for item in raw_refs
+        )
+        return XhsAuthorBrowseCheckpoint(
+            author_id=row["author_id"],
+            keyword=row["keyword"],
+            total_found=int(row["total_found"]),
+            completed_count=int(row["completed_count"]),
+            failed_count=int(row["failed_count"]),
+            remaining_refs=remaining,
+            updated_at=row["updated_at"],
+        )
+
+    def save(self, checkpoint: XhsAuthorBrowseCheckpoint) -> None:
+        refs_json = json.dumps(
+            [
+                {"note_id": ref.note_id, "url": ref.url}
+                for ref in checkpoint.remaining_refs
+            ],
+            ensure_ascii=False,
+        )
+        self._connection.execute(
+            """
+            INSERT INTO xhs_author_browse_checkpoints (
+                author_id, keyword, total_found, completed_count,
+                failed_count, remaining_refs_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(author_id) DO UPDATE SET
+                keyword = excluded.keyword,
+                total_found = excluded.total_found,
+                completed_count = excluded.completed_count,
+                failed_count = excluded.failed_count,
+                remaining_refs_json = excluded.remaining_refs_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                checkpoint.author_id,
+                checkpoint.keyword,
+                checkpoint.total_found,
+                checkpoint.completed_count,
+                checkpoint.failed_count,
+                refs_json,
+                checkpoint.updated_at,
+            ),
+        )
+        self._connection.commit()
+
+    def delete(self, author_id: str) -> None:
+        self._connection.execute(
+            "DELETE FROM xhs_author_browse_checkpoints WHERE author_id = ?",
+            (author_id,),
+        )
+        self._connection.commit()
 
 
 class XhsAuthorPostsRequest(BaseModel):
@@ -26,7 +156,39 @@ class XhsAuthorPostsRequest(BaseModel):
         default=None,
         description="Optional topic filter such as LangChain, LangGraph, or 面试",
     )
-    limit: int = Field(default=20, ge=1, le=50)
+    limit: int = Field(
+        default=20,
+        ge=1,
+        le=50,
+        description="Bounded mode only: max posts returned in one call.",
+    )
+    fetch_all: bool = Field(
+        default=False,
+        description=(
+            "Fetch ALL posts (may be hundreds). Details are fetched in batches "
+            "of batch_limit per call; each call returns one batch plus a "
+            "persisted checkpoint so an interrupted run can resume."
+        ),
+    )
+    batch_limit: int = Field(
+        default=50,
+        ge=1,
+        le=100,
+        description="fetch_all only: how many post details to fetch per call.",
+    )
+    resume: bool = Field(
+        default=False,
+        description=(
+            "fetch_all only: continue from this author's persisted checkpoint. "
+            "Without a checkpoint this starts fresh."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _reject_resume_without_fetch_all(self) -> XhsAuthorPostsRequest:
+        if self.resume and not self.fetch_all:
+            raise ValueError("resume requires fetch_all=true")
+        return self
 
     @field_validator("profile_url")
     @classmethod
@@ -63,6 +225,8 @@ class XhsAuthorPostsBrowser:
         self._backend_factory = backend_factory
 
     async def browse(self, request: XhsAuthorPostsRequest) -> dict[str, Any]:
+        if request.fetch_all:
+            return await self._browse_fetch_all(request)
         try:
             # 列表与逐篇详情都必须在同一个 async with 块内：backend 的
             # __aexit__ 会 close() 并置空 _api，块外再调 fetch_note 只会得到
@@ -124,6 +288,128 @@ class XhsAuthorPostsBrowser:
             )
         return result
 
+    async def _browse_fetch_all(self, request: XhsAuthorPostsRequest) -> dict[str, Any]:
+        """全量抓取：列表到底 + 分批抓详情 + checkpoint 断点续抓。
+
+        中断恢复是进程级的：剩余引用持久化在 state.db，即使进程重启也能用
+        resume=true 续抓（列表阶段很快，不需要断点；耗时的是详情抓取，断点
+        在详情批次粒度）。每批返回本批 posts，Agent 拿到足够内容后也可选择
+        不再续抓（自然早退，残留 checkpoint 会被下次 fresh 覆盖）。
+        """
+
+        state_db = self._settings.jobagent_state_db.expanduser().resolve()
+        keyword = request.keyword.strip().lower() if request.keyword else ""
+
+        checkpoint: XhsAuthorBrowseCheckpoint | None = None
+        if request.resume:
+            with XhsAuthorBrowseCheckpoints(state_db) as store:
+                checkpoint = store.load(request.author_id)
+
+        fresh_listing = checkpoint is None
+        try:
+            async with self._backend_factory(self._settings) as backend:
+                if fresh_listing:
+                    references = await backend.list_user_notes(
+                        request.author_id,
+                        limit=_FETCH_ALL_LIST_CAP,
+                    )
+                    now = datetime.now().astimezone().isoformat()
+                    checkpoint = XhsAuthorBrowseCheckpoint(
+                        author_id=request.author_id,
+                        keyword=keyword,
+                        total_found=len(references),
+                        completed_count=0,
+                        failed_count=0,
+                        remaining_refs=tuple(references),
+                        updated_at=now,
+                    )
+
+                assert checkpoint is not None
+                batch = checkpoint.remaining_refs[: request.batch_limit]
+                rest = checkpoint.remaining_refs[len(batch) :]
+                successful: list[XhsFetchedNote] = []
+                failed_details: list[dict[str, str]] = []
+                for ref in batch:
+                    try:
+                        note = await backend.fetch_note(ref.url)
+                        successful.append(note)
+                    except Exception as exc:
+                        failed_details.append(
+                            {
+                                "note_id": ref.note_id,
+                                "error_type": type(exc).__name__,
+                                "message": str(exc)[:200],
+                            }
+                        )
+        except XhsAuthenticationError:
+            return {
+                "status": "blocked",
+                "error_type": "login_required",
+                "message": "小红书登录态不可用；请先运行 jobagent login --platform xhs。",
+            }
+        except SpiderXhsError:
+            return {
+                "status": "blocked",
+                "error_type": "source_access_control",
+                "message": "小红书作者主页读取被拒绝或暂时不可用，未尝试绕过。",
+            }
+
+        assert checkpoint is not None
+        completed_total = checkpoint.completed_count + len(successful)
+        failed_total = checkpoint.failed_count + len(failed_details)
+
+        if rest:
+            updated = XhsAuthorBrowseCheckpoint(
+                author_id=checkpoint.author_id,
+                keyword=checkpoint.keyword,
+                total_found=checkpoint.total_found,
+                completed_count=completed_total,
+                failed_count=failed_total,
+                remaining_refs=rest,
+                updated_at=datetime.now().astimezone().isoformat(),
+            )
+            with XhsAuthorBrowseCheckpoints(state_db) as store:
+                store.save(updated)
+            status = "resumable"
+            next_action = (
+                "More batches remain; call browse_xhs_author_posts again with "
+                "fetch_all=true, resume=true to continue."
+            )
+        else:
+            with XhsAuthorBrowseCheckpoints(state_db) as store:
+                store.delete(request.author_id)
+            status = "partial" if failed_details else "completed"
+            next_action = (
+                "All posts fetched; select valuable post URLs and call "
+                "save_shared_url for download/OCR."
+            )
+
+        selected = [
+            note for note in successful if not keyword or _contains_keyword(note, keyword)
+        ]
+        result: dict[str, Any] = {
+            "status": status,
+            "mode": "fetch_all",
+            "resumed": not fresh_listing,
+            "author_id": request.author_id,
+            "profile_url": request.profile_url,
+            "total_found": checkpoint.total_found,
+            "fetched_this_batch": len(successful),
+            "failed_this_batch": len(failed_details),
+            "completed_total": completed_total,
+            "failed_total": failed_total,
+            "remaining": len(rest),
+            "count": len(selected),
+            "posts": [_post_payload(note) for note in selected],
+            "next_action": next_action,
+        }
+        if failed_details:
+            result["failed_details"] = failed_details
+        if not checkpoint.total_found:
+            result["status"] = "failed"
+            result["next_action"] = "No posts found for this author."
+        return result
+
 
 def build_xhs_author_posts_tool(browser: XhsAuthorPostsBrowser) -> BaseTool:
     """Expose bounded author browsing without crawler pagination controls."""
@@ -132,19 +418,32 @@ def build_xhs_author_posts_tool(browser: XhsAuthorPostsBrowser) -> BaseTool:
         profile_url: str,
         keyword: str | None = None,
         limit: int = 20,
+        fetch_all: bool = False,
+        batch_limit: int = 50,
+        resume: bool = False,
     ) -> dict[str, Any]:
         """List an author's public posts so the Agent can select valuable ones."""
 
         return await browser.browse(
-            XhsAuthorPostsRequest(profile_url=profile_url, keyword=keyword, limit=limit)
+            XhsAuthorPostsRequest(
+                profile_url=profile_url,
+                keyword=keyword,
+                limit=limit,
+                fetch_all=fetch_all,
+                batch_limit=batch_limit,
+                resume=resume,
+            )
         )
 
     return StructuredTool.from_function(
         coroutine=browse_xhs_author_posts,
         name="browse_xhs_author_posts",
         description=(
-            "Browse a bounded list of posts from a user-supplied Xiaohongshu author profile URL. "
-            "Use this when the user wants to find other valuable posts by the same author. "
+            "Browse posts from a user-supplied Xiaohongshu author profile URL. "
+            "Bounded mode (default) returns up to `limit` posts in one call; "
+            "fetch_all=true lists every post and fetches details in batches of "
+            "batch_limit, persisting a checkpoint so interrupted runs resume "
+            "with fetch_all=true, resume=true. "
             "Review titles and content, then call save_shared_url only for selected note URLs."
         ),
         args_schema=XhsAuthorPostsRequest,
