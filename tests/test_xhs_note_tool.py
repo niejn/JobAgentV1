@@ -12,6 +12,7 @@ from jobagent.interview.ocr import ImageContentExtraction
 from jobagent.interview.snapshot import SnapshotMaterializer
 from jobagent.scraper.xhs_backend import (
     DownloadedXhsNote,
+    SpiderXhsError,
     XhsAuthenticationError,
     XhsFetchedNote,
     XhsNoteReference,
@@ -438,17 +439,37 @@ async def test_xhs_author_browser_lists_and_filters_public_posts(tmp_path) -> No
     )
 
     class FakeBackend:
+        """模拟真实 SpiderXhsBackend 的生命周期：__aexit__ 后即不可用。
+
+        这是回归护栏：曾有 bug 把 fetch_note 循环写在 async with 块外，
+        fake 的空操作 __aexit__ 掩盖了它（真实 backend close 后抛
+        "not started"，fake 却继续可用）。现在 fake 与真实语义对齐，
+        生命周期错位会直接测试红。
+        """
+
+        def __init__(self) -> None:
+            self.closed = False
+
         async def __aenter__(self):
             return self
 
         async def __aexit__(self, *args):
+            self.closed = True
             return None
 
+        def _ensure_open(self) -> None:
+            if self.closed:
+                raise SpiderXhsError(
+                    "SpiderXhsBackend is not started; call start() or use `async with`."
+                )
+
         async def list_user_notes(self, user_id: str, *, limit: int | None = None):
+            self._ensure_open()
             assert user_id == "5c0645200050148e"
             return [XhsNoteReference(note.note_id, note.url, {})]
 
         async def fetch_note(self, url: str):
+            self._ensure_open()
             return note
 
     browser = XhsAuthorPostsBrowser(
@@ -474,7 +495,7 @@ async def test_xhs_author_browser_lists_and_filters_public_posts(tmp_path) -> No
 
 @pytest.mark.asyncio
 async def test_xhs_author_browser_tolerates_partial_failures() -> None:
-    from jobagent.scraper.xhs_backend import SpiderXhsError, XhsFetchedNote, XhsNoteReference
+    from jobagent.scraper.xhs_backend import XhsFetchedNote, XhsNoteReference
 
     note = XhsFetchedNote(
         note_id="note-1",
@@ -493,14 +514,23 @@ async def test_xhs_author_browser_tolerates_partial_failures() -> None:
     class FakeBackendPartial:
         def __init__(self) -> None:
             self.fetch_calls = 0
+            self.closed = False
 
         async def __aenter__(self):
             return self
 
         async def __aexit__(self, *args):
+            self.closed = True
             return None
 
+        def _ensure_open(self) -> None:
+            if self.closed:
+                raise SpiderXhsError(
+                    "SpiderXhsBackend is not started; call start() or use `async with`."
+                )
+
         async def list_user_notes(self, user_id: str, *, limit: int | None = None):
+            self._ensure_open()
             return [
                 XhsNoteReference("note-ok", "https://xhs/note-ok", {}),
                 XhsNoteReference("note-bad", "https://xhs/note-bad", {}),
@@ -508,6 +538,7 @@ async def test_xhs_author_browser_tolerates_partial_failures() -> None:
             ]
 
         async def fetch_note(self, url: str):
+            self._ensure_open()
             if "note-bad" in url:
                 raise SpiderXhsError("笔记详情受限：token 过期")
             return note

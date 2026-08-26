@@ -64,11 +64,30 @@ class XhsAuthorPostsBrowser:
 
     async def browse(self, request: XhsAuthorPostsRequest) -> dict[str, Any]:
         try:
+            # 列表与逐篇详情都必须在同一个 async with 块内：backend 的
+            # __aexit__ 会 close() 并置空 _api，块外再调 fetch_note 只会得到
+            # "SpiderXhsBackend is not started"（曾致 26/26 详情全败）。
             async with self._backend_factory(self._settings) as backend:
                 references = await backend.list_user_notes(
                     request.author_id,
                     limit=request.limit,
                 )
+                # 逐篇 fetch_note，单篇失败不阻塞整批；每篇 URL 自带
+                # 列表接口返回的 per-note xsec_token，无需用户逐帖提供。
+                successful: list[XhsFetchedNote] = []
+                failed_details: list[dict[str, str]] = []
+                for ref in references:
+                    try:
+                        note = await backend.fetch_note(ref.url)
+                        successful.append(note)
+                    except Exception as exc:
+                        failed_details.append(
+                            {
+                                "note_id": ref.note_id,
+                                "error_type": type(exc).__name__,
+                                "message": str(exc)[:200],
+                            }
+                        )
         except XhsAuthenticationError:
             return {
                 "status": "blocked",
@@ -81,22 +100,6 @@ class XhsAuthorPostsBrowser:
                 "error_type": "source_access_control",
                 "message": "小红书作者主页读取被拒绝或暂时不可用，未尝试绕过。",
             }
-
-        # 逐篇 fetch_note，单篇失败不阻塞整批
-        successful: list[XhsFetchedNote] = []
-        failed_details: list[dict[str, str]] = []
-        for ref in references:
-            try:
-                note = await backend.fetch_note(ref.url)
-                successful.append(note)
-            except Exception as exc:
-                failed_details.append(
-                    {
-                        "note_id": ref.note_id,
-                        "error_type": type(exc).__name__,
-                        "message": str(exc)[:200],
-                    }
-                )
 
         keyword = request.keyword.strip().lower() if request.keyword else ""
         selected = [
