@@ -111,7 +111,7 @@ async def test_recursion_limit_reaches_astream_config(tmp_path: Any) -> None:
     try:
         deep_agent = await agent._ensure_deep_agent()
         deep_agent.astream = fake_astream  # type: ignore[method-assign]
-        response = await agent.reply("你好", thread_id="cfg-check")
+        response = await agent.reply("你好", session_id="cfg-check")
     finally:
         await agent.close()
 
@@ -124,7 +124,7 @@ async def test_recursion_limit_reaches_astream_config(tmp_path: Any) -> None:
 @pytest.mark.asyncio
 async def test_budget_exhaustion_yields_graceful_summary(tmp_path: Any) -> None:
     """GraphRecursionError surfaces as status + summary token + done events,
-    and the summary is persisted into the checkpoint thread."""
+    and the summary is persisted into the checkpoint session."""
 
     model = BudgetExhaustionFakeModel(responses=["x"])
     agent = _make_agent(tmp_path, model=model, recursion_limit=1)
@@ -144,7 +144,7 @@ async def test_budget_exhaustion_yields_graceful_summary(tmp_path: Any) -> None:
         deep_agent.astream = raising_astream  # type: ignore[method-assign]
 
         events = []
-        async for event in agent.stream_reply("复杂任务", thread_id="budget"):
+        async for event in agent.stream_reply("复杂任务", session_id="budget"):
             events.append(event)
     finally:
         await agent.close()
@@ -162,7 +162,7 @@ async def test_budget_exhaustion_yields_graceful_summary(tmp_path: Any) -> None:
     model2 = BudgetExhaustionFakeModel(responses=["x"])
     agent2 = _make_agent(tmp_path, model=model2, recursion_limit=90)
     try:
-        history = await agent2.resume_thread("budget")
+        history = await agent2.resume_session("budget")
         texts = [entry.text for entry in history.recent]
         assert any("阶段性总结" in t for t in texts)
     finally:
@@ -204,7 +204,7 @@ async def test_budget_exhaustion_summary_failure_falls_back(tmp_path: Any) -> No
         deep_agent.aget_state = failing_get_state  # type: ignore[method-assign]
 
         events = []
-        async for event in agent.stream_reply("复杂任务", thread_id="fallback"):
+        async for event in agent.stream_reply("复杂任务", session_id="fallback"):
             events.append(event)
     finally:
         await agent.close()

@@ -34,10 +34,10 @@ class FakeStreamingAgent:
         self,
         message: str,
         *,
-        thread_id: str,
+        session_id: str,
     ) -> AsyncIterator[AgentStreamEvent]:
         assert message == "你好"
-        assert thread_id == "stream-test"
+        assert session_id == "stream-test"
         yield AgentStreamEvent("status", "正在分析你的请求…")
         yield AgentStreamEvent("token", "你")
         yield AgentStreamEvent("token", "好")
@@ -46,8 +46,8 @@ class FakeStreamingAgent:
     async def close(self) -> None:
         self.closed = True
 
-    async def resume_thread(self, thread_id: str) -> ConversationHistory:
-        assert thread_id == "stream-test"
+    async def resume_session(self, session_id: str) -> ConversationHistory:
+        assert session_id == "stream-test"
         return ConversationHistory(
             summary="较早对话已归纳。",
             recent=(
@@ -63,7 +63,7 @@ class ThinkingStreamingAgent(FakeStreamingAgent):
         self,
         message: str,
         *,
-        thread_id: str,
+        session_id: str,
     ) -> AsyncIterator[AgentStreamEvent]:
         yield AgentStreamEvent("status", "正在分析你的请求…")
         yield AgentStreamEvent("thinking", "模型思考：先理解")
@@ -79,7 +79,7 @@ class FailingStreamingAgent(FakeStreamingAgent):
         self,
         message: str,
         *,
-        thread_id: str,
+        session_id: str,
     ) -> AsyncIterator[AgentStreamEvent]:
         yield AgentStreamEvent("status", "正在分析你的请求…")
         raise RuntimeError("internal secret traceback")
@@ -90,7 +90,7 @@ class MissingFinalAnswerFakeAgent(FakeStreamingAgent):
         self,
         message: str,
         *,
-        thread_id: str,
+        session_id: str,
     ) -> AsyncIterator[AgentStreamEvent]:
         yield AgentStreamEvent("status", "正在导入并版本化你的基础简历…")
         yield AgentStreamEvent("status", "资料处理完成，正在生成回答…")
@@ -98,22 +98,22 @@ class MissingFinalAnswerFakeAgent(FakeStreamingAgent):
 
 
 class AutoSessionFakeAgent(FakeStreamingAgent):
-    active_thread_ids: list[str]
+    active_session_ids: list[str]
 
     def __init__(self) -> None:
-        self.active_thread_ids = []
+        self.active_session_ids = []
 
-    async def resume_thread(self, thread_id: str) -> ConversationHistory:
-        self.active_thread_ids.append(thread_id)
+    async def resume_session(self, session_id: str) -> ConversationHistory:
+        self.active_session_ids.append(session_id)
         return ConversationHistory(summary=None, recent=(), compacted=False)
 
     async def stream_reply(
         self,
         message: str,
         *,
-        thread_id: str,
+        session_id: str,
     ) -> AsyncIterator[AgentStreamEvent]:
-        self.active_thread_ids.append(thread_id)
+        self.active_session_ids.append(session_id)
         yield AgentStreamEvent("token", "你好")
         yield AgentStreamEvent("done", "")
 
@@ -125,9 +125,9 @@ class SwitchingSessionFakeAgent(AutoSessionFakeAgent):
             ConversationSession("older-session", 2, "2026-08-20 09:00"),
         )
 
-    async def resume_thread(self, thread_id: str) -> ConversationHistory:
-        self.active_thread_ids.append(thread_id)
-        if thread_id == "previous-session":
+    async def resume_session(self, session_id: str) -> ConversationHistory:
+        self.active_session_ids.append(session_id)
+        if session_id == "previous-session":
             return ConversationHistory(
                 summary=None,
                 recent=(ConversationEntry("assistant", "这是之前的会话"),),
@@ -171,7 +171,7 @@ def test_chat_cli_renders_status_then_tokens_incrementally(
 
     result = CliRunner().invoke(
         main,
-        ["chat", "--config", str(startup), "--thread-id", "stream-test"],
+        ["chat", "--config", str(startup), "--session-id", "stream-test"],
         input="你好\n/exit\n",
     )
 
@@ -212,7 +212,7 @@ def test_chat_cli_does_not_write_production_log(
 
     result = CliRunner().invoke(
         main,
-        ["chat", "--config", str(startup), "--thread-id", "stream-test"],
+        ["chat", "--config", str(startup), "--session-id", "stream-test"],
         input="开始研究\n/exit\n",
     )
 
@@ -239,7 +239,7 @@ def test_chat_cli_keeps_session_alive_after_one_turn_fails(
 
     result = CliRunner().invoke(
         main,
-        ["chat", "--config", str(startup), "--thread-id", "stream-test"],
+        ["chat", "--config", str(startup), "--session-id", "stream-test"],
         input="开始研究\n/exit\n",
     )
 
@@ -263,7 +263,7 @@ def test_chat_cli_does_not_silently_return_when_agent_has_no_final_answer(
 
     result = CliRunner().invoke(
         main,
-        ["chat", "--config", str(startup), "--thread-id", "stream-test"],
+        ["chat", "--config", str(startup), "--session-id", "stream-test"],
         input="读取简历并给出建议\n/exit\n",
     )
 
@@ -286,7 +286,7 @@ def test_chat_cli_starts_without_yaml_configuration(tmp_path: Path, monkeypatch)
 
     result = CliRunner().invoke(
         main,
-        ["chat", "--thread-id", "stream-test"],
+        ["chat", "--session-id", "stream-test"],
         input="你好\n/exit\n",
     )
 
@@ -325,7 +325,7 @@ def test_chat_cli_recognizes_persisted_resume_and_search_profile(
 
     result = CliRunner().invoke(
         main,
-        ["chat", "--thread-id", "stream-test"],
+        ["chat", "--session-id", "stream-test"],
         input="你好\n/exit\n",
     )
 
@@ -363,7 +363,7 @@ def test_chat_warns_about_expired_cookie_but_remains_usable(
 
     result = CliRunner().invoke(
         main,
-        ["chat", "--thread-id", "stream-test"],
+        ["chat", "--session-id", "stream-test"],
         input="你好\n/exit\n",
     )
 
@@ -373,7 +373,7 @@ def test_chat_warns_about_expired_cookie_but_remains_usable(
     assert "JobAgent> 你好" in result.output
 
 
-def test_chat_cli_creates_named_session_when_thread_id_is_omitted(monkeypatch) -> None:
+def test_chat_cli_creates_named_session_when_session_id_is_omitted(monkeypatch) -> None:
     agent = AutoSessionFakeAgent()
     monkeypatch.setattr("jobagent.agent.build_job_agent", lambda *args, **kwargs: agent)
 
@@ -381,8 +381,8 @@ def test_chat_cli_creates_named_session_when_thread_id_is_omitted(monkeypatch) -
 
     assert result.exit_code == 0, result.output
     assert "当前会话：session-" in result.output
-    assert len(set(agent.active_thread_ids)) == 1
-    assert agent.active_thread_ids[0].startswith("session-")
+    assert len(set(agent.active_session_ids)) == 1
+    assert agent.active_session_ids[0].startswith("session-")
 
 
 def test_sessions_command_lists_and_switches_saved_conversation(monkeypatch) -> None:
@@ -399,7 +399,7 @@ def test_sessions_command_lists_and_switches_saved_conversation(monkeypatch) -> 
     assert "1. previous-session" in result.output
     assert "已切换会话：previous-session" in result.output
     assert "这是之前的会话" in result.output
-    assert agent.active_thread_ids[-1] == "previous-session"
+    assert agent.active_session_ids[-1] == "previous-session"
 
 
 def test_status_command_renders_weekly_opportunity_summary_without_llm(monkeypatch) -> None:
@@ -433,7 +433,7 @@ def test_chat_cli_prints_thinking_and_tool_lines_before_final_answer(
 
     result = CliRunner().invoke(
         main,
-        ["chat", "--thread-id", "stream-test"],
+        ["chat", "--session-id", "stream-test"],
         input="你好\n/exit\n",
     )
 

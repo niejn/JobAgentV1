@@ -312,7 +312,7 @@ async def test_agent_streams_visible_tokens_without_hidden_reasoning(tmp_path) -
     agent = build_job_agent(settings, model=VisibleStreamingFakeModel(), tools=[])
 
     try:
-        events = [event async for event in agent.stream_reply("你好", thread_id="stream-1")]
+        events = [event async for event in agent.stream_reply("你好", session_id="stream-1")]
     finally:
         await agent.close()
 
@@ -337,7 +337,7 @@ async def test_debug_trace_emits_sanitized_phase_diagnostics(tmp_path) -> None:
     agent = build_job_agent(settings, model=VisibleStreamingFakeModel(), tools=[])
 
     try:
-        events = [event async for event in agent.stream_reply("你好", thread_id="debug-1")]
+        events = [event async for event in agent.stream_reply("你好", session_id="debug-1")]
     finally:
         await agent.close()
 
@@ -360,7 +360,7 @@ async def test_agent_streams_safe_tool_lifecycle_without_arguments(tmp_path) -> 
     )
 
     try:
-        events = [event async for event in agent.stream_reply("开始研究", thread_id="tool-1")]
+        events = [event async for event in agent.stream_reply("开始研究", session_id="tool-1")]
     finally:
         await agent.close()
 
@@ -389,7 +389,7 @@ async def test_agent_does_not_stream_nested_tool_model_json(tmp_path) -> None:
 
     try:
         events = [
-            event async for event in agent.stream_reply("开始研究", thread_id="nested-tool")
+            event async for event in agent.stream_reply("开始研究", session_id="nested-tool")
         ]
     finally:
         await agent.close()
@@ -418,7 +418,7 @@ async def test_agent_recovers_final_answer_when_post_tool_output_hits_length_lim
             event
             async for event in agent.stream_reply(
                 "读取简历并给出修改建议",
-                thread_id="resume-review",
+                session_id="resume-review",
             )
         ]
     finally:
@@ -430,18 +430,18 @@ async def test_agent_recovers_final_answer_when_post_tool_output_hits_length_lim
 
 
 @pytest.mark.asyncio
-async def test_agent_restores_thread_history_across_instances(tmp_path) -> None:
+async def test_agent_restores_session_history_across_instances(tmp_path) -> None:
     settings = Settings(
         _env_file=None,
         jobagent_checkpoint_db=tmp_path / "checkpoints.db",
     )
     first = build_job_agent(settings, model=HistoryAwareFakeModel(), tools=[])
-    await first.reply("第一条", thread_id="journey-1")
+    await first.reply("第一条", session_id="journey-1")
     await first.close()
 
     second = build_job_agent(settings, model=HistoryAwareFakeModel(), tools=[])
     try:
-        response = await second.reply("第二条", thread_id="journey-1")
+        response = await second.reply("第二条", session_id="journey-1")
     finally:
         await second.close()
 
@@ -479,18 +479,18 @@ async def test_agent_restores_global_candidate_context_from_sqlite_without_yaml(
 
 
 @pytest.mark.asyncio
-async def test_agent_exposes_visible_history_when_resuming_a_thread(tmp_path) -> None:
+async def test_agent_exposes_visible_history_when_resuming_a_session(tmp_path) -> None:
     settings = Settings(
         _env_file=None,
         jobagent_checkpoint_db=tmp_path / "checkpoints.db",
     )
     first = build_job_agent(settings, model=HistoryAwareFakeModel(), tools=[])
-    await first.reply("第一条", thread_id="journey-1")
+    await first.reply("第一条", session_id="journey-1")
     await first.close()
 
     second = build_job_agent(settings, model=HistoryAwareFakeModel(), tools=[])
     try:
-        history = await second.resume_thread("journey-1")
+        history = await second.resume_session("journey-1")
     finally:
         await second.close()
 
@@ -509,14 +509,14 @@ async def test_agent_lists_saved_conversation_sessions_newest_first(tmp_path) ->
     )
     agent = build_job_agent(settings, model=HistoryAwareFakeModel(), tools=[])
     try:
-        await agent.reply("第一会话", thread_id="session-one")
-        await agent.reply("第二会话", thread_id="session-two")
+        await agent.reply("第一会话", session_id="session-one")
+        await agent.reply("第二会话", session_id="session-two")
 
         sessions = await agent.list_sessions()
     finally:
         await agent.close()
 
-    assert [session.thread_id for session in sessions] == ["session-two", "session-one"]
+    assert [session.session_id for session in sessions] == ["session-two", "session-one"]
     assert all(session.message_count > 0 for session in sessions)
     assert all(session.last_used_at for session in sessions)
 
@@ -558,13 +558,13 @@ async def test_agent_summarizes_old_messages_but_keeps_recent_turns(tmp_path) ->
     )
     first = build_job_agent(settings, model=SummarizingFakeModel(), tools=[])
     for message in ("第一轮", "第二轮", "第三轮"):
-        await first.reply(message, thread_id="long-thread")
+        await first.reply(message, session_id="long-session")
     await first.close()
 
     second = build_job_agent(settings, model=SummarizingFakeModel(), tools=[])
     try:
-        history = await second.resume_thread("long-thread")
-        response = await second.reply("第四轮", thread_id="long-thread")
+        history = await second.resume_session("long-session")
+        response = await second.reply("第四轮", session_id="long-session")
     finally:
         await second.close()
 
@@ -575,7 +575,7 @@ async def test_agent_summarizes_old_messages_but_keeps_recent_turns(tmp_path) ->
 
     third = build_job_agent(settings, model=SummarizingFakeModel(), tools=[])
     try:
-        restored_again = await third.resume_thread("long-thread")
+        restored_again = await third.resume_session("long-session")
     finally:
         await third.close()
 

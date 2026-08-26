@@ -271,7 +271,7 @@ jobagent validate-profile --profile profiles/me.yaml
 和初始化走 API 桶；帖子图片在复用 Spider_XHS 下载函数的同时逐张取得媒体桶许可。以后多实例部署
 时可沿用同一适配接口换成 Redis/PostgreSQL 桶，无需把固定 `sleep` 散落到研究工作流中。
 
-`jobagent chat` 使用 `--thread-id` 恢复 SQLite 中的同一会话。启动时会显示已恢复的近期对话；
+`jobagent chat` 使用 `--session-id` 恢复 SQLite 中的同一会话。启动时会显示已恢复的近期对话；
 消息达到阈值后，较早内容会生成滚动摘要，最近消息保留原文。摘要与近期消息都会继续参与后续回答。
 
 已成功下载并完成 OCR 的小红书帖子会进入跨岗位的 `Reusable Source Corpus`。帖子即使不符合
