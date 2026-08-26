@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 class StreamingJobAgent(Protocol):
-    async def resume_thread(self, thread_id: str) -> object: ...
+    async def resume_session(self, session_id: str) -> object: ...
 
     async def list_sessions(self, *, limit: int = 50) -> tuple[object, ...]: ...
 
@@ -49,7 +49,7 @@ class StreamingJobAgent(Protocol):
         self,
         message: str,
         *,
-        thread_id: str,
+        session_id: str,
     ) -> AsyncIterator[object]: ...
 
     async def close(self) -> None: ...
@@ -295,17 +295,17 @@ async def _watch(channels: tuple[str, ...]) -> None:
     required=False,
     help="Optional YAML import for search profile and resume/background.",
 )
-@click.option("--thread-id", default=None, help="Existing session ID; omitted creates one.")
+@click.option("--session-id", default=None, help="Existing session ID; omitted creates one.")
 @click.option("--sessions", "list_sessions", is_flag=True, help="List saved sessions and exit.")
 def chat_command(
-    startup_config: Path | None, thread_id: str | None, list_sessions: bool
+    startup_config: Path | None, session_id: str | None, list_sessions: bool
 ) -> None:
     """Start a conversational JobAgent session."""
 
     if list_sessions:
         asyncio.run(_list_sessions_only())
         return
-    asyncio.run(_chat(startup_config=startup_config, thread_id=thread_id))
+    asyncio.run(_chat(startup_config=startup_config, session_id=session_id))
 
 
 async def _list_sessions_only() -> None:
@@ -326,13 +326,13 @@ async def _list_sessions_only() -> None:
     click.echo("JobAgent · 历史会话（最近优先）：")
     for index, session in enumerate(sessions, start=1):
         click.echo(
-            f"  {index}. {session.thread_id} "
+            f"  {index}. {session.session_id} "
             f"({session.message_count} 条消息, {session.last_used_at})"
         )
-    click.echo("\n用 `jobagent chat --thread-id <session ID>` 恢复某个会话。")
+    click.echo("\n用 `jobagent chat --session-id <会话 ID>` 恢复某个会话。")
 
 
-async def _chat(startup_config: Path | None, thread_id: str | None) -> None:
+async def _chat(startup_config: Path | None, session_id: str | None) -> None:
     """Run an interactive terminal conversation; Tools perform the workflows."""
 
     from jobagent.agent import build_job_agent
@@ -342,15 +342,15 @@ async def _chat(startup_config: Path | None, thread_id: str | None) -> None:
     setup_logging()
     context = load_candidate_context(startup_config) if startup_config else None
     agent = build_job_agent(settings, candidate_context=context, platform_hint="cli")
-    active_thread_id = thread_id or _new_session_id()
+    active_session_id = session_id or _new_session_id()
     try:
         click.echo(
             "JobAgent ready. Describe a target job or ask for help. "
             "Type /sessions to switch conversations, /status for job progress, "
             "or /exit to quit."
         )
-        click.echo(f"JobAgent · 当前会话：{active_thread_id}")
-        await _render_restored_history(agent, active_thread_id)
+        click.echo(f"JobAgent · 当前会话：{active_session_id}")
+        await _render_restored_history(agent, active_session_id)
         stored_context = SQLiteCandidateContextProvider(settings.jobagent_state_db).load()
         _render_candidate_setup_prompt(stored_context)
         _render_cookie_health_warnings()
@@ -364,13 +364,13 @@ async def _chat(startup_config: Path | None, thread_id: str | None) -> None:
             if command in {"/exit", "/quit"}:
                 return
             if command == "/sessions":
-                active_thread_id = await _choose_session(agent, active_thread_id)
+                active_session_id = await _choose_session(agent, active_session_id)
                 continue
             if command == "/status" or command.startswith("/status "):
                 await _render_opportunity_status(agent, command)
                 continue
             try:
-                await _render_streaming_reply(agent, message, active_thread_id)
+                await _render_streaming_reply(agent, message, active_session_id)
             except Exception:
                 logger.exception("JobAgent turn failed")
                 if settings.jobagent_debug_trace:
@@ -384,11 +384,11 @@ async def _chat(startup_config: Path | None, thread_id: str | None) -> None:
     finally:
         click.echo()
         click.echo(
-            click.style("会话已保存: ", fg="cyan") + active_thread_id
+            click.style("会话已保存: ", fg="cyan") + active_session_id
         )
         click.echo(
             click.style("下次继续: ", fg="cyan")
-            + f"jobagent chat --thread-id {active_thread_id}"
+            + f"jobagent chat --session-id {active_session_id}"
         )
         await agent.close()
 
@@ -454,51 +454,51 @@ def _new_session_id() -> str:
     return f"session-{timestamp}-{uuid4().hex[:8]}"
 
 
-async def _choose_session(agent: StreamingJobAgent, current_thread_id: str) -> str:
+async def _choose_session(agent: StreamingJobAgent, current_session_id: str) -> str:
     """List saved sessions and switch by displayed number or exact ID."""
 
     sessions = await agent.list_sessions()
     if not sessions:
         click.echo("JobAgent · 暂无已保存的历史会话。")
-        return current_thread_id
+        return current_session_id
     click.echo("JobAgent · 历史会话（最近优先）：")
     for index, session in enumerate(sessions, start=1):
-        thread_id = str(getattr(session, "thread_id", ""))
+        session_id = str(getattr(session, "session_id", ""))
         msg_count = int(getattr(session, "message_count", 0))
         last_used = str(getattr(session, "last_used_at", ""))
-        marker = " [当前]" if thread_id == current_thread_id else ""
-        click.echo(f"  {index}. {thread_id} ({msg_count} 条消息, {last_used}){marker}")
+        marker = " [当前]" if session_id == current_session_id else ""
+        click.echo(f"  {index}. {session_id} ({msg_count} 条消息, {last_used}){marker}")
     try:
         selection = click.prompt(
-            "选择序号或输入 session ID（直接回车取消）",
+            "选择序号或输入会话 ID（直接回车取消）",
             default="",
             show_default=False,
         ).strip()
     except (EOFError, KeyboardInterrupt):
         click.echo()
-        return current_thread_id
+        return current_session_id
     if not selection:
-        return current_thread_id
+        return current_session_id
     selected_id = ""
     if selection.isdigit():
         index = int(selection) - 1
         if 0 <= index < len(sessions):
-            selected_id = str(getattr(sessions[index], "thread_id", ""))
+            selected_id = str(getattr(sessions[index], "session_id", ""))
     else:
         selected_id = next(
             (
-                str(getattr(session, "thread_id", ""))
+                str(getattr(session, "session_id", ""))
                 for session in sessions
-                if str(getattr(session, "thread_id", "")) == selection
+                if str(getattr(session, "session_id", "")) == selection
             ),
             "",
         )
     if not selected_id:
-        click.echo("JobAgent · 无效的 session，继续使用当前会话。")
-        return current_thread_id
-    if selected_id == current_thread_id:
+        click.echo("JobAgent · 无效的会话 ID，继续使用当前会话。")
+        return current_session_id
+    if selected_id == current_session_id:
         click.echo(f"JobAgent · 已在当前会话：{selected_id}")
-        return current_thread_id
+        return current_session_id
     click.echo(f"JobAgent · 已切换会话：{selected_id}")
     await _render_restored_history(agent, selected_id)
     return selected_id
@@ -540,17 +540,17 @@ async def _render_opportunity_status(
         )
 
 
-async def _render_restored_history(agent: StreamingJobAgent, thread_id: str) -> None:
-    """Show enough restored context for users to recognize a durable thread."""
+async def _render_restored_history(agent: StreamingJobAgent, session_id: str) -> None:
+    """Show enough restored context for users to recognize a durable session."""
 
-    click.echo(f"JobAgent · 正在加载会话：{thread_id}")
-    history = await agent.resume_thread(thread_id)
+    click.echo(f"JobAgent · 正在加载会话：{session_id}")
+    history = await agent.resume_session(session_id)
     summary = getattr(history, "summary", None)
     recent = tuple(getattr(history, "recent", ()))
     if not summary and not recent:
         click.echo("JobAgent · 未找到历史记录，将创建新会话。")
         return
-    click.echo(f"JobAgent · 已恢复历史会话：{thread_id}")
+    click.echo(f"JobAgent · 已恢复历史会话：{session_id}")
     if summary:
         click.echo(f"Earlier summary · {summary}")
     for entry in recent:
@@ -563,7 +563,7 @@ async def _render_restored_history(agent: StreamingJobAgent, thread_id: str) -> 
 async def _render_streaming_reply(
     agent: StreamingJobAgent,
     message: str,
-    thread_id: str,
+    session_id: str,
 ) -> None:
     """Render thinking and tool progress transiently, then the final answer.
 
@@ -576,7 +576,7 @@ async def _render_streaming_reply(
     answer_line_open = False
     emitted_answer = False
     try:
-        async for event in agent.stream_reply(message, thread_id=thread_id):
+        async for event in agent.stream_reply(message, session_id=session_id):
             kind = getattr(event, "kind", "")
             text = str(getattr(event, "text", ""))
             if kind == "status" and text:

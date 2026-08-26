@@ -30,12 +30,12 @@ User conversation -> JobAgent -> Opportunity Tools -> Source adapters
 The public conversational interface is intentionally small:
 
 ```python
-await agent.reply(message, thread_id="candidate-session")
+await agent.reply(message, session_id="candidate-session")
 ```
 
 Its implementation owns conversation state, missing-information questions, Tool selection and
 HITL policy. The first runtime uses one LangChain Agent with durable SQLite LangGraph checkpoints;
-conversation history survives process restarts by `thread_id`. The first product slice remains a
+conversation history survives process restarts by `session_id`. The first product slice remains a
 single Agent until the JD-to-preparation workflow is reliable. PostgreSQL checkpoints and Deep
 Agents subagents remain later adapters at the same seam.
 

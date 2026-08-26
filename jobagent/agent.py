@@ -101,7 +101,7 @@ class AgentStreamEvent:
 
 @dataclass(frozen=True, slots=True)
 class ConversationEntry:
-    """One safe user-visible message restored from a thread."""
+    """One safe user-visible message restored from a session."""
 
     role: Literal["user", "assistant"]
     text: str
@@ -109,7 +109,7 @@ class ConversationEntry:
 
 @dataclass(frozen=True, slots=True)
 class ConversationHistory:
-    """Bounded history projection returned when resuming a thread."""
+    """Bounded history projection returned when resuming a session."""
 
     summary: str | None
     recent: tuple[ConversationEntry, ...]
@@ -120,7 +120,7 @@ class ConversationHistory:
 class ConversationSession:
     """One durable conversation session derived from checkpoint data."""
 
-    thread_id: str
+    session_id: str
     message_count: int
     last_used_at: str
 
@@ -180,12 +180,12 @@ class JobAgent:
         self._filesystem_root = (filesystem_root or Path.cwd()).expanduser().resolve()
         self._debug_trace = debug_trace
 
-    async def reply(self, message: str, *, thread_id: str = "default") -> str:
+    async def reply(self, message: str, *, session_id: str = "default") -> str:
         """Continue one conversation and collect its visible token stream."""
 
         parts = [
             event.text
-            async for event in self.stream_reply(message, thread_id=thread_id)
+            async for event in self.stream_reply(message, session_id=session_id)
             if event.kind == "token"
         ]
         response = "".join(parts)
@@ -197,11 +197,11 @@ class JobAgent:
         self,
         message: str,
         *,
-        thread_id: str = "default",
+        session_id: str = "default",
     ) -> AsyncIterator[AgentStreamEvent]:
         trace_token = begin_trace()
         try:
-            async for event in self._stream_reply_events(message, thread_id=thread_id):
+            async for event in self._stream_reply_events(message, session_id=session_id):
                 yield event
         except GraphRecursionError:
             # 运行预算耗尽（recursion_limit 超步，见 settings 注释）：不裸抛异常，
@@ -209,11 +209,11 @@ class JobAgent:
             # 让用户拿到"目前为止的结论"而不是报错（Hermes _budget_grace_call 思路）。
             logger.warning(
                 "jobagent.recursion_limit_exhausted",
-                extra={"thread_id": thread_id, "recursion_limit": self._recursion_limit},
+                extra={"session_id": session_id, "recursion_limit": self._recursion_limit},
             )
             yield AgentStreamEvent("status", "已达最大运行步数，正在总结目前的结论…")
             deep_agent = await self._ensure_deep_agent()
-            summary = await self._graceful_budget_exhaustion(deep_agent, thread_id)
+            summary = await self._graceful_budget_exhaustion(deep_agent, session_id)
             if summary:
                 yield AgentStreamEvent("token", summary)
             yield AgentStreamEvent("done", "")
@@ -224,7 +224,7 @@ class JobAgent:
         self,
         message: str,
         *,
-        thread_id: str,
+        session_id: str,
     ) -> AsyncIterator[AgentStreamEvent]:
         """Stream status/tool progress, thinking deltas, and final-answer tokens."""
 
@@ -240,7 +240,7 @@ class JobAgent:
             f"Agent 已就绪（{time.perf_counter() - request_started:.1f}s）",
         )
         history_started = time.perf_counter()
-        _, compacted = await self._compact_history(deep_agent, thread_id)
+        _, compacted = await self._compact_history(deep_agent, session_id)
         if compacted:
             yield AgentStreamEvent("status", "较早的会话已整理为摘要…")
         history_elapsed = time.perf_counter() - history_started
@@ -268,7 +268,7 @@ class JobAgent:
         async for part in deep_agent.astream(
             {"messages": [{"role": "user", "content": message}]},
             config={
-                "configurable": {"thread_id": thread_id},
+                "configurable": {"thread_id": session_id},
                 # 运行预算：不传则 LangGraph 隐式默认 25 超步（≈6-12 轮工具循环），
                 # 复合任务会中途裸崩。默认 90 ≈ 22-45 轮，见 settings 注释与 PS-4 设计。
                 "recursion_limit": self._recursion_limit,
@@ -447,7 +447,7 @@ class JobAgent:
             if deterministic_tool_answer:
                 yield AgentStreamEvent("token", deterministic_tool_answer)
             else:
-                recovered = await self._recover_final_answer(deep_agent, thread_id)
+                recovered = await self._recover_final_answer(deep_agent, session_id)
                 if recovered:
                     yield AgentStreamEvent("token", recovered)
         yield AgentStreamEvent("done", "")
@@ -457,7 +457,7 @@ class JobAgent:
                 extra={"elapsed_seconds": round(time.perf_counter() - request_started, 3)},
             )
 
-    async def _graceful_budget_exhaustion(self, deep_agent: Any, thread_id: str) -> str:
+    async def _graceful_budget_exhaustion(self, deep_agent: Any, session_id: str) -> str:
         """预算耗尽后的收尾：无工具再调一次模型，总结已有进展。
 
         与 `_recover_final_answer`（工具已完成但答案被截断）不同，这里面对的是
@@ -466,7 +466,7 @@ class JobAgent:
         结果写回 checkpoint（同恢复路径），保证下一轮对话上下文连贯。
         """
 
-        config = {"configurable": {"thread_id": thread_id}}
+        config = {"configurable": {"thread_id": session_id}}
         try:
             snapshot = await deep_agent.aget_state(config)
             messages = tuple(snapshot.values.get("messages", ()))
@@ -495,10 +495,10 @@ class JobAgent:
             logger.warning("Budget-exhaustion closing summary failed", exc_info=True)
             return "本轮已达最大运行步数（未能在预算内完成）。建议拆分为更小的任务分别进行。"
 
-    async def _recover_final_answer(self, deep_agent: Any, thread_id: str) -> str:
+    async def _recover_final_answer(self, deep_agent: Any, session_id: str) -> str:
         """Retry once without Tools when a completed Tool turn has no visible answer."""
 
-        config = {"configurable": {"thread_id": thread_id}}
+        config = {"configurable": {"thread_id": session_id}}
         try:
             snapshot = await deep_agent.aget_state(config)
             messages = tuple(snapshot.values.get("messages", ()))
@@ -526,11 +526,11 @@ class JobAgent:
             logger.warning("Final-answer recovery failed", exc_info=True)
             return ""
 
-    async def resume_thread(self, thread_id: str) -> ConversationHistory:
-        """Restore one thread, compact it if needed, and expose safe visible history."""
+    async def resume_session(self, session_id: str) -> ConversationHistory:
+        """Restore one session, compact it if needed, and expose safe visible history."""
 
         deep_agent = await self._ensure_deep_agent()
-        messages, compacted = await self._compact_history(deep_agent, thread_id)
+        messages, compacted = await self._compact_history(deep_agent, session_id)
         summary = next(
             (
                 _visible_text(message)
@@ -577,12 +577,12 @@ class JobAgent:
             await cursor.close()
         sessions: list[ConversationSession] = []
         for row in rows:
-            thread_id = str(row[0])
+            session_id = str(row[0])
             message_count = int(row[2])
             last_used_at = _decode_ulid_time(str(row[3]))
             sessions.append(
                 ConversationSession(
-                    thread_id=thread_id,
+                    session_id=session_id,
                     message_count=message_count,
                     last_used_at=last_used_at,
                 )
@@ -667,9 +667,9 @@ class JobAgent:
     async def _compact_history(
         self,
         deep_agent: Any,
-        thread_id: str,
+        session_id: str,
     ) -> tuple[tuple[BaseMessage, ...], bool]:
-        config = {"configurable": {"thread_id": thread_id}}
+        config = {"configurable": {"thread_id": session_id}}
         async with self._history_lock:
             snapshot = await deep_agent.aget_state(config)
             messages = tuple(snapshot.values.get("messages", ()))
