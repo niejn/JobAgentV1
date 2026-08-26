@@ -91,12 +91,58 @@ class Settings(BaseSettings):
         description="Maximum XHS API calls in one configured period.",
     )
     xhs_api_rate_period_seconds: float = Field(default=1.0, gt=0)
+    xhs_crawl_rate_requests: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Shared per-account XHS bucket: api + media + page requests "
+            "combined must not exceed this rate (risk control sees the "
+            "account aggregate, not the request class)."
+        ),
+    )
+    xhs_crawl_rate_period_seconds: float = Field(default=1.0, gt=0)
+    xhs_api_jitter_min_seconds: float = Field(
+        default=0.2,
+        ge=0.0,
+        description="Min random pause after each XHS API permit (fingerprint mitigation).",
+    )
+    xhs_api_jitter_max_seconds: float = Field(
+        default=1.3,
+        ge=0.0,
+        description="Max random pause after each XHS API permit.",
+    )
     xhs_media_rate_requests: int = Field(
         default=1,
         ge=1,
         description="Maximum XHS image downloads in one configured period.",
     )
     xhs_media_rate_period_seconds: float = Field(default=1.0, gt=0)
+    xhs_media_jitter_min_seconds: float = Field(
+        default=0.5,
+        ge=0.0,
+        description="Min random pause after each media download permit.",
+    )
+    xhs_media_jitter_max_seconds: float = Field(
+        default=2.5,
+        ge=0.0,
+        description="Max random pause after each media download permit.",
+    )
+    boss_crawl_rate_requests: int = Field(
+        default=1,
+        ge=1,
+        description="Per-account Boss bucket: page loads must not exceed this rate.",
+    )
+    boss_crawl_rate_period_seconds: float = Field(default=1.0, gt=0)
+    boss_crawl_jitter_min_seconds: float = Field(
+        default=1.0,
+        ge=0.0,
+        description="Min random pause after each Boss page load permit.",
+    )
+    boss_crawl_jitter_max_seconds: float = Field(
+        default=4.0,
+        ge=0.0,
+        description="Max random pause after each Boss page load permit.",
+    )
     xhs_scrape_delay_min: float = Field(
         default=45.0,
         ge=5.0,

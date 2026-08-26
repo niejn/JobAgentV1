@@ -10,6 +10,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 
 from jobagent.auth.cookie_manager import CookieNotFoundError
 from jobagent.config import Settings
+from jobagent.crawl import CrawlGate
 from jobagent.journey.job_registry import SQLiteJobRegistry
 from jobagent.models import Job
 from jobagent.profile import CandidateContext
@@ -23,13 +24,14 @@ class BossDiscovery(Protocol):
 class BossJobDiscovery:
     """Boss search via CDP (connected to your real logged-in Chrome)."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, crawl_gate: CrawlGate | None = None) -> None:
         self._settings = settings
+        self._crawl_gate = crawl_gate
 
     async def discover(self, request: BossDiscoveryRequest) -> list[Job]:
         from jobagent.scraper.boss_cdp import BossCdpBackend
 
-        backend = BossCdpBackend(self._settings)
+        backend = BossCdpBackend(self._settings, crawl_gate=self._crawl_gate)
         try:
             return await backend.discover(request)
         finally:
