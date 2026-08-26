@@ -341,7 +341,7 @@ async def _chat(startup_config: Path | None, thread_id: str | None) -> None:
     settings = get_settings()
     setup_logging()
     context = load_candidate_context(startup_config) if startup_config else None
-    agent = build_job_agent(settings, candidate_context=context)
+    agent = build_job_agent(settings, candidate_context=context, platform_hint="cli")
     active_thread_id = thread_id or _new_session_id()
     try:
         click.echo(

@@ -77,6 +77,10 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.per-file-ignores]
+# Prompt 文本常量含不可重排的长中文行（重排会改变字符串字节）。
+"jobagent/prompts/*" = ["E501"]
+
 [tool.mypy]
 python_version = "3.11"
 warn_unused_configs = true
