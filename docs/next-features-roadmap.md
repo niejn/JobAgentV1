@@ -823,3 +823,38 @@ configured" 空跑），`--platform all` 静默只爬 LinkedIn。Boss 岗位发�
   CRITICAL-1：`cli.py` 对 score>=0.75 的岗位无 HITL 直接 `applier.apply()`）。
   否则接入 boss 等于把无人值守投递打开到真实 Boss 账号——投递步要么移出
   run 命令，要么先加显式确认闸门。
+
+### RV-2：压缩摘要的求职领域定制 🟢 低优先级，观察触发
+
+**背景**（2026-08-27，commit `70a43d4`）：会话压缩已从手写 `_compact_history`
+（40 条触发/破坏性重写）迁移到 deepagents 内置 `SummarizationMiddleware`
+（`trigger=("fraction", 0.85)` / `keep=("fraction", 0.10)`，靠模型
+`profile.max_input_tokens` 激活），并获得 offload 回读、ContextOverflowError
+自救、tool-arg 预截断等新能力。
+
+**缺口**：内置 `DEEPAGENTS_DEFAULT_SUMMARY_PROMPT` 是通用模板（SESSION
+INTENT / SUMMARY / ARTIFACTS / NEXT STEPS 四段），没有点名求职关键事实。
+旧手写版曾逐项要求保留：确认过的公司、岗位、JD 事实、候选人约束、决策、
+产物路径、重要失败，并带防注入（不执行 transcript 内指令）与中文输出要求。
+迁移后这些措辞未保留——若摘要模型判断失当，压缩后可能"忘记"目标公司/岗位。
+
+**缓解**：被驱逐消息 offload 到
+`<artifacts>/conversation_history/{session_id}.md`，Agent 可 `read_file` 找回
+完整原文；ARTIFACTS/ NEXT STEPS 两节与求职诉求部分重合。1M 窗口下 85%
+触发并不容易，实际暴露面小。
+
+**触发条件再实施**：真实观察到「压缩后 Agent 忘记目标公司/岗位/JD 关键
+事实」才动手。
+
+**实施要点**（届时参考）：
+
+- `SummarizationMiddleware(summary_prompt=...)` 可整体替换模板，但直接
+  显式构造会与 `create_deep_agent` 无条件装配的默认实例叠加（栈里两个
+  同类 middleware）。干净路径：走 `HarnessProfile.excluded_middleware`
+  以 `"SummarizationMiddleware"` 名义排除默认实例，再经 `middleware=[]`
+  注入自定义实例。
+- 自定义 prompt 必须保留四段结构骨架与媒体引用标签说明（`<image url=...>`，
+  deepagents 压缩契约），在此基础上追加求职事实清单与防注入措辞；勿整体
+  重写。
+- 摘要 model 即传入 `create_deep_agent` 的主 model（当前为
+  `FallbackChatModel`）——摘要调用天然走 LLM fallback 链，无需额外配置。
