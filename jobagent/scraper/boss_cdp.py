@@ -23,6 +23,7 @@ from jobagent.scraper.boss import (
     _normalize_job,
     get_boss_cooldown,
 )
+from jobagent.scraper.cdp_tab_pool import CdpTabPool
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +42,9 @@ class BossCdpBackend:
     def __init__(self, settings: Settings, *, crawl_gate: CrawlGate | None = None) -> None:
         self._settings = settings
         self._crawl_gate = crawl_gate
-        self._connection: Any = None
+        self._connection: Any | None = None
         self._connection_lock = asyncio.Lock()
+        self._tab_pool: CdpTabPool | None = None
 
     async def _ensure_connection(self) -> tuple[Any, Any, Any]:
         if self._connection is not None:
@@ -89,9 +91,14 @@ class BossCdpBackend:
             return cast("tuple[Any, Any, Any]", self._connection)
 
     async def _get_page(self, context: Any) -> Any:
-        """Create a fresh page for each search; keep it alive (don't close)."""
-        # Use a fresh page - Boss detects reused pages that went to blank
-        return await context.new_page()
+        """Acquire a tab from the bounded pool (keeper + cap + recycling)."""
+        if self._tab_pool is None:
+            self._tab_pool = CdpTabPool(context)
+        return await self._tab_pool.acquire()
+
+    async def _release_page(self, page: Any) -> None:
+        if self._tab_pool is not None:
+            await self._tab_pool.release(page)
 
     async def dispose(self) -> None:
         """Tear down this backend's CDP connection and Playwright driver.
@@ -103,6 +110,9 @@ class BossCdpBackend:
         backend started; without it every discovery call leaks both.
         """
         connection, self._connection = self._connection, None
+        if self._tab_pool is not None:
+            await self._tab_pool.close()
+            self._tab_pool = None
         if connection is None:
             return
         browser, _, driver = connection
@@ -133,7 +143,17 @@ class BossCdpBackend:
 
         _, context, _ = await self._ensure_connection()
         page = await self._get_page(context)
+        try:
+            return await self._discover_on_page(page, request, city_code)
+        finally:
+            await self._release_page(page)
 
+    async def _discover_on_page(
+        self,
+        page: Any,
+        request: BossDiscoveryRequest,
+        city_code: str,
+    ) -> list[Job]:
         captured: list[dict] = []
 
         async def on_response(response: Any) -> None:

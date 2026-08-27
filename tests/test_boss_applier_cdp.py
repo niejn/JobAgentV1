@@ -10,7 +10,6 @@ Locks two behaviors:
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -71,23 +70,26 @@ async def test_apply_refuses_during_cooldown_without_touching_browser(
 
 
 @pytest.mark.asyncio
-async def test_exit_closes_only_applier_opened_tabs(tmp_path: Path) -> None:
-    """__aexit__ closes the tabs this applier opened and nothing else."""
+async def test_exit_closes_pool_tabs_but_keeps_keeper(tmp_path: Path) -> None:
+    """__aexit__ closes greeting tabs via the pool; the keeper survives."""
+
+    from tests.test_cdp_tab_pool import FakeContext, _all_contexts
 
     applier = BossApplier(_settings(tmp_path), history=ApplyHistory(tmp_path / "h.json"))
+    ctx = FakeContext()
+    _all_contexts.append(ctx)
+    applier._context = ctx
+    from jobagent.scraper.cdp_tab_pool import CdpTabPool
 
-    ours = MagicMock()
-    ours.close = AsyncMock()
-    also_ours = MagicMock()
-    also_ours.close = AsyncMock()
-    applier._opened_pages = [ours, also_ours]
-    applier._context = MagicMock()
+    applier._tab_pool = CdpTabPool(ctx)
+    work1 = await applier._tab_pool.acquire()
+    work2 = await applier._tab_pool.acquire()
+    keeper = ctx.pages[0]
 
     await applier.__aexit__(None, None, None)
 
-    ours.close.assert_awaited_once()
-    also_ours.close.assert_awaited_once()
-    assert applier._opened_pages == []
+    assert work1.closed and work2.closed
+    assert not keeper.is_closed(), "keeper tab keeps the debug Chrome alive"
     assert applier._context is None
 
 
@@ -95,12 +97,15 @@ async def test_exit_closes_only_applier_opened_tabs(tmp_path: Path) -> None:
 async def test_crawl_gate_paces_page_creation(tmp_path: Path) -> None:
     """A configured gate is acquired before each greeting tab is opened."""
 
+    from tests.test_cdp_tab_pool import FakeContext, _all_contexts
+
     applier = BossApplier(_settings(tmp_path), history=ApplyHistory(tmp_path / "h.json"))
     gate = MagicMock()
     gate.acquire = AsyncMock()
     applier._crawl_gate = gate
-    applier._context = MagicMock()
-    applier._context.new_page = AsyncMock(return_value=MagicMock())
+    ctx = FakeContext()
+    _all_contexts.append(ctx)
+    applier._context = ctx
 
     async def noop_do_apply(*args: Any, **kwargs: Any) -> Any:
         from jobagent.models import Application
@@ -121,6 +126,5 @@ async def test_crawl_gate_paces_page_creation(tmp_path: Path) -> None:
         await applier.apply(_job(), _profile())
 
     gate.acquire.assert_awaited_once_with("boss-cdp")
-    applier._context.new_page.assert_awaited_once()
-    assert len(applier._opened_pages) == 1
-    asyncio.get_running_loop()  # sanity: loop still healthy
+    # keeper + one greeting tab is the expected footprint after one apply
+    assert len(ctx.pages) == 2

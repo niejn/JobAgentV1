@@ -90,6 +90,12 @@ class TestDiscoverRespectsCooldown:
         class FakePage:
             url = "https://www.zhipin.com/web/geek/job"
 
+            def is_closed(self) -> bool:
+                return False
+
+            async def close(self) -> None:
+                pass
+
             def on(self, event, handler) -> None:
                 backend._captured_handler = handler
 
@@ -105,7 +111,13 @@ class TestDiscoverRespectsCooldown:
 
         class FakeContext:
             def __init__(self) -> None:
-                self.pages = [object()]
+                class _ExistingTab:
+                    url = "https://www.zhipin.com/"
+
+                    def is_closed(self) -> bool:
+                        return False
+
+                self.pages = [_ExistingTab()]
 
             async def new_page(self) -> FakePage:
                 return FakePage()

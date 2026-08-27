@@ -19,6 +19,7 @@ from jobagent.config import Settings
 from jobagent.crawl import CrawlGate
 from jobagent.models import Application, ApplicationStatus, Job, JobSource, Profile
 from jobagent.scraper.boss import BossAccessError, get_boss_cooldown
+from jobagent.scraper.cdp_tab_pool import CdpTabPool
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,7 @@ class BossApplier(BaseApplier):
         self._crawl_gate = crawl_gate
         self._playwright: Playwright | None = None
         self._context: Any | None = None
-        self._opened_pages: list[Page] = []
+        self._tab_pool: CdpTabPool | None = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -135,13 +136,12 @@ class BossApplier(BaseApplier):
         return self
 
     async def __aexit__(self, *args: object) -> None:
-        # Close only the tabs this applier opened; the user's own tabs stay.
-        for page in self._opened_pages:
-            try:
-                await page.close()
-            except Exception:
-                logger.debug("BossApplier: tab already gone", exc_info=True)
-        self._opened_pages.clear()
+        # The pool closes every tab this applier opened; the keeper tab
+        # stays (it keeps the debug Chrome alive) and the user's own tabs
+        # are untouched.
+        if self._tab_pool is not None:
+            await self._tab_pool.close()
+            self._tab_pool = None
         self._context = None
         # On a connect_over_cdp() browser, close() only detaches the
         # connection - the externally-owned Chrome keeps running (verified
@@ -149,7 +149,7 @@ class BossApplier(BaseApplier):
         if self._playwright:
             await self._playwright.stop()
             self._playwright = None
-        logger.info("BossApplier detached; %s", "greeting tabs closed")
+        logger.info("BossApplier detached; greeting tabs returned to pool")
 
     # -- public API ---------------------------------------------------------
 
@@ -200,13 +200,15 @@ class BossApplier(BaseApplier):
             raise RuntimeError("BossApplier not initialised — use 'async with'.")
 
         # --- page ---------------------------------------------------------------
-        # Fresh tab per job; kept open for the batch (Boss flags reused/blank
-        # tabs) and closed together in __aexit__.
+        # Tab from the bounded pool: keeper keeps the debug Chrome alive,
+        # max_tabs caps how many stay open, and tabs retire after
+        # max_reuses (Boss flags repeatedly re-navigated pages).
         if self._crawl_gate is not None:
             # Greeting-page navigation shares the account's crawl budget.
             await self._crawl_gate.acquire("boss-cdp")
-        page = await self._context.new_page()
-        self._opened_pages.append(page)
+        if self._tab_pool is None:
+            self._tab_pool = CdpTabPool(self._context)
+        page = await self._tab_pool.acquire()
 
         try:
             return await self._do_apply(page, job, profile, t0, greeting=greeting)
@@ -216,6 +218,8 @@ class BossApplier(BaseApplier):
                 job, ApplicationStatus.FAILED,
                 extra={"reason": "unexpected_error", "error": str(exc)},
             )
+        finally:
+            await self._tab_pool.release(page)
 
     # -- internal flow ------------------------------------------------------
 
