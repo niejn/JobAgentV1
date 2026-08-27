@@ -26,6 +26,7 @@ from jobagent.auth.browser_login import (
 )
 from jobagent.cli_status import TypewriterTranscript
 from jobagent.config import Settings, get_settings
+from jobagent.crawl import build_crawl_gate
 from jobagent.models import Job, JobSource
 from jobagent.notifier.discord import DiscordNotifier
 from jobagent.notifier.telegram import TelegramNotifier
@@ -892,7 +893,9 @@ async def _run_pipeline(
         # explicit interactive confirmation before every external submission.
         async with AsyncExitStack() as stack:
             boss_applier = (
-                await stack.enter_async_context(BossApplier(settings))
+                await stack.enter_async_context(
+                    BossApplier(settings, crawl_gate=build_crawl_gate(settings))
+                )
                 if any(job.source is JobSource.BOSS for job in candidates)
                 else None
             )

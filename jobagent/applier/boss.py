@@ -8,15 +8,17 @@ import random
 import time
 from datetime import UTC, datetime
 from string import Template
-from typing import Self
+from typing import Any, Self
 
-from playwright.async_api import Browser, ElementHandle, Page, Playwright, async_playwright
+from playwright.async_api import ElementHandle, Page, Playwright, async_playwright
 
 from jobagent.applier.base import BaseApplier
 from jobagent.applier.captcha import detect_captcha, notify_captcha
 from jobagent.applier.history import ApplyHistory
 from jobagent.config import Settings
+from jobagent.crawl import CrawlGate
 from jobagent.models import Application, ApplicationStatus, Job, JobSource, Profile
+from jobagent.scraper.boss import BossAccessError, get_boss_cooldown
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +61,6 @@ _DAILY_LIMIT_TEXT = [
     "今天的机会已用完",
 ]
 
-
 class BossApplier(BaseApplier):
     """Auto-apply to jobs on Boss直聘 via the 打招呼 chat flow.
 
@@ -68,8 +69,14 @@ class BossApplier(BaseApplier):
         async with BossApplier(settings) as applier:
             result = await applier.apply(job, profile)
 
-    The applier manages its own Playwright browser lifecycle and
-    cookie-based authentication (same mechanism as BossScraper).
+    Rides the user's already-logged-in Chrome over CDP (same transport as
+    BossCdpBackend.discover): real browser fingerprint, real login session,
+    no cookie injection into a fresh profile - the combination that kept
+    triggering Boss risk control on the previous self-launched browser.
+
+    Tabs opened for greetings stay open during the batch (Boss detects
+    reused/blank tabs); they are all closed on __aexit__, leaving the
+    user's own tabs untouched.
     """
 
     def __init__(
@@ -78,6 +85,7 @@ class BossApplier(BaseApplier):
         *,
         notifier: object | None = None,
         history: ApplyHistory | None = None,
+        crawl_gate: CrawlGate | None = None,
     ) -> None:
         self._settings = settings
         self._notifier = notifier
@@ -86,25 +94,62 @@ class BossApplier(BaseApplier):
         self._history = history or ApplyHistory(
             settings.jobagent_state_db.parent / "apply_history.json"
         )
+        self._crawl_gate = crawl_gate
         self._playwright: Playwright | None = None
-        self._browser: Browser | None = None
+        self._context: Any | None = None
+        self._opened_pages: list[Page] = []
 
     # -- lifecycle ----------------------------------------------------------
 
     async def __aenter__(self) -> Self:
         self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(
-            headless=self._settings.jobagent_headless,
-        )
-        logger.info("BossApplier browser launched (headless=%s)", self._settings.jobagent_headless)
+        try:
+            browser = await self._playwright.chromium.connect_over_cdp(
+                self._settings.xhs_cdp_endpoint,
+                timeout=10_000,
+            )
+        except Exception as exc:
+            await self._playwright.stop()
+            raise BossAccessError(
+                "Boss CDP: 无法连接 Chrome--Chrome 调试端口未就绪。请按以下步骤设置:\n"
+                "1. 读取 skills/ChromeCDP-setup/SKILL.md\n"
+                "2. 按 SKILL.md 中的 4 个步骤启动 Chrome 调试模式\n"
+                "3. 重试本次操作",
+                code="cdp_not_ready",
+            ) from exc
+
+        # Reuse the context that already has pages (= persistent login).
+        context = next((c for c in browser.contexts if c.pages), None)
+        if context is None:
+            try:
+                await browser.close()
+            finally:
+                await self._playwright.stop()
+            raise BossAccessError(
+                "Boss CDP: 未找到已打开页面的浏览器上下文（登录态可能丢失），"
+                "请在 Chrome 窗口中确认 Boss 已登录。",
+                code="boss_access_denied",
+            )
+        self._context = context
+        logger.info("BossApplier attached to user Chrome via CDP")
         return self
 
     async def __aexit__(self, *args: object) -> None:
-        if self._browser:
-            await self._browser.close()
+        # Close only the tabs this applier opened; the user's own tabs stay.
+        for page in self._opened_pages:
+            try:
+                await page.close()
+            except Exception:
+                logger.debug("BossApplier: tab already gone", exc_info=True)
+        self._opened_pages.clear()
+        self._context = None
+        # On a connect_over_cdp() browser, close() only detaches the
+        # connection - the externally-owned Chrome keeps running (verified
+        # against playwright 1.62.0).
         if self._playwright:
             await self._playwright.stop()
-        logger.info("BossApplier browser closed")
+            self._playwright = None
+        logger.info("BossApplier detached; %s", "greeting tabs closed")
 
     # -- public API ---------------------------------------------------------
 
@@ -140,24 +185,28 @@ class BossApplier(BaseApplier):
                 extra={"reason": "daily_limit"},
             )
 
-        if not self._browser:
+        # Refuse immediately while rate-limit cooldown is active - a real
+        # request during cooldown would only deepen the block (same guard
+        # as BossCdpBackend.discover; this was missing here before).
+        allowed, remaining_min, _ = get_boss_cooldown().check()
+        if not allowed:
+            logger.warning("Boss apply blocked by cooldown (%d min left)", remaining_min)
+            return self._make_app(
+                job, ApplicationStatus.FAILED,
+                extra={"reason": "cooldown_active", "remaining_minutes": remaining_min},
+            )
+
+        if self._context is None:
             raise RuntimeError("BossApplier not initialised — use 'async with'.")
 
-        # --- browser context --------------------------------------------------
-        context = await self._browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/125.0.0.0 Safari/537.36"
-            ),
-        )
-        try:
-            from jobagent.auth.cookie_manager import inject_cookies
-            await inject_cookies(context, "boss", self._settings)
-        except Exception as e:
-            logger.warning("Cookie injection failed: %s", e)
-
-        page = await context.new_page()
+        # --- page ---------------------------------------------------------------
+        # Fresh tab per job; kept open for the batch (Boss flags reused/blank
+        # tabs) and closed together in __aexit__.
+        if self._crawl_gate is not None:
+            # Greeting-page navigation shares the account's crawl budget.
+            await self._crawl_gate.acquire("boss-cdp")
+        page = await self._context.new_page()
+        self._opened_pages.append(page)
 
         try:
             return await self._do_apply(page, job, profile, t0, greeting=greeting)
@@ -167,8 +216,6 @@ class BossApplier(BaseApplier):
                 job, ApplicationStatus.FAILED,
                 extra={"reason": "unexpected_error", "error": str(exc)},
             )
-        finally:
-            await context.close()
 
     # -- internal flow ------------------------------------------------------
 
