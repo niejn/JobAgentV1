@@ -1,6 +1,1 @@
-"""Authentication utilities for Claude OAuth and API keys."""
-
-from jobagent.auth.claude_auth import ClaudeToken, get_claude_token
-from jobagent.auth.token_refresh import ensure_valid_token
-
-__all__ = ["ClaudeToken", "ensure_valid_token", "get_claude_token"]
+"""Authentication utilities: browser login flows and cookie persistence."""

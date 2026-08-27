@@ -318,8 +318,7 @@ preferences:
            v                            v
 +---------------------+      +----------------------+
 |   LLM Matcher       |----->| Match Score + Reason |
-| Claude OAuth/API/   |      | (SSE streaming)      |
-| OpenAI              |      +----------+-----------+
+| OpenAI-compatible /  |      +----------+-----------+
 +----------+----------+                 |
            |                            v
 +---------------------+      +----------------------+
@@ -352,9 +351,9 @@ jobagent/
     token_refresh.py       #   OAuth token auto-refresh
   matcher/                 # LLM matching engine
     llm_matcher.py         #   Multi-provider match scoring
-  models/                  # Claude API client
-    claude_api.py          #   Claude API wrapper
-    streaming.py           #   SSE streaming + retry/backoff
+  models/                  # LLM client construction
+    llm_client.py          #   openai-compatible client + config resolution
+    fallback.py            #   primary-with-backup chat model chain
   notifier/                # Notifications
     telegram.py            #   Telegram Bot notifications
     discord.py             #   Discord Webhook notifications

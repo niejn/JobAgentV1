@@ -275,7 +275,7 @@ jobagent/
 
 Prompt 输入：笔记标题 + 正文 + tags + 前 20 条评论。
 输出 JSON（ReferralOffer 字段 + `company_aliases: list[str]` + `scam_risk`）。
-复用 `ClaudeClient`/`streaming.py`；JSON 解析须剥离 markdown fence。
+复用 `llm_client`（openai-compatible 通道）；JSON 解析须剥离 markdown fence。
 
 过滤规则（发帖人优先级）：
 1. 帖子明确是「我司内推」（排除面经/吐槽/中介），`scam_risk` 低于阈值
