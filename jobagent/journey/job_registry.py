@@ -166,47 +166,55 @@ class SQLiteJobRegistry:
             raise ValueError("job_id is required")
         now = self._clock()
         existing = self.get(job_id)
-        if existing is not None:
-            self._connection.execute(
-                "UPDATE job_records SET last_seen_at = ?, company = ?, title = ?, "
-                "location = ?, url = ? WHERE job_id = ?",
-                (
-                    _format_time(now),
-                    company.strip() or existing.company,
-                    title.strip() or existing.title,
-                    location or existing.location,
-                    url or existing.url,
-                    job_id,
-                ),
-            )
-            self._connection.commit()
-            return None
+        if existing is None:
+            try:
+                # The insert path is race-safe: a concurrent discovery of the
+                # same new job loses the PRIMARY KEY race, falls through to
+                # the update branch below instead of crashing the caller.
+                with self._connection:
+                    self._connection.execute(
+                        """INSERT INTO job_records
+                           (job_id, source, company, title, location, url, status,
+                            first_seen_at, last_seen_at, greeted_at, note)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '')""",
+                        (
+                            job_id,
+                            source.strip(),
+                            company.strip(),
+                            title.strip(),
+                            location.strip(),
+                            url.strip(),
+                            JobProgressStatus.DISCOVERED.value,
+                            _format_time(now),
+                            _format_time(now),
+                        ),
+                    )
+                    self._connection.execute(
+                        """INSERT INTO job_status_events (job_id, status, note, created_at)
+                           VALUES (?, ?, ?, ?)""",
+                        (job_id, JobProgressStatus.DISCOVERED.value, "", _format_time(now)),
+                    )
+                record = self.get(job_id)
+                assert record is not None
+                return record
+            except sqlite3.IntegrityError:
+                existing = self.get(job_id)
+                if existing is None:
+                    raise
         self._connection.execute(
-            """INSERT INTO job_records
-               (job_id, source, company, title, location, url, status,
-                first_seen_at, last_seen_at, greeted_at, note)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '')""",
+            "UPDATE job_records SET last_seen_at = ?, company = ?, title = ?, "
+            "location = ?, url = ? WHERE job_id = ?",
             (
+                _format_time(now),
+                company.strip() or existing.company,
+                title.strip() or existing.title,
+                location or existing.location,
+                url or existing.url,
                 job_id,
-                source.strip(),
-                company.strip(),
-                title.strip(),
-                location.strip(),
-                url.strip(),
-                JobProgressStatus.DISCOVERED.value,
-                _format_time(now),
-                _format_time(now),
             ),
         )
-        self._connection.execute(
-            """INSERT INTO job_status_events (job_id, status, note, created_at)
-               VALUES (?, ?, ?, ?)""",
-            (job_id, JobProgressStatus.DISCOVERED.value, "", _format_time(now)),
-        )
         self._connection.commit()
-        record = self.get(job_id)
-        assert record is not None
-        return record
+        return None
 
     # -- journey updates -----------------------------------------------------
 
@@ -238,17 +246,30 @@ class SQLiteJobRegistry:
         greeted_at = record.greeted_at
         if status is JobProgressStatus.GREETED:
             greeted_at = now
-        self._connection.execute(
+        # Guarded update: the WHERE clause re-checks the status the
+        # transition was validated against. If a concurrent mark() moved the
+        # job first, rowcount is 0 and no event is appended — two concurrent
+        # writers can no longer record impossible divergent histories.
+        cursor = self._connection.execute(
             "UPDATE job_records SET status = ?, greeted_at = ?, note = ?, "
-            "last_seen_at = ? WHERE job_id = ?",
+            "last_seen_at = ? WHERE job_id = ? AND status = ?",
             (
                 status.value,
                 _format_time(greeted_at) if greeted_at else None,
                 note.strip() or record.note,
                 _format_time(now),
                 job_id,
+                record.status.value,
             ),
         )
+        if cursor.rowcount != 1:
+            current = self.get(job_id)
+            if current is None:
+                raise KeyError(f"job not found in registry: {job_id}")
+            raise JobTransitionError(
+                f"concurrent update moved job {job_id} to "
+                f"{current.status.value} before this {status.value} transition"
+            )
         self._connection.execute(
             """INSERT INTO job_status_events (job_id, status, note, created_at)
                VALUES (?, ?, ?, ?)""",
