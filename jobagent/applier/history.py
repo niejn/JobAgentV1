@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -70,7 +70,10 @@ class ApplyHistory:
 
     def today_count(self) -> int:
         """Return how many jobs were applied to today (UTC)."""
-        today = date.today().isoformat()
+        # applied_at is written as a UTC ISO timestamp (mark_applied), so the
+        # "today" boundary must also be UTC; date.today() would shift the
+        # daily-limit window by the local offset.
+        today = datetime.now(UTC).date().isoformat()
         count = 0
         for entry in self._data.get("jobs", {}).values():
             applied_at = entry.get("applied_at", "")

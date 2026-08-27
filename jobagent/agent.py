@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -108,10 +107,9 @@ _SHELL_ENV_ALLOWLIST = (
     "PYTHONIOENCODING",
 )
 _HISTORY_SUMMARY_MAX_CHARS = 6_000
-_DEBUG_SENSITIVE_KEYS = ("token", "key", "cookie", "password", "secret", "authorization")
-_DEBUG_SENSITIVE_QUERY = re.compile(
-    r"(?i)(xsec_token|token|key|cookie|password|secret|authorization)=([^&\s]+)"
-)
+# Redaction vocabulary lives in observability (single source of truth).
+from jobagent.observability import _SENSITIVE_NAMES as _DEBUG_SENSITIVE_KEYS  # noqa: E402
+from jobagent.observability import _SENSITIVE_QUERY as _DEBUG_SENSITIVE_QUERY  # noqa: E402
 
 
 @dataclass(frozen=True, slots=True)

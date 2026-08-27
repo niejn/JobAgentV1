@@ -81,7 +81,11 @@ class BossApplier(BaseApplier):
     ) -> None:
         self._settings = settings
         self._notifier = notifier
-        self._history = history or ApplyHistory()
+        # Anchor the apply history next to the state DB so the dedup ledger
+        # and daily limit survive CWD changes (code review MEDIUM).
+        self._history = history or ApplyHistory(
+            settings.jobagent_state_db.parent / "apply_history.json"
+        )
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
 

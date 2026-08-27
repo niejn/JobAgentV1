@@ -28,10 +28,22 @@ from loguru import logger as loguru_logger
 
 _TRACE_ID: ContextVar[str | None] = ContextVar("jobagent_trace_id", default=None)
 
-_SENSITIVE_KEY = re.compile(r"token|key|cookie|password|secret|authorization", re.I)
-_SENSITIVE_QUERY = re.compile(
-    r"(?i)(xsec_token|token|key|cookie|password|secret|authorization)=([^&\s]+)"
+# Single source of truth for sensitive-name matching; add new platform
+# credential names here (both the key regex and the query regex derive).
+_SENSITIVE_NAMES = (
+    "token",
+    "key",
+    "cookie",
+    "password",
+    "secret",
+    "authorization",
+    "web_session",
+    "session",
+    "a1",
+    "csrf",
 )
+_SENSITIVE_KEY = re.compile("|".join(_SENSITIVE_NAMES), re.I)
+_SENSITIVE_QUERY = re.compile(r"(?i)(" + "|".join(_SENSITIVE_NAMES) + r")=([^&\s]+)")
 _NodeCallable = TypeVar("_NodeCallable", bound=Any)
 
 _DEFAULT_LOG_FILE = Path("data/logs/jobagent.log")
