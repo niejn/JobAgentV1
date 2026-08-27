@@ -224,6 +224,11 @@ def settings(tmp_path: Path) -> Settings:
         xhs_api_rate_period_seconds=1,
         xhs_media_rate_requests=1_000,
         xhs_media_rate_period_seconds=1,
+        # 测试关闭抖动睡眠（生产默认 0.2-1.3s / 0.5-2.5s）
+        xhs_api_jitter_min_seconds=0.0,
+        xhs_api_jitter_max_seconds=0.0,
+        xhs_media_jitter_min_seconds=0.0,
+        xhs_media_jitter_max_seconds=0.0,
     )
 
 
