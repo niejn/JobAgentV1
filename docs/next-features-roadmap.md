@@ -799,3 +799,27 @@ F8 PS-1/PS-2（prompt 组装 + 注入检测，纯本地零风险，用户定高�
 其余不变：先解决"面试时信息对齐"（TR-1/2）和"信息不漏"（HG-1/2）这两个高价值低风险
 痛点；驾驶权检测（HG-3）零发送风险可先于发送链；平台写操作（TR-3/4、HG-4）风险最高、
 依赖真机校准，放后并全部 HITL。
+
+---
+
+## 代码审查跟进（2026-08-27）
+
+### RV-1：CLI 接入 Boss 爬取 🟢 低优先级，方案已定：接上
+
+**现状**：`cli.py` 的 `_scrape`/`_run_pipeline` 只注册 `LinkedInScraper`；
+`jobagent scrape/run --platform boss` 实际不爬任何东西（走 "No scraper
+configured" 空跑），`--platform all` 静默只爬 LinkedIn。Boss 岗位发现目前
+只存在于 Agent 工具 `discover_boss_jobs`（HTTP/CDP 传输，走 CrawlGate）。
+
+**决策**（2026-08-27）：接上——把 Boss 发现通道注册进 CLI，而不是让
+`--platform boss` 直接报错拒绝。
+
+**实施要点**：
+
+- 复用 `discover_boss_jobs` 底层传输（不在 CLI 另写一条爬取路径），共享
+  CrawlGate 限速与 Boss 风控冷却。
+- 岗位入册复用 `SQLiteJobRegistry`（与 Agent 工具同库、同去重身份）。
+- **前置依赖**：接上时必须先处理 `_run_pipeline` 的自动投递（code review
+  CRITICAL-1：`cli.py` 对 score>=0.75 的岗位无 HITL 直接 `applier.apply()`）。
+  否则接入 boss 等于把无人值守投递打开到真实 Boss 账号——投递步要么移出
+  run 命令，要么先加显式确认闸门。
