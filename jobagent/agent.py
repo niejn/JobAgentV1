@@ -957,7 +957,11 @@ def build_job_agent(
             (
                 "boss_greet_jobs",
                 lambda: build_boss_greet_jobs_tool(
-                    BossGreetingsManager(settings, registry_path=state_db)
+                    BossGreetingsManager(
+                        settings,
+                        registry_path=state_db,
+                        crawl_gate=crawl_gate,
+                    )
                 ),
             ),
             ("update_job_progress", lambda: build_update_job_progress_tool(state_db)),
