@@ -214,32 +214,47 @@ class InterviewResearchService:
                         if reference.note_id in seen_notes:
                             continue
                         seen_notes.add(reference.note_id)
-                        current = self._now()
-                        if current.tzinfo is None:
-                            current = current.replace(tzinfo=_SHANGHAI)
-                        cutoff = current.astimezone(_SHANGHAI) - timedelta(
-                            days=self._stale_days
-                        )
-                        bundle = self._source_corpus.get_latest("xhs", reference.note_id)
-                        note = _snapshot_as_fetched_note(bundle.snapshot) if bundle else None
-                        if note is None:
-                            note = await self._backend.fetch_note(reference.url)
-                        if not is_recent(note.published_at, cutoff):
-                            log_decision(
-                                logger,
-                                "interview_research.candidate_gate",
-                                basis={
-                                    "iteration": iteration,
-                                    "note_id": reference.note_id,
-                                    "is_recent": False,
-                                    "seller_risk_score": 0,
-                                },
-                                outcome="reject_stale",
+                        try:  # one bad note must not abort the whole journey
+                            current = self._now()
+                            if current.tzinfo is None:
+                                current = current.replace(tzinfo=_SHANGHAI)
+                            cutoff = current.astimezone(_SHANGHAI) - timedelta(
+                                days=self._stale_days
                             )
-                            feedback.append("帖子过旧或发布时间无效")
-                            continue
-                        risk_flags, risk_score = seller_risk(note)
-                        if risk_score >= 2:
+                            bundle = self._source_corpus.get_latest("xhs", reference.note_id)
+                            note = _snapshot_as_fetched_note(bundle.snapshot) if bundle else None
+                            if note is None:
+                                note = await self._backend.fetch_note(reference.url)
+                            if not is_recent(note.published_at, cutoff):
+                                log_decision(
+                                    logger,
+                                    "interview_research.candidate_gate",
+                                    basis={
+                                        "iteration": iteration,
+                                        "note_id": reference.note_id,
+                                        "is_recent": False,
+                                        "seller_risk_score": 0,
+                                    },
+                                    outcome="reject_stale",
+                                )
+                                feedback.append("帖子过旧或发布时间无效")
+                                continue
+                            risk_flags, risk_score = seller_risk(note)
+                            if risk_score >= 2:
+                                log_decision(
+                                    logger,
+                                    "interview_research.candidate_gate",
+                                    basis={
+                                        "iteration": iteration,
+                                        "note_id": reference.note_id,
+                                        "is_recent": True,
+                                        "seller_risk_score": risk_score,
+                                        "risk_flags": risk_flags,
+                                    },
+                                    outcome="reject_seller_risk",
+                                )
+                                feedback.append(f"卖资料风险：{','.join(risk_flags)}")
+                                continue
                             log_decision(
                                 logger,
                                 "interview_research.candidate_gate",
@@ -248,83 +263,80 @@ class InterviewResearchService:
                                     "note_id": reference.note_id,
                                     "is_recent": True,
                                     "seller_risk_score": risk_score,
-                                    "risk_flags": risk_flags,
                                 },
-                                outcome="reject_seller_risk",
+                                outcome="admit_to_snapshot",
                             )
-                            feedback.append(f"卖资料风险：{','.join(risk_flags)}")
-                            continue
-                        log_decision(
-                            logger,
-                            "interview_research.candidate_gate",
-                            basis={
-                                "iteration": iteration,
-                                "note_id": reference.note_id,
-                                "is_recent": True,
-                                "seller_risk_score": risk_score,
-                            },
-                            outcome="admit_to_snapshot",
-                        )
-                        if bundle is None:
-                            downloaded = await self._backend.download_note(
-                                reference.url,
-                                output_dir=journey_root / "sources",
-                                fetched_note=note,
-                            )
-                            bundle = self._snapshots.materialize(downloaded)
-                            self._source_corpus.preserve("xhs", bundle)
-                        else:
-                            source_cache_hits += 1
+                            if bundle is None:
+                                downloaded = await self._backend.download_note(
+                                    reference.url,
+                                    output_dir=journey_root / "sources",
+                                    fetched_note=note,
+                                )
+                                bundle = self._snapshots.materialize(downloaded)
+                                self._source_corpus.preserve("xhs", bundle)
+                            else:
+                                source_cache_hits += 1
+                                logger.info(
+                                    "interview_research.source_cache_hit",
+                                    extra={"note_id": bundle.snapshot.note_id},
+                                )
                             logger.info(
-                                "interview_research.source_cache_hit",
+                                "interview_research.snapshot",
                                 extra={"note_id": bundle.snapshot.note_id},
                             )
-                        logger.info(
-                            "interview_research.snapshot",
-                            extra={"note_id": bundle.snapshot.note_id},
-                        )
-                        snapshot_artifact = self._store.create_artifact(
-                            journey_id=journey.id,
-                            task_run_id=task.id,
-                            artifact_type="raw_source_snapshot",
-                            content_ref=str(bundle.manifest_path),
-                            content_hash=bundle.snapshot.content_hash,
-                            provenance_refs=[f"xhs:{bundle.snapshot.note_id}"],
-                        )
-                        self._store.validate_artifact(snapshot_artifact.id, valid=True)
-                        output_ids.append(snapshot_artifact.id)
-
-                        snapshot_text = _snapshot_text(bundle.snapshot.body, bundle.extractions)
-                        assessment = await self._intelligence.assess(
-                            target,
-                            snapshot_text,
-                            bundle.snapshot.note_id,
-                        )
-                        assessment_path = journey_root / "assessments" / f"{note.note_id}.json"
-                        _write_json_atomic(assessment_path, assessment.model_dump(mode="json"))
-                        assessment_artifact = self._store.create_artifact(
-                            journey_id=journey.id,
-                            task_run_id=task.id,
-                            artifact_type="post_relevance_assessment",
-                            content_ref=str(assessment_path),
-                            content_hash=_file_hash(assessment_path),
-                            provenance_refs=[snapshot_artifact.id],
-                        )
-                        self._store.validate_artifact(assessment_artifact.id, valid=True)
-                        output_ids.append(assessment_artifact.id)
-                        if assessment.accepted:
-                            evidence.append(assessment)
-                            evidence_artifact_ids.append(assessment_artifact.id)
-                            new_evidence += 1
-                            logger.info(
-                                "interview_research.accepted",
-                                extra={
-                                    "note_id": assessment.note_id,
-                                    "grade": assessment.grade,
-                                },
+                            snapshot_artifact = self._store.create_artifact(
+                                journey_id=journey.id,
+                                task_run_id=task.id,
+                                artifact_type="raw_source_snapshot",
+                                content_ref=str(bundle.manifest_path),
+                                content_hash=bundle.snapshot.content_hash,
+                                provenance_refs=[f"xhs:{bundle.snapshot.note_id}"],
                             )
-                        else:
-                            feedback.extend(assessment.reasons)
+                            self._store.validate_artifact(snapshot_artifact.id, valid=True)
+                            output_ids.append(snapshot_artifact.id)
+
+                            snapshot_text = _snapshot_text(bundle.snapshot.body, bundle.extractions)
+                            assessment = await self._intelligence.assess(
+                                target,
+                                snapshot_text,
+                                bundle.snapshot.note_id,
+                            )
+                            assessment_path = journey_root / "assessments" / f"{note.note_id}.json"
+                            _write_json_atomic(assessment_path, assessment.model_dump(mode="json"))
+                            assessment_artifact = self._store.create_artifact(
+                                journey_id=journey.id,
+                                task_run_id=task.id,
+                                artifact_type="post_relevance_assessment",
+                                content_ref=str(assessment_path),
+                                content_hash=_file_hash(assessment_path),
+                                provenance_refs=[snapshot_artifact.id],
+                            )
+                            self._store.validate_artifact(assessment_artifact.id, valid=True)
+                            output_ids.append(assessment_artifact.id)
+                            if assessment.accepted:
+                                evidence.append(assessment)
+                                evidence_artifact_ids.append(assessment_artifact.id)
+                                new_evidence += 1
+                                logger.info(
+                                    "interview_research.accepted",
+                                    extra={
+                                        "note_id": assessment.note_id,
+                                        "grade": assessment.grade,
+                                    },
+                                )
+                            else:
+                                feedback.extend(assessment.reasons)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            # Log, record feedback, keep the evidence already
+                            # collected; the outer handler fails the whole task.
+                            logger.exception(
+                                "interview_research.note_failed",
+                                extra={"note_id": reference.note_id, "iteration": iteration},
+                            )
+                            feedback.append(f"笔记 {reference.note_id} 处理失败，已跳过")
+                            continue
 
                 coverage = self._coverage(evidence)
                 if coverage.sufficient:
