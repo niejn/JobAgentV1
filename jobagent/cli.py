@@ -860,6 +860,12 @@ async def _run_pipeline(
         return
 
     matches = await matcher.batch_match(jobs=jobs, profile=profile)
+    eval_failed = sum(1 for m in matches if m.evaluation_failed)
+    if eval_failed:
+        click.echo(
+            f"Warning: {eval_failed} match evaluation(s) failed; their score "
+            "0.0 means unknown, not no-match. Re-run to retry them."
+        )
     ranked_matches = sorted(matches, key=lambda match: match.score, reverse=True)
 
     top_matches = ranked_matches[: min(5, len(ranked_matches))]

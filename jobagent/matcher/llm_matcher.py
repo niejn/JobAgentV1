@@ -41,7 +41,7 @@ SYSTEM_PROMPT = (
     "        \"missing_skills\":[\"AB testing\"]}"
 )
 
-_FENCED_JSON_RE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.I)
+_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.I)
 
 
 class _MatchResponse(BaseModel):
@@ -74,35 +74,60 @@ class LLMMatcher:
         )
 
     async def match(self, job: Job, profile: Profile) -> Match:
-        """Score a single job against a profile."""
+        """Score a single job against a profile.
+
+        A malformed first answer gets one self-healing retry (fresh LLM
+        call). Persistent failures return ``evaluation_failed=True`` with
+        ``score=0.0`` meaning *unknown*, so callers never mistake a
+        transient error for a genuine non-match (code review HIGH H5).
+        """
 
         prompt = self._build_prompt(job, profile)
-        try:
-            raw = await self._client.chat(prompt, system=SYSTEM_PROMPT)
-            result = _MatchResponse.model_validate(json.loads(_strip_json_fence(raw)))
-            return Match(
-                job_id=job.id,
-                score=result.score,
-                reasoning=result.reasoning,
-                matched_skills=result.matched_skills,
-                missing_skills=result.missing_skills,
-            )
-        except Exception as exc:
-            logger.error("LLM match failed for job %s: %s", job.id, exc)
-            return Match(
-                job_id=job.id,
-                score=0.0,
-                reasoning=[f"Match evaluation failed: {exc}"],
-            )
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                raw = await self._client.chat(prompt, system=SYSTEM_PROMPT)
+                result = _MatchResponse.model_validate(json.loads(_extract_json(raw)))
+                return Match(
+                    job_id=job.id,
+                    score=result.score,
+                    reasoning=result.reasoning,
+                    matched_skills=result.matched_skills,
+                    missing_skills=result.missing_skills,
+                )
+            except Exception as exc:  # noqa: BLE001 - contained per job below
+                last_error = exc
+                if attempt == 0:
+                    logger.warning(
+                        "LLM match attempt 1 failed for job %s (%s); retrying once",
+                        job.id,
+                        exc,
+                    )
+        logger.error("LLM match failed for job %s: %s", job.id, last_error)
+        return Match(
+            job_id=job.id,
+            score=0.0,
+            evaluation_failed=True,
+            reasoning=[f"Match evaluation failed: {last_error}"],
+        )
 
     async def batch_match(self, jobs: list[Job], profile: Profile) -> list[Match]:
         """Score multiple jobs sequentially to avoid provider rate spikes."""
 
         matches = []
+        failed = 0
         for job in jobs:
             match = await self.match(job, profile)
             matches.append(match)
+            failed += match.evaluation_failed
             logger.info("Matched %s @ %s → %.2f", job.title, job.company, match.score)
+        if failed:
+            logger.error(
+                "%d/%d match evaluations failed (network or malformed output); "
+                "their score 0.0 means unknown, not no-match",
+                failed,
+                len(jobs),
+            )
         return matches
 
     @staticmethod
@@ -121,6 +146,23 @@ class LLMMatcher:
         )
 
 
-def _strip_json_fence(raw: str) -> str:
-    match = _FENCED_JSON_RE.match(raw)
-    return match.group(1) if match else raw.strip()
+def _extract_json(raw: str) -> str:
+    """Best-effort JSON extraction from a model answer.
+
+    Handles the fenced block anywhere in the answer (not only when it spans
+    the whole text), and falls back to the first outermost ``{...}`` span
+    when the model added prose around a bare object.
+    """
+
+    fenced = _FENCED_JSON_RE.search(raw)
+    if fenced:
+        return fenced.group(1).strip()
+    text = raw.strip()
+    if text.startswith("{"):
+        return text
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        return text[start : end + 1]
+    return text
+
