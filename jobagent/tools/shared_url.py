@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import socket
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
@@ -45,17 +46,72 @@ class SharedUrlSaveRequest(BaseModel):
             raise ValueError("Provide an absolute public HTTP(S) URL")
         if parsed.username is not None or parsed.password is not None:
             raise ValueError("Credentials cannot be embedded in a shared URL")
-        host = parsed.hostname.lower()
-        if host == "localhost" or host.endswith(".local"):
-            raise ValueError("Local network URLs cannot be downloaded")
-        try:
-            address = ipaddress.ip_address(host)
-        except ValueError:
-            pass
-        else:
-            if not address.is_global:
-                raise ValueError("Local or private network URLs cannot be downloaded")
+        _assert_public_target(parsed.hostname)
         return cleaned
+
+
+def _resolve_host(host: str) -> list[str]:
+    """Resolve a hostname to its addresses (module-level for test injection)."""
+
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError as exc:
+        raise ValueError(f"URL host cannot be resolved: {host}") from exc
+    return [str(info[4][0]) for info in infos]
+
+
+_RESOLVER: Callable[[str], list[str]] = _resolve_host
+
+
+def _assert_public_target(hostname: str) -> None:
+    """Reject private/loopback/link-local targets, including DNS rebinding.
+
+    Literal-IP checks cover canonical and obfuscated forms (0x7f000001,
+    decimal 2130706433); resolution checks cover names that only resolve
+    to internal space (host.docker.internal, rebinding domains). Fails
+    closed when the host cannot be resolved.
+    """
+
+    host = hostname.strip().rstrip(".").lower()
+    if host == "localhost" or host.endswith(".local"):
+        raise ValueError("Local network URLs cannot be downloaded")
+    address = _literal_ip(host)
+    if address is not None:
+        if not address.is_global:
+            raise ValueError("Local or private network URLs cannot be downloaded")
+        return
+    try:
+        addresses = _RESOLVER(host)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"URL host cannot be resolved: {host}") from exc
+    for raw in addresses:
+        try:
+            resolved = ipaddress.ip_address(raw)
+        except ValueError:
+            continue
+        if not resolved.is_global:
+            raise ValueError(
+                "URL host resolves to a private or local network address"
+            )
+
+
+def _literal_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Parse canonical AND obfuscated (hex/decimal/octal) IPv4 literals."""
+
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    try:
+        # inet_aton accepts 0x7f000001, 2130706433, 0177.0.0.1 forms.
+        packed = socket.inet_aton(host)
+    except OSError:
+        return None
+    try:
+        return ipaddress.ip_address(packed)
+    except ValueError:
+        return None
+
 
 
 class PageSaver(Protocol):
