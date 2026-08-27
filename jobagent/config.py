@@ -208,8 +208,6 @@ class Settings(BaseSettings):
     jobagent_research_minimum_evidence: int = Field(default=3, ge=1, le=20)
     jobagent_research_required_topics: int = Field(default=3, ge=1, le=20)
     jobagent_research_timeout: int = Field(default=300, ge=30, le=1800)
-    jobagent_history_compact_after_messages: int = Field(default=40, ge=5, le=500)
-    jobagent_history_keep_recent_messages: int = Field(default=16, ge=2, le=100)
     # 运行预算：deep_agent 每次调用的最大超步数（supersteps）。
     # LangGraph 的隐式默认是 25 —— 约仅 6-12 轮“模型→工具→模型”循环，复合任务
     # （连续调研+对比+写工件）会中途裸崩 GraphRecursionError。
@@ -218,12 +216,6 @@ class Settings(BaseSettings):
     # 超限时的收尾行为见 JobAgent.reply_stream 的 GraphRecursionError 分支
     # （无工具纯总结，对应 Hermes _budget_grace_call 思路）。
     jobagent_recursion_limit: int = Field(default=90, ge=1, le=500)
-    jobagent_history_summary_input_max_chars: int = Field(
-        default=24_000,
-        ge=2_000,
-        le=200_000,
-    )
-    jobagent_history_summary_timeout: int = Field(default=60, ge=5, le=300)
 
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
@@ -260,20 +252,6 @@ class Settings(BaseSettings):
                 "XHS_CDP_ENDPOINT must be a loopback address (127.0.0.1, ::1, or localhost)"
             )
         return cleaned
-
-    @model_validator(mode="after")
-    def validate_history_compaction_window(self) -> "Settings":
-        """Ensure every configured compaction leaves an older segment to summarize."""
-
-        if (
-            self.jobagent_history_keep_recent_messages
-            >= self.jobagent_history_compact_after_messages
-        ):
-            raise ValueError(
-                "JOBAGENT_HISTORY_KEEP_RECENT_MESSAGES must be smaller than "
-                "JOBAGENT_HISTORY_COMPACT_AFTER_MESSAGES"
-            )
-        return self
 
     @model_validator(mode="after")
     def validate_boss_apply_delay_order(self) -> "Settings":

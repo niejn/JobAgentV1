@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.language_models.model_profile import ModelProfile
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
@@ -151,6 +152,10 @@ def build_agent_model(settings: Settings) -> BaseChatModel:
     """Build the tool-capable model used by the conversational JobAgent."""
 
     runtime = resolve_llm_config(settings)
+    # profile.max_input_tokens lets deepagents' SummarizationMiddleware pick
+    # fraction-based compaction thresholds (trigger 85% / keep 10% of the
+    # window) instead of its no-profile fallback (fixed 170k tokens).
+    profile: ModelProfile = {"max_input_tokens": settings.jobagent_llm_context_window}
     model = ChatOpenAI(
         model=runtime.model,
         api_key=SecretStr(runtime.api_key),
@@ -159,17 +164,20 @@ def build_agent_model(settings: Settings) -> BaseChatModel:
         max_retries=2,
         max_completion_tokens=runtime.max_tokens,
         use_responses_api=False,
+        profile=profile,
     )
     # Keep the native ChatOpenAI object so DeepAgents can inspect and resolve it.
     # ChatOpenAI exposes this constructor field as max_completion_tokens while
     # translating the legacy max_tokens request shape for compatible providers.
-    return _with_fallback(settings, model, runtime)
+    return _with_fallback(settings, model, runtime, profile=profile)
 
 
 def _with_fallback(
     settings: Settings,
     primary: BaseChatModel,
     runtime: LLMRuntimeConfig,
+    *,
+    profile: ModelProfile | None = None,
 ) -> BaseChatModel:
     """Wrap the primary model with a backup when one is configured.
 
@@ -177,6 +185,8 @@ def _with_fallback(
     模型（如 deepseek）。包装器保持 BaseChatModel 接口，deepagents 的
     resolve_model 与 bind_tools 均无感。未配置备份时原样返回（零行为
     变化）。备份缺省复用主供应商的 key/base_url（同网关换模型的场景）。
+    ``profile`` 透传给链上每个成员与包装器自身，让 deepagents 的
+    SummarizationMiddleware 在包装器实例上也能读到 context window。
     """
 
     from jobagent.models.fallback import FallbackChatModel
@@ -196,8 +206,13 @@ def _with_fallback(
         max_retries=2,
         max_completion_tokens=settings.jobagent_llm_fallback_max_tokens,
         use_responses_api=False,
+        profile=profile,
     )
-    return FallbackChatModel(primary=primary, fallbacks=(backup,))
+    return FallbackChatModel(
+        primary=primary,
+        fallbacks=(backup,),
+        profile=profile,
+    )
 
 
 def _optional_text(value: str | None) -> str | None:

@@ -16,7 +16,6 @@ from langchain_core.messages import (
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool, tool
-from pydantic import ValidationError
 
 from jobagent.agent import (
     SYSTEM_PROMPT,
@@ -522,78 +521,6 @@ async def test_agent_lists_saved_conversation_sessions_newest_first(tmp_path) ->
     assert all(session.last_used_at for session in sessions)
 
 
-class SummarizingFakeModel(ToolBindableFakeModel, BaseChatModel):
-    @property
-    def _llm_type(self) -> str:
-        return "summarizing-fake"
-
-    def _generate(
-        self,
-        messages: list[BaseMessage],
-        stop: list[str] | None = None,
-        run_manager: object | None = None,
-        **kwargs: object,
-    ) -> ChatResult:
-        if any(
-            isinstance(message, SystemMessage) and "conversation summarizer" in str(message.content)
-            for message in messages
-        ):
-            content = "用户早期确定了目标公司和岗位。"
-        else:
-            latest = next(
-                str(message.content)
-                for message in reversed(messages)
-                if isinstance(message, HumanMessage)
-            )
-            content = f"已收到：{latest}"
-        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
-
-
-@pytest.mark.asyncio
-async def test_agent_summarizes_old_messages_but_keeps_recent_turns(tmp_path) -> None:
-    settings = Settings(
-        _env_file=None,
-        jobagent_checkpoint_db=tmp_path / "checkpoints.db",
-        jobagent_history_compact_after_messages=5,
-        jobagent_history_keep_recent_messages=2,
-    )
-    first = build_job_agent(settings, model=SummarizingFakeModel(), tools=[])
-    for message in ("第一轮", "第二轮", "第三轮"):
-        await first.reply(message, session_id="long-session")
-    await first.close()
-
-    second = build_job_agent(settings, model=SummarizingFakeModel(), tools=[])
-    try:
-        history = await second.resume_session("long-session")
-        response = await second.reply("第四轮", session_id="long-session")
-    finally:
-        await second.close()
-
-    assert history.compacted is True
-    assert history.summary == "用户早期确定了目标公司和岗位。"
-    assert [entry.text for entry in history.recent] == ["第三轮", "已收到：第三轮"]
-    assert response == "已收到：第四轮"
-
-    third = build_job_agent(settings, model=SummarizingFakeModel(), tools=[])
-    try:
-        restored_again = await third.resume_session("long-session")
-    finally:
-        await third.close()
-
-    assert restored_again.summary == "用户早期确定了目标公司和岗位。"
-    assert [entry.text for entry in restored_again.recent][-2:] == [
-        "第四轮",
-        "已收到：第四轮",
-    ]
-
-
-def test_history_compaction_requires_recent_window_below_threshold() -> None:
-    with pytest.raises(ValidationError, match="KEEP_RECENT_MESSAGES"):
-        Settings(
-            _env_file=None,
-            jobagent_history_compact_after_messages=5,
-            jobagent_history_keep_recent_messages=5,
-        )
 
 
 def test_main_agent_prompt_contains_critical_contracts() -> None:

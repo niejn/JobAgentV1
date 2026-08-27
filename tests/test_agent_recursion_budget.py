@@ -183,20 +183,11 @@ async def test_budget_exhaustion_summary_failure_falls_back(tmp_path: Any) -> No
         raise GraphRecursionError("Recursion limit of 1 reached")
         yield  # pragma: no cover
 
-    # aget_state is called twice: once by _compact_history (before astream,
-    # must succeed) and once by _graceful_budget_exhaustion (closing summary,
-    # must fail to exercise the fallback path).
-    get_state_calls = {"count": 0}
-
+    # History compaction is owned by deepagents' SummarizationMiddleware now,
+    # so aget_state is only called by _graceful_budget_exhaustion (closing
+    # summary); make that first call fail to exercise the fallback path.
     async def failing_get_state(config: dict) -> Any:
-        get_state_calls["count"] += 1
-        if get_state_calls["count"] >= 2:
-            raise RuntimeError("checkpoint unavailable")
-        # Minimal viable StateSnapshot for _compact_history.
-        class _Snapshot:
-            values = {"messages": ()}
-
-        return _Snapshot()
+        raise RuntimeError("checkpoint unavailable")
 
     try:
         deep_agent = await agent._ensure_deep_agent()
