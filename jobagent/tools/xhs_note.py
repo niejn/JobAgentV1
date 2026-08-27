@@ -26,6 +26,7 @@ from jobagent.scraper.xhs_backend import (
     SpiderXhsError,
     XhsAuthenticationError,
     XhsFetchedNote,
+    strip_xsec_token,
 )
 
 
@@ -219,7 +220,7 @@ class XhsNoteSaver:
         return {
             **await self._content_reader.extract_saved(request.url),
             "platform": "xiaohongshu",
-            "note_url": request.url,
+            "note_url": strip_xsec_token(request.url),
         }
 
 
@@ -239,7 +240,7 @@ def _bundle_text(bundle: SnapshotBundle) -> dict[str, Any]:
     return {
         "status": "completed",
         "note_id": bundle.snapshot.note_id,
-        "source_url": bundle.snapshot.source_url,
+        "source_url": strip_xsec_token(bundle.snapshot.source_url),
         "title": bundle.snapshot.title,
         "body_text": body,
         "image_ocr_text": ocr_text,
