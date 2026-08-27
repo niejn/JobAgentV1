@@ -4,6 +4,7 @@ from jobagent.tools.boss_greet import (
     BossGreetingsManager,
     build_boss_greet_jobs_tool,
 )
+from jobagent.tools.boss_resume import build_boss_resume_upload_tool
 from jobagent.tools.candidate_profile import (
     CandidateProfileManager,
     CandidateResumeFile,
@@ -53,6 +54,7 @@ from jobagent.tools.xhs_author import (
 __all__ = [
     "BossGreetingsManager",
     "build_boss_greet_jobs_tool",
+    "build_boss_resume_upload_tool",
     "CandidateProfileManager",
     "BossJobDiscovery",
     "CandidateResumeFile",

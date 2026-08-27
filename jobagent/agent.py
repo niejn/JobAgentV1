@@ -66,6 +66,7 @@ from jobagent.tools import (
     XhsAuthorPostsBrowser,
     build_boss_greet_jobs_tool,
     build_boss_job_discovery_tool,
+    build_boss_resume_upload_tool,
     build_get_job_progress_tool,
     build_import_candidate_resume_tool,
     build_interview_evidence_tool,
@@ -963,6 +964,10 @@ def build_job_agent(
                         crawl_gate=crawl_gate,
                     )
                 ),
+            ),
+            (
+                "upload_boss_resume_pdf",
+                lambda: build_boss_resume_upload_tool(settings, crawl_gate=crawl_gate),
             ),
             ("update_job_progress", lambda: build_update_job_progress_tool(state_db)),
             ("get_job_progress", lambda: build_get_job_progress_tool(state_db)),

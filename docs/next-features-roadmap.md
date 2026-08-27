@@ -114,8 +114,9 @@ JD + Candidate Background
 |---|---|---|---|
 | TR-1 | 版本库：`LocalOpportunityArtifacts` 扩展 `save_tailored_resume` / `confirm` / `mark_submitted` / `read`；manifest 增加 `resumes[]`（version/sha256/status/时间戳/事实来源映射） | 零 | 同一 Opportunity 多版本递增、不可覆盖；状态只进不退 |
 | TR-2 | Agent Tools：`save_tailored_resume`（存 draft）、`confirm_tailored_resume`（用户确认）、`get_tailored_resumes`（面试查回）；prompt 政策：每事实映射 Candidate Background，投递前必须 confirmed | 零 | 无 confirmed 简历的岗位不允许走投递流程 |
-| TR-3 | `update_boss_online_resume`：CDP 打开 Boss 简历编辑页，自动更新"个人优势"等简单模块，复杂模块（工作经历富文本）导航到位并提示用户手动完成；HITL 确认参数 + 结果确认 | 高 | 真机校准选择器；失败如实报告，不伪造成功 |
-| TR-4 | `upload_boss_resume_pdf`：CDP filechooser 上传附件简历 PDF；PDF 第一版由用户提供，markdown->PDF 转换后置 | 高 | 上传后页面出现新附件；风控/失败路径有测试 |
+| TR-4a | ✅ 已交付（2026-08-27）：`upload_boss_resume_pdf` 工具——CDP 走用户 Chrome，首页点"简历"入口→点"附件上传"→`expect_file_chooser` 拦截喂 PDF（不弹 OS 窗口）；成功判定 = 被动捕获 `/wapi/zpgeek/resume/attachment/save.json` 返回 code=0。HITL：`user_confirmed` 必填。**附件上限 3 个**：撞限返回 `attachment_limit`；`allow_delete=True`（须用户同意删除）时自动删最旧重试 | 已上线 | 删除旧附件的选择器为人工走查提供，待真机校准 |
+| TR-4b | 📋 打招呼后自动发送对应附件简历：聊天窗口"发送简历"按钮流程（需要一次人工走查提供该按钮 DOM + 发送后确认信号） | 高（用户 2026-08-27 定） | HR 收到 PDF；每个岗位发送的简历版本入册 |
+| TR-3 | `update_boss_online_resume`：CDP 打开 Boss 简历编辑页，自动更新"个人优势"等简单模块，复杂模块导航到位提示手动完成；HITL 确认 | 低（用户 2026-08-27 降级） | 真机校准选择器；失败如实报告 |
 | TR-5 | `boss_greet_jobs` 成功后自动 `mark_submitted`，招呼关联简历版本 | 低 | 投递记录含 resume version |
 
 ### 风险与原则
@@ -125,6 +126,15 @@ JD + Candidate Background
 - 站内简历更新和 PDF 上传都是平台写操作：默认 HITL，展示将执行的具体内容，用户 approve
   才执行；失败路径全部结构化返回。
 - 本地版本库是唯一事实源；Boss 站内状态只是投递渠道的镜像。
+- **warlock 反调试（2026-08-27 实测）**：Boss 前端（warlockdata.min.js +
+  browser-check-v2.js）带 console-getter 陷阱——开 F12 或对已加载页面 attach
+  CDP 监听（Runtime.enable）都会触发页面跳 about:blank。因此：
+  (1) 禁止 attach 用户正在浏览的页面；(2) 自动化只用自建 tab（discover 模式）；
+  (3) 情报采集用 chrome://net-export（进程外文件日志，页面不可见）而非 F12/CDP。
+- **附件简历平台约束**：最多 3 个并存，上传 API =
+  `/wapi/zpupload/resume/uploadFile.json`（multipart）+
+  `/wapi/zpgeek/resume/attachment/save.json`（落库，code=0 即成功）；
+  删除 = `/wapi/zpgeek/resume/attachment/delete.json`。
 
 ---
 

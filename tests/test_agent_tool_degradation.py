@@ -25,6 +25,7 @@ from jobagent.config import Settings
 DEFAULT_TOOL_NAMES = {
     "discover_boss_jobs",
     "boss_greet_jobs",
+    "upload_boss_resume_pdf",
     "update_job_progress",
     "get_job_progress",
     "list_job_records",
