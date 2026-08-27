@@ -128,8 +128,9 @@ class SQLiteJobRegistry:
         self._clock = clock or (lambda: datetime.now().astimezone())
         self._connection = sqlite3.connect(self.path)
         self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA journal_mode = WAL")
+        # busy_timeout MUST precede the WAL switch (see journey/store.py).
         self._connection.execute("PRAGMA busy_timeout = 5000")
+        self._connection.execute("PRAGMA journal_mode = WAL")
         self._migrate()
 
     def close(self) -> None:
