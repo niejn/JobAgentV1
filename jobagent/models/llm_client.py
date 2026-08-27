@@ -141,7 +141,10 @@ def build_chat_client(
         max_retries=2,
         use_responses_api=False,
     )
-    return OpenAICompatibleClient(llm, max_tokens_limit=runtime.max_tokens)
+    return OpenAICompatibleClient(
+        _with_fallback(settings, llm, runtime),
+        max_tokens_limit=runtime.max_tokens,
+    )
 
 
 def build_agent_model(settings: Settings) -> BaseChatModel:
@@ -160,7 +163,41 @@ def build_agent_model(settings: Settings) -> BaseChatModel:
     # Keep the native ChatOpenAI object so DeepAgents can inspect and resolve it.
     # ChatOpenAI exposes this constructor field as max_completion_tokens while
     # translating the legacy max_tokens request shape for compatible providers.
-    return model
+    return _with_fallback(settings, model, runtime)
+
+
+def _with_fallback(
+    settings: Settings,
+    primary: BaseChatModel,
+    runtime: LLMRuntimeConfig,
+) -> BaseChatModel:
+    """Wrap the primary model with a backup when one is configured.
+
+    429（限流）/403（model_access_denied）等供应商级错误时逐次回退到备份
+    模型（如 deepseek）。包装器保持 BaseChatModel 接口，deepagents 的
+    resolve_model 与 bind_tools 均无感。未配置备份时原样返回（零行为
+    变化）。备份缺省复用主供应商的 key/base_url（同网关换模型的场景）。
+    """
+
+    from jobagent.models.fallback import FallbackChatModel
+
+    fallback_model = settings.jobagent_llm_fallback_model.strip()
+    if not fallback_model:
+        return primary
+    backup = ChatOpenAI(
+        model=fallback_model,
+        api_key=SecretStr(
+            settings.jobagent_llm_fallback_api_key or runtime.api_key
+        ),
+        base_url=(
+            settings.jobagent_llm_fallback_base_url.strip() or runtime.base_url
+        ).rstrip("/"),
+        timeout=float(settings.jobagent_llm_timeout),
+        max_retries=2,
+        max_completion_tokens=settings.jobagent_llm_fallback_max_tokens,
+        use_responses_api=False,
+    )
+    return FallbackChatModel(primary=primary, fallbacks=(backup,))
 
 
 def _optional_text(value: str | None) -> str | None:
