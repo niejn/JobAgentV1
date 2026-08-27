@@ -81,12 +81,15 @@ class SQLiteJourneyStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(self.path)
         self._connection.row_factory = sqlite3.Row
+        # busy_timeout MUST precede the WAL switch: changing journal mode
+        # needs a brief exclusive lock, and without a busy timeout a
+        # concurrent connection makes it fail instantly with SQLITE_BUSY.
+        self._connection.execute("PRAGMA busy_timeout = 5000")
         self._connection.execute("PRAGMA foreign_keys = ON")
         mode = self._connection.execute("PRAGMA journal_mode = WAL").fetchone()
         assert mode is not None and str(mode[0]).lower() == "wal", (
             "journey store requires WAL mode; another connection may hold the DB"
         )
-        self._connection.execute("PRAGMA busy_timeout = 5000")
         self._migrate()
 
     def close(self) -> None:
