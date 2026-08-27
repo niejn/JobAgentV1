@@ -25,6 +25,8 @@ from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
+from jobagent.journey.store import _enable_wal
+
 
 class JobProgressStatus(StrEnum):
     """Coarse-grained progress of one job's application journey."""
@@ -128,9 +130,10 @@ class SQLiteJobRegistry:
         self._clock = clock or (lambda: datetime.now().astimezone())
         self._connection = sqlite3.connect(self.path)
         self._connection.row_factory = sqlite3.Row
-        # busy_timeout MUST precede the WAL switch (see journey/store.py).
+        # busy_timeout MUST precede the WAL switch (see journey/store.py);
+        # _enable_wal tolerates concurrent-initializer races.
         self._connection.execute("PRAGMA busy_timeout = 5000")
-        self._connection.execute("PRAGMA journal_mode = WAL")
+        _enable_wal(self._connection)
         self._migrate()
 
     def close(self) -> None:
