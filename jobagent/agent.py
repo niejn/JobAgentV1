@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -90,6 +91,22 @@ SYSTEM_PROMPT = MAIN_AGENT_SYSTEM_PROMPT
 logger = logging.getLogger(__name__)
 
 _HISTORY_SUMMARY_MARKER = "jobagent_history_summary"
+
+# Shell commands run by the model get only these environment variables; everything
+# else (notably provider keys and platform cookies loaded from .env) stays private.
+_SHELL_ENV_ALLOWLIST = (
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "COMSPEC",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "LANG",
+    "PYTHONIOENCODING",
+)
 _HISTORY_SUMMARY_MAX_CHARS = 6_000
 _DEBUG_SENSITIVE_KEYS = ("token", "key", "cookie", "password", "secret", "authorization")
 _DEBUG_SENSITIVE_QUERY = re.compile(
@@ -630,12 +647,21 @@ class JobAgent:
                 await saver.setup()
                 # LocalShellBackend extends FilesystemBackend with shell
                 # execution; the user opted in to a local development agent.
+                # The shell env is a minimal allowlist: process secrets
+                # (OPENAI_API_KEY, *_COOKIE, bot tokens) live in os.environ
+                # and must stay unreachable from model-driven commands.
                 from deepagents.backends.local_shell import LocalShellBackend
 
+                shell_env = {
+                    name: os.environ[name]
+                    for name in _SHELL_ENV_ALLOWLIST
+                    if name in os.environ
+                }
                 shell_backend = LocalShellBackend(
                     root_dir=self._filesystem_root,
                     virtual_mode=True,
-                    inherit_env=True,
+                    inherit_env=False,
+                    env=shell_env,
                     timeout=120,
                 )
                 filesystem_middleware = FilesystemMiddleware(
