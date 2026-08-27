@@ -195,8 +195,8 @@ class InterviewResearchService:
         journey_root.mkdir(parents=True, exist_ok=True)
 
         try:
+            consecutive_zero_gain = 0
             for iteration in range(1, self._max_iterations + 1):
-                logger.info("interview_research.plan", extra={"iteration": iteration})
                 plan = await self._intelligence.plan(target, tuple(feedback), iteration)
                 new_evidence = 0
                 for query in plan.queries[: self._queries_per_iteration]:
@@ -356,7 +356,14 @@ class InterviewResearchService:
                         outcome=stop_reason,
                     )
                     break
-                if new_evidence == 0 and iteration == self._max_iterations:
+                consecutive_zero_gain = consecutive_zero_gain + 1 if new_evidence == 0 else 0
+                if new_evidence == 0 and (
+                    consecutive_zero_gain >= 2 or iteration == self._max_iterations
+                ):
+                    # Stop-loss: one replan round is allowed after a dry
+                    # iteration; two consecutive dry rounds (or the final
+                    # round) end the loop instead of burning more XHS quota
+                    # on queries that provably yield nothing.
                     stop_reason = "no_marginal_gain"
                     log_decision(
                         logger,
@@ -368,9 +375,11 @@ class InterviewResearchService:
                             "accepted_b": coverage.accepted_b,
                             "covered_topics": coverage.covered_topics,
                             "max_iterations": self._max_iterations,
+                            "consecutive_zero_gain": consecutive_zero_gain,
                         },
                         outcome=stop_reason,
                     )
+                    break
 
             draft = await self._intelligence.prepare(
                 target,

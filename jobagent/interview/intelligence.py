@@ -157,9 +157,18 @@ def _fallback_plan(
 ) -> InterviewSearchPlan:
     company = target.company.strip()
     role = target.role.strip()
-    queries = (
-        InterviewSearchQuery(kind="exact_role", text=f"{company} {role} 面经"),
-        InterviewSearchQuery(kind="interview_stage", text=f"{company} {role} 一面 二面"),
-        InterviewSearchQuery(kind="questions", text=f"{company} {role} 面试题"),
+    # Rotate synonym groups per iteration so consecutive fallback rounds
+    # never issue identical queries (XHS dedup would zero every round).
+    rotations = (
+        ("面经", "一面 二面", "面试题"),
+        ("HR 面", "业务面", "常问问题"),
+        ("面试流程", "笔试", "复盘"),
+    )
+    keywords = rotations[(iteration - 1) % len(rotations)]
+    queries = tuple(
+        InterviewSearchQuery(kind=kind, text=f"{company} {role} {text}")
+        for kind, text in zip(
+            ("exact_role", "interview_stage", "questions"), keywords, strict=False
+        )
     )
     return InterviewSearchPlan(iteration=iteration, queries=queries)
