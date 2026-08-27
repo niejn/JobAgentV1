@@ -6,6 +6,7 @@ import asyncio
 import logging
 import traceback
 from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -96,6 +97,16 @@ def scrape_command(platform: str, query: str, location: str | None, limit: int) 
     type=click.Path(path_type=Path, exists=True, dir_okay=False),
     required=True,
 )
+@click.option(
+    "--apply",
+    "apply_enabled",
+    is_flag=True,
+    default=False,
+    help=(
+        "Send applications for jobs scoring >= 0.75 after matching. "
+        "Requires interactive per-job confirmation (HITL); skipped by default."
+    ),
+)
 @click.option("--limit", default=20, show_default=True, type=int)
 def run_command(
     platform: str,
@@ -103,6 +114,7 @@ def run_command(
     location: str | None,
     profile_path: Path,
     limit: int,
+    apply_enabled: bool,
 ) -> None:
     """Run end-to-end pipeline: scrape -> match -> notify."""
 
@@ -113,6 +125,7 @@ def run_command(
             location=location,
             profile_path=profile_path,
             limit=limit,
+            apply_enabled=apply_enabled,
         )
     )
 
@@ -821,6 +834,7 @@ async def _run_pipeline(
     location: str | None,
     profile_path: Path,
     limit: int,
+    apply_enabled: bool,
 ) -> None:
     """Internal async end-to-end workflow."""
 
@@ -853,23 +867,53 @@ async def _run_pipeline(
     for match in top_matches:
         click.echo(f"- {match.job_id}: score={match.score:.2f}")
 
-    boss_applier = BossApplier(settings)
-    linkedin_applier = LinkedInApplier(settings)
+    def _score_of(job: Job) -> float:
+        return next((item.score for item in top_matches if item.job_id == job.id), 0.0)
+
+    candidates = [job for job in jobs if _score_of(job) >= 0.75]
 
     applications = []
-    for job in jobs:
-        score = next((item.score for item in top_matches if item.job_id == job.id), 0.0)
-        if score < 0.75:
-            continue
-
-        if job.source == JobSource.BOSS:
-            async with boss_applier:
-                applications.append(await boss_applier.apply(job=job, profile=profile))
-        elif job.source == JobSource.LINKEDIN:
-            async with linkedin_applier:
-                applications.append(await linkedin_applier.apply(job=job, profile=profile))
+    if not apply_enabled:
+        # HITL: application submission is an external write and must never run
+        # unsupervised from a pipeline command.
+        if candidates:
+            click.echo(
+                f"{len(candidates)} job(s) scored >= 0.75; application step skipped. "
+                "Re-run with --apply to confirm and send each one."
+            )
+    else:
+        # One browser session for the whole batch (not one per job), and an
+        # explicit interactive confirmation before every external submission.
+        async with AsyncExitStack() as stack:
+            boss_applier = (
+                await stack.enter_async_context(BossApplier(settings))
+                if any(job.source is JobSource.BOSS for job in candidates)
+                else None
+            )
+            linkedin_applier = (
+                await stack.enter_async_context(LinkedInApplier(settings))
+                if any(job.source is JobSource.LINKEDIN for job in candidates)
+                else None
+            )
+            for job in candidates:
+                confirmed = click.confirm(
+                    f"Send application/greeting to '{job.title}' @ {job.company} "
+                    f"(score {_score_of(job):.2f})?",
+                    default=False,
+                )
+                if not confirmed:
+                    continue
+                if job.source is JobSource.BOSS and boss_applier is not None:
+                    applications.append(
+                        await boss_applier.apply(job=job, profile=profile)
+                    )
+                elif job.source is JobSource.LINKEDIN and linkedin_applier is not None:
+                    applications.append(
+                        await linkedin_applier.apply(job=job, profile=profile)
+                    )
 
     click.echo(f"Applications attempted: {len(applications)}")
+
 
     await _notify_summary(
         settings=settings,
