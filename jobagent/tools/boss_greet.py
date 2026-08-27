@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from jobagent.applier.boss import BossApplier
 from jobagent.config import Settings
+from jobagent.crawl import CrawlGate
 from jobagent.domain import HttpUrl, Job, JobSource, Profile
 from jobagent.journey.job_registry import (
     JobProgressStatus,
@@ -83,11 +84,13 @@ class BossGreetingsManager:
         settings: Settings,
         *,
         registry_path: Path | None = None,
+        crawl_gate: CrawlGate | None = None,
     ) -> None:
         self._settings = settings
         # When set, every successfully submitted greeting is recorded in the
         # job registry so future discovery runs never re-recommend the job.
         self._registry_path = registry_path
+        self._crawl_gate = crawl_gate
 
     async def greet(self, request: BossGreetJobsRequest) -> dict[str, Any]:
         """Execute greetings for up to ``max_greetings`` jobs."""
@@ -130,7 +133,9 @@ class BossGreetingsManager:
             else None
         )
 
-        async with BossApplier(self._settings) as applier:
+        async with BossApplier(
+            self._settings, crawl_gate=self._crawl_gate
+        ) as applier:
             for target in targets:
                 job = Job(
                     id=target.job_id or target.url,
