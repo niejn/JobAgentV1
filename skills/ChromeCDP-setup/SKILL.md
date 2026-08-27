@@ -2,7 +2,7 @@
 name: ChromeCDP-setup
 description: "Chrome DevTools 调试模式连接管理。检测并启动本地 Chrome 的远程调试端口（默认 9222）。"
 author: JobAgent
-version: 1.0.0
+version: 2.0.0
 ---
 
 # Chrome DevTools 调试模式连接管理
@@ -33,17 +33,41 @@ $found = $false; foreach ($p in $paths) { if (Test-Path $p) { Write-Output "FOUN
 - 输出了路径 → 记录此路径
 - `NOT_FOUND` → 提示用户安装 Chrome
 
-### 步骤 3 — 启动 Chrome 调试模式
+### 步骤 3 — 完全退出 Chrome，复制日常 profile 到专用目录
+
+⚠️ **两个硬约束（2026-08-27 真机验证）**：
+
+1. **Chrome 136+ 在默认 profile 上静默忽略 `--remote-debugging-port`**——必须用
+   显式 `--user-data-dir` 指向非默认目录。
+2. **Boss 直聘的 warlock 设备指纹风控（`warlockdata.min.js`）会拦截全新 profile**：
+   页面加载正常但前端主动跳 `about:blank`，joblist API 永不发出。带真实浏览
+   历史/登录态/指纹的日常 profile 副本则放行。
+
+因此正确做法是**复制日常 profile**（而非新建空目录），两者兼得：
 
 ```powershell
-$profileDir = "$env:USERPROFILE\.jobagent\chrome-cdp-profile"
-if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir -Force | Out-Null }
-& "CHROME_PATH" --remote-debugging-port=9222 --user-data-dir="$profileDir" --no-first-run --no-default-browser-check "https://www.google.com"
+# 3a. 完全退出 Chrome（复制时有文件锁会失败）
+Get-Process chrome -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Seconds 3
+
+# 3b. 复制日常 profile（排除缓存类目录，1.7G 源约复制 10-30s / 900MB）
+robocopy "$env:LOCALAPPDATA\Google\Chrome\User Data" "$env:USERPROFILE\.jobagent\chrome-daily-copy" /E /XD "Cache" "Code Cache" "GPUCache" "GrShaderCache" "ShaderCache" "Crashpad" "Component CRX" /XF "LOCK" /NFL /NDL /NJH /NJS /NP
+if ($LASTEXITCODE -ge 8) { Write-Output "COPY_FAILED"; exit 1 }
 ```
 
-> 将 `CHROME_PATH` 替换为步骤 2 找到的路径。
+- 日常 profile 里的登录态、浏览历史、设备指纹数据全部随副本生效（cookie 加密
+  key 在 `Local State`，同一 Windows 用户 DPAPI 下可解密）。
+- 副本目录可长期复用；日常 profile 更新后（新登录/新历史）想同步再复制一次。
 
-### 步骤 4 — 等待端口就绪
+### 步骤 4 — 启动副本 profile 的调试模式
+
+```powershell
+Start-Process -FilePath "CHROME_PATH" -ArgumentList '--remote-debugging-port=9222','--user-data-dir=C:\Users\YOU\.jobagent\chrome-daily-copy','--no-first-run','--no-default-browser-check','https://www.zhipin.com/'
+```
+
+> 将 `CHROME_PATH` 替换为步骤 2 找到的路径，`YOU` 替换为用户名。
+
+### 步骤 5 — 等待端口就绪
 
 ```powershell
 $timeout = 20; $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -65,6 +89,11 @@ exit 1
 
 ## 注意事项
 
-- 首次使用需在打开的 Chrome 窗口中手动登录目标网站
-- 登录态保存在隔离 profile（`~/.jobagent/chrome-cdp-profile`），重启后保留
+- **keeper tab**：调试 Chrome 只剩一个 tab 且该 tab 被站点反爬关闭/重定向时，
+  最后一个窗口消失会连带整个 Chrome 退出。批量自动化任务前确认有至少一个
+  非目标站点的 tab 存活（或由 `BossApplier`/`BossCdpBackend` 补一个）。
+- Boss 登录态判定用 CDP cookies（`wt2`/`bst`/`wbg` 任一存在），不要依赖 DOM
+  探测——Boss 前端会把页面跳到 `about:blank` 使 DOM 查询失败。
+- 登录态保存在副本 profile（`~/.jobagent/chrome-daily-copy`），重启后保留；
+  失效时重走步骤 3 重新复制（日常 Chrome 里先登录）。
 - Agent 通过 `execute` 工具执行 Shell 命令完成操作
