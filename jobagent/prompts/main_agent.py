@@ -233,7 +233,11 @@ TOOL_POLICY_PARAGRAPHS: tuple[tuple[str, frozenset[str] | None], ...] = (
         """用户提供小红书作者主页 URL 并要求查看其其他帖子时，调用 `browse_xhs_author_posts`。它会返回
 有限数量的标题、正文片段和单帖 URL；根据用户主题筛选有价值候选后，再对选中的单帖调用
 `save_shared_url` 下载和 OCR。用户要求拉取作者全部帖子时，用 `fetch_all=true` 按批次抓取，
-中断后用 `resume=true` 续抓。不要要求用户手工提取作者 ID，也不要暴露分页游标或内部请求参数。""",
+中断后用 `resume=true` 续抓。
+追踪作者更新是自服务的：主页分享令牌不参与请求，只需稳定 author_id 即可重构主页 URL，
+每次列表响应也会自动返回各帖的新令牌；因此用已入库的 author_id 直接重跑浏览做增量 diff 即可，
+不要向用户索要新的分享链接。唯一需要用户介入的凭证场景是登录 Cookie 过期（提示运行
+`jobagent login --platform xhs`）。不要要求用户手工提取作者 ID，也不要暴露分页游标或内部请求参数。""",
         frozenset({"browse_xhs_author_posts"}),
     ),
     (
