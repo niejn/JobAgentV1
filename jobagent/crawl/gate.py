@@ -64,9 +64,7 @@ class _PyrateSyncBucket:
         self._key = "crawl"
 
     def acquire(self) -> None:
-        acquired = self._limiter.try_acquire(self._key)
-        if not acquired:  # type: ignore[unreachable]
-            raise RuntimeError("crawl gate failed to grant a permit")
+        self._limiter.try_acquire(self._key)
 
 
 class _PyrateAsyncBucket:

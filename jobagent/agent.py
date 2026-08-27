@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
+import os
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -90,11 +90,26 @@ SYSTEM_PROMPT = MAIN_AGENT_SYSTEM_PROMPT
 logger = logging.getLogger(__name__)
 
 _HISTORY_SUMMARY_MARKER = "jobagent_history_summary"
-_HISTORY_SUMMARY_MAX_CHARS = 6_000
-_DEBUG_SENSITIVE_KEYS = ("token", "key", "cookie", "password", "secret", "authorization")
-_DEBUG_SENSITIVE_QUERY = re.compile(
-    r"(?i)(xsec_token|token|key|cookie|password|secret|authorization)=([^&\s]+)"
+
+# Shell commands run by the model get only these environment variables; everything
+# else (notably provider keys and platform cookies loaded from .env) stays private.
+_SHELL_ENV_ALLOWLIST = (
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "COMSPEC",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "LANG",
+    "PYTHONIOENCODING",
 )
+_HISTORY_SUMMARY_MAX_CHARS = 6_000
+# Redaction vocabulary lives in observability (single source of truth).
+from jobagent.observability import _SENSITIVE_NAMES as _DEBUG_SENSITIVE_KEYS  # noqa: E402
+from jobagent.observability import _SENSITIVE_QUERY as _DEBUG_SENSITIVE_QUERY  # noqa: E402
 
 
 @dataclass(frozen=True, slots=True)
@@ -630,12 +645,21 @@ class JobAgent:
                 await saver.setup()
                 # LocalShellBackend extends FilesystemBackend with shell
                 # execution; the user opted in to a local development agent.
+                # The shell env is a minimal allowlist: process secrets
+                # (OPENAI_API_KEY, *_COOKIE, bot tokens) live in os.environ
+                # and must stay unreachable from model-driven commands.
                 from deepagents.backends.local_shell import LocalShellBackend
 
+                shell_env = {
+                    name: os.environ[name]
+                    for name in _SHELL_ENV_ALLOWLIST
+                    if name in os.environ
+                }
                 shell_backend = LocalShellBackend(
                     root_dir=self._filesystem_root,
                     virtual_mode=True,
-                    inherit_env=True,
+                    inherit_env=False,
+                    env=shell_env,
                     timeout=120,
                 )
                 filesystem_middleware = FilesystemMiddleware(

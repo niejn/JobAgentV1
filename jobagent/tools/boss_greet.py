@@ -60,6 +60,13 @@ class BossGreetJobsRequest(BaseModel):
             "and obtain explicit confirmation before calling this tool."
         ),
     )
+    user_confirmed: bool = Field(
+        description=(
+            "True only after the user explicitly approved sending greetings "
+            "to the listed jobs in this batch. The tool refuses to send "
+            "anything when False."
+        ),
+    )
     max_greetings: int = Field(
         default=5,
         ge=1,
@@ -84,6 +91,17 @@ class BossGreetingsManager:
 
     async def greet(self, request: BossGreetJobsRequest) -> dict[str, Any]:
         """Execute greetings for up to ``max_greetings`` jobs."""
+
+        # Hard HITL gate: no confirmation, no external write — regardless of
+        # what the prompt says. Mirrors candidate_profile's user_confirmed.
+        if not request.user_confirmed:
+            return {
+                "status": "waiting_user_confirmation",
+                "message": (
+                    "用户尚未确认发送招呼；未发送任何消息。请先向用户展示岗位"
+                    "列表与招呼语，取得明确同意后带 user_confirmed=true 重试。"
+                ),
+            }
 
         # Greeting while rate-limited would fail and deepen the block.
         allowed, remaining_min, _ = get_boss_cooldown().check()
@@ -228,18 +246,20 @@ class BossGreetingsManager:
 
 
 def build_boss_greet_jobs_tool(manager: BossGreetingsManager) -> BaseTool:
-    """Expose batch greeting to the Agent with HITL expectation."""
+    """Expose batch greeting to the Agent with a hard HITL gate."""
 
     async def boss_greet_jobs(
         jobs: list[dict[str, str]],
+        user_confirmed: bool,
         max_greetings: int = 5,
     ) -> dict[str, Any]:
-        """批量向 Boss 招聘方发送打招呼消息，需要用户先确认。
+        """批量向 Boss 招聘方发送打招呼消息，必须先取得用户确认。
 
         使用说明：
         1. 先用 discover_boss_jobs 找到合适的岗位
-        2. 向用户展示岗位列表并询问是否要打招呼
-        3. 用户确认后，调用此工具传入选中的岗位
+        2. 向用户展示岗位列表（公司/职位/招呼语）并询问是否发送
+        3. 用户明确同意后，传 user_confirmed=true 调用此工具
+           （未确认时工具会拒绝发送并返回 waiting_user_confirmation）
         4. 工具会在后台逐一点击「立即沟通」并发送招呼语
         5. 招呼语使用 BOSS_GREETING 模板（支持 $company / $title / $name 变量）
         """
@@ -247,9 +267,11 @@ def build_boss_greet_jobs_tool(manager: BossGreetingsManager) -> BaseTool:
         return await manager.greet(
             BossGreetJobsRequest(
                 jobs=[GreetingTarget(**j) for j in jobs],
+                user_confirmed=user_confirmed,
                 max_greetings=max_greetings,
             )
         )
+
 
     return StructuredTool.from_function(
         coroutine=boss_greet_jobs,
@@ -257,7 +279,9 @@ def build_boss_greet_jobs_tool(manager: BossGreetingsManager) -> BaseTool:
         description=(
             "Send greetings to Boss HR for listed jobs (batch). "
             "Uses an existing logged-in Boss session with Playwright. "
-            "This tool REQUIRES the user to confirm before calling it. "
+            "Hard HITL gate: user_confirmed must be true (set only after the "
+            "user explicitly approved the listed jobs and greeting texts); "
+            "otherwise nothing is sent. "
             "The greeter logs and enforces daily Boss limits. "
             "Call update_job_application_state after to track the result."
         ),

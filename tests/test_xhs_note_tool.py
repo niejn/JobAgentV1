@@ -33,6 +33,15 @@ from jobagent.tools.xhs_author import (
 from jobagent.tools.xhs_note import XhsContentReader, XhsNoteSaver, XhsNoteSaveRequest
 
 
+@pytest.fixture(autouse=True)
+def _stub_url_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep these tests hermetic: no real DNS during URL validation."""
+
+    monkeypatch.setattr(
+        "jobagent.tools.shared_url._RESOLVER", lambda host: ["93.184.216.34"]
+    )
+
+
 class ToolBindableFakeListChatModel(FakeListChatModel):
     def bind_tools(self, tools, **kwargs):
         return self

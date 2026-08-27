@@ -106,7 +106,15 @@ class Match(BaseModel):
     reasoning: list[str] = Field(default_factory=list)
     matched_skills: list[str] = Field(default_factory=list)
     missing_skills: list[str] = Field(default_factory=list)
+    evaluation_failed: bool = Field(
+        default=False,
+        description=(
+            "True when the evaluation itself errored (network, malformed "
+            "model output). score=0.0 here means 'unknown', not 'no match'."
+        ),
+    )
     generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
 
 
 class Application(BaseModel):

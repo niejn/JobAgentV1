@@ -1,7 +1,8 @@
 """Boss job search via CDP — borrows the proven pattern from boss-zhipin-scraper.
 
 Keeps the search tab open in the user's Chrome (no create/close lifecycle that
-Boss flags as automation). Reuses the existing CDP connection from XHS.
+Boss flags as automation). Each backend instance owns its own CDP connection;
+``dispose()`` must run after use to release the driver and websocket.
 """
 
 from __future__ import annotations
@@ -42,7 +43,6 @@ class BossCdpBackend:
         self._crawl_gate = crawl_gate
         self._connection: Any = None
         self._connection_lock = asyncio.Lock()
-        self._page: Any = None
 
     async def _ensure_connection(self) -> tuple[Any, Any, Any]:
         if self._connection is not None:
@@ -94,9 +94,27 @@ class BossCdpBackend:
         return await context.new_page()
 
     async def dispose(self) -> None:
-        """Let the connection go; search tabs stay open in the user's Chrome."""
-        self._page = None
-        self._connection = None
+        """Tear down this backend's CDP connection and Playwright driver.
+
+        Search tabs stay open in the user's Chrome: on a connect_over_cdp()
+        browser, close() only detaches the connection (verified against
+        playwright 1.62.0 — the externally-owned Chrome keeps running).
+        Stopping the driver releases the node process and websocket this
+        backend started; without it every discovery call leaks both.
+        """
+        connection, self._connection = self._connection, None
+        if connection is None:
+            return
+        browser, _, driver = connection
+        try:
+            await browser.close()
+        except Exception:
+            logger.debug("Boss CDP: browser close failed during dispose", exc_info=True)
+        finally:
+            try:
+                await driver.stop()
+            except Exception:
+                logger.debug("Boss CDP: driver stop failed during dispose", exc_info=True)
 
     async def discover(self, request: BossDiscoveryRequest) -> list[Job]:
         # Refuse immediately while rate-limit cooldown is active - do NOT

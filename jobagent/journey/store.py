@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -11,6 +12,26 @@ from pathlib import Path
 from typing import cast
 from uuid import uuid4
 
+
+def _enable_wal(connection: sqlite3.Connection) -> None:
+    """Switch the connection's database to WAL, tolerating init races.
+
+    The journal-mode change needs a brief exclusive lock and the busy
+    handler does not apply to it, so several connections initializing at
+    once can each see SQLITE_BUSY. Retry briefly; if another connection
+    already owns the mode the pragma is a harmless no-op, and if it stays
+    busy we proceed in the current mode rather than crashing the caller.
+    """
+
+    for attempt in range(5):
+        try:
+            row = connection.execute("PRAGMA journal_mode = WAL").fetchone()
+            if row is not None and str(row[0]).lower() == "wal":
+                return
+        except sqlite3.OperationalError:
+            if attempt == 4:
+                return
+            time.sleep(0.05 * (attempt + 1))
 
 class TaskStatus(StrEnum):
     PENDING = "pending"
@@ -81,9 +102,15 @@ class SQLiteJourneyStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(self.path)
         self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA foreign_keys = ON")
-        self._connection.execute("PRAGMA journal_mode = WAL")
+        # busy_timeout MUST precede the WAL switch: changing journal mode
+        # needs a brief exclusive lock, and without a busy timeout a
+        # concurrent connection makes it fail instantly with SQLITE_BUSY.
         self._connection.execute("PRAGMA busy_timeout = 5000")
+        self._connection.execute("PRAGMA foreign_keys = ON")
+        # Concurrent initializers race the WAL switch and the busy handler
+        # does not apply to journal-mode changes; retry briefly and proceed
+        # even if another connection already owns the mode.
+        _enable_wal(self._connection)
         self._migrate()
 
     def close(self) -> None:
@@ -198,48 +225,36 @@ class SQLiteJourneyStore:
         if task.journey_id != journey_id:
             raise ValueError("task and artifact must belong to the same journey")
         now = _now()
-        row = self._connection.execute(
-            """SELECT COALESCE(MAX(version), 0) AS current
-            FROM artifacts WHERE journey_id = ? AND artifact_type = ?""",
-            (journey_id, artifact_type),
-        ).fetchone()
-        version = int(row["current"]) + 1
-        artifact = JourneyArtifact(
-            id=str(uuid4()),
-            journey_id=journey_id,
-            task_run_id=task_run_id,
-            artifact_type=artifact_type,
-            schema_version=schema_version,
-            version=version,
-            status=ArtifactStatus.DRAFT,
-            content_ref=content_ref,
-            content_hash=content_hash,
-            provenance_refs=tuple(provenance_refs),
-            validation_errors=(),
-            created_at=now,
-        )
+        artifact_id = str(uuid4())
+        # Version assignment and insert are ONE statement: the max-version
+        # subquery and the insert are atomic, so concurrent writers cannot
+        # both compute the same version (code review HIGH H3).
         with self._connection:
             self._connection.execute(
                 """INSERT INTO artifacts
                 (id, journey_id, task_run_id, artifact_type, schema_version, version,
                  status, content_ref, content_hash, provenance_refs, validation_errors, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?,
+                        (SELECT COALESCE(MAX(version), 0) + 1 FROM artifacts
+                         WHERE journey_id = ? AND artifact_type = ?),
+                        ?, ?, ?, ?, ?, ?)""",
                 (
-                    artifact.id,
-                    artifact.journey_id,
-                    artifact.task_run_id,
-                    artifact.artifact_type,
-                    artifact.schema_version,
-                    artifact.version,
-                    artifact.status.value,
-                    artifact.content_ref,
-                    artifact.content_hash,
-                    _json(artifact.provenance_refs),
-                    _json(artifact.validation_errors),
+                    artifact_id,
+                    journey_id,
+                    task_run_id,
+                    artifact_type,
+                    schema_version,
+                    journey_id,
+                    artifact_type,
+                    ArtifactStatus.DRAFT.value,
+                    content_ref,
+                    content_hash,
+                    _json(tuple(provenance_refs)),
+                    _json(()),
                     _format_time(now),
                 ),
             )
-        return artifact
+        return self.get_artifact(artifact_id)
 
     def get_artifact(self, artifact_id: str) -> JourneyArtifact:
         row = self._one("SELECT * FROM artifacts WHERE id = ?", (artifact_id,))

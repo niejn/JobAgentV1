@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 
 import httpx
@@ -28,6 +29,10 @@ class TelegramNotifier:
         Returns:
             True if message was sent successfully.
         """
+        # Telegram limit is 4096; HTML parse_mode requires escaping
+        text = html.escape(text)
+        if len(text) > 4096:
+            text = text[:4093] + "…"
         url = f"{self.BASE_URL.format(token=self._token)}/sendMessage"
         payload = {
             "chat_id": self._chat_id,

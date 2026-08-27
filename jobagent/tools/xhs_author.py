@@ -21,6 +21,7 @@ from jobagent.scraper.xhs_backend import (
     XhsAuthenticationError,
     XhsFetchedNote,
     XhsNoteReference,
+    strip_xsec_token,
 )
 
 #: fetch_all 模式的列表上限：游标循环翻到 has_more=false 为止，实际永远
@@ -470,7 +471,7 @@ def _contains_keyword(note: XhsFetchedNote, keyword: str) -> bool:
 def _post_payload(note: XhsFetchedNote) -> dict[str, Any]:
     return {
         "note_id": note.note_id,
-        "url": note.url,
+        "url": strip_xsec_token(note.url),
         "title": note.title,
         "body_preview": note.body[:2_000],
         "tags": list(note.tags),
