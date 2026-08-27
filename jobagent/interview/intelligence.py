@@ -121,10 +121,11 @@ model_answer，不能放在 source_answer。每个问题必须是独立对象，
             max_tokens=8192,
             temperature=0.1,
         )
+        admitted_ids = {item.note_id for item in evidence}
         try:
-            return PreparationPackDraft.model_validate(_json_object(response))
+            draft = PreparationPackDraft.model_validate(_json_object(response))
         except (ValueError, ValidationError, json.JSONDecodeError):
-            return PreparationPackDraft(
+            draft = PreparationPackDraft(
                 questions=tuple(
                     PreparedQuestion(
                         question=question,
@@ -140,6 +141,15 @@ model_answer，不能放在 source_answer。每个问题必须是独立对象，
                     if question is not None
                 ),
             )
+            return draft
+        # Provenance guard: the deliverable may only cite admitted evidence.
+        # LLM-invented note ids are pruned, and questions left with no valid
+        # citation keep their text but lose the fabricated attribution.
+        for question in draft.questions:
+            question.source_note_ids = tuple(
+                note_id for note_id in question.source_note_ids if note_id in admitted_ids
+            )
+        return draft
 
 
 def _json_object(payload: str) -> dict[str, object]:

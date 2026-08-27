@@ -140,6 +140,7 @@ def load_snapshot_bundle(manifest_path: Path) -> SnapshotBundle:
         note_id=str(payload["note_id"]),
         title=str(payload["title"]),
         body=str(payload["body"]),
+        published_at=str(payload["published_at"]) if payload.get("published_at") else None,
         image_hashes=tuple(image.content_hash for image in images),
     )
     if actual_snapshot_hash != expected_snapshot_hash:
@@ -221,6 +222,7 @@ def _snapshot_hash(downloaded: DownloadedXhsNote, images: list[SourceImage]) -> 
         note_id=downloaded.note.note_id,
         title=downloaded.note.title,
         body=downloaded.note.body,
+        published_at=downloaded.note.published_at,
         image_hashes=tuple(image.content_hash for image in images),
     )
 
@@ -230,6 +232,7 @@ def _snapshot_content_hash(
     note_id: str,
     title: str,
     body: str,
+    published_at: str | None,
     image_hashes: tuple[str, ...],
 ) -> str:
     digest = hashlib.sha256()
@@ -237,6 +240,9 @@ def _snapshot_content_hash(
         note_id,
         title,
         body,
+        # The stale-note gate keys on published_at, so it must be tamper
+        # evident: rewriting it in a cached manifest must break the hash.
+        published_at or "",
         *image_hashes,
     ):
         digest.update(value.encode("utf-8"))
