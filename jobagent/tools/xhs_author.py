@@ -422,7 +422,12 @@ def build_xhs_author_posts_tool(browser: XhsAuthorPostsBrowser) -> BaseTool:
         batch_limit: int = 50,
         resume: bool = False,
     ) -> dict[str, Any]:
-        """List an author's public posts so the Agent can select valuable ones."""
+        """List an author's public posts so the Agent can select valuable ones.
+
+        Tracking note: rebuild the profile URL from a tracked author_id any
+        time - the share token is unused and per-note tokens refresh with
+        every listing. Only cookie expiry needs user action (login command).
+        """
 
         return await browser.browse(
             XhsAuthorPostsRequest(
@@ -439,11 +444,18 @@ def build_xhs_author_posts_tool(browser: XhsAuthorPostsBrowser) -> BaseTool:
         coroutine=browse_xhs_author_posts,
         name="browse_xhs_author_posts",
         description=(
-            "Browse posts from a user-supplied Xiaohongshu author profile URL. "
+            "Browse posts from a Xiaohongshu author profile URL. "
             "Bounded mode (default) returns up to `limit` posts in one call; "
             "fetch_all=true lists every post and fetches details in batches of "
             "batch_limit, persisting a checkpoint so interrupted runs resume "
             "with fetch_all=true, resume=true. "
+            "Token model: the profile share token in the URL is NOT used - only "
+            "the stable author_id path segment matters, so you can rebuild the "
+            "profile URL from a tracked author_id at any time (e.g. to check an "
+            "author for updates) without asking the user for a fresh share "
+            "link; per-note tokens come back fresh from every listing response. "
+            "The only credential involved is the XHS login cookie (re-run "
+            "jobagent login --platform xhs if it expires). "
             "Review titles and content, then call save_shared_url only for selected note URLs."
         ),
         args_schema=XhsAuthorPostsRequest,

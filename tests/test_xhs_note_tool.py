@@ -851,3 +851,39 @@ async def test_bounded_browse_writes_no_checkpoint(tmp_path) -> None:
     assert "mode" not in result
     with XhsAuthorBrowseCheckpoints(tmp_path / "state.db") as store:
         assert store.load("author-1") is None
+
+
+# ---- 作者追踪自服务：author_id 即全部所需（分享令牌不参与） ---------------------
+
+
+def test_author_profile_url_validation_accepts_bare_author_id() -> None:
+    """无任何查询参数的纯 author_id URL 合法：追踪刷新自服务的事实锚。
+
+    主页分享令牌（xsec_token）从不参与请求——后端对 get_user_note_info
+    传空 token，工具只解析路径里的稳定 author_id。因此从追踪档案重建
+    URL 不需要用户重新分享；对应提示词段落教导 Agent 不要索要链接。
+    """
+
+    bare = "https://www.xiaohongshu.com/user/profile/6402b2c4000000001002976c"
+    request = XhsAuthorPostsRequest(profile_url=bare)
+    assert request.author_id == "6402b2c4000000001002976c"
+
+    # 带过期分享令牌的旧链接同样只取 author_id：令牌被忽略而非被校验
+    stale = bare + "?xsec_token=long-expired-token&xsec_source=app_share"
+    request_stale = XhsAuthorPostsRequest(profile_url=stale)
+    assert request_stale.author_id == request.author_id
+
+
+def test_author_prompt_paragraph_teaches_self_service_tracking() -> None:
+    """系统提示词的作者浏览段落包含自服务追踪与凭证边界指引。"""
+
+    from jobagent.prompts.main_agent import TOOL_POLICY_PARAGRAPHS
+
+    paragraph = next(
+        text
+        for text, gate in TOOL_POLICY_PARAGRAPHS
+        if "browse_xhs_author_posts" in text
+    )
+    assert "分享令牌不参与请求" in paragraph
+    assert "不要向用户索要新的分享链接" in paragraph
+    assert "jobagent login --platform xhs" in paragraph
