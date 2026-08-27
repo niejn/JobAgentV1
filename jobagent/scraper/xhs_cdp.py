@@ -130,8 +130,10 @@ class PlaywrightCdpSession:
         """Disconnect the CDP connection without closing the user's Chrome."""
 
         try:
-            # For a connect_over_cdp() browser this only disconnects; it does
-            # not terminate the externally-owned Chrome process.
+            # For a connect_over_cdp() browser, close() detaches this
+            # connection without terminating the externally-owned Chrome
+            # process — verified empirically against playwright 1.62.0
+            # (probe: Chrome pid alive, CDP port still open after close).
             await self._browser.close()
         finally:
             if self._driver is not None:

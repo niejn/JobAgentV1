@@ -352,6 +352,7 @@ async def test_agent_streams_safe_tool_lifecycle_without_arguments(tmp_path) -> 
     settings = Settings(
         _env_file=None,
         jobagent_checkpoint_db=tmp_path / "checkpoints.db",
+        jobagent_debug_trace=False,
     )
     agent = build_job_agent(
         settings,

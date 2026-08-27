@@ -275,6 +275,16 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def validate_boss_apply_delay_order(self) -> "Settings":
+        """Min delay must not exceed max delay."""
+        if self.boss_apply_delay_min > self.boss_apply_delay_max:
+            raise ValueError(
+                "BOSS_APPLY_DELAY_MIN must be <= BOSS_APPLY_DELAY_MAX"
+            )
+        return self
+
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

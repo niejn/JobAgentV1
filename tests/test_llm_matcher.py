@@ -74,9 +74,77 @@ async def test_job_description_is_serialized_as_untrusted_data() -> None:
 
 @pytest.mark.asyncio
 async def test_invalid_response_returns_safe_zero_score() -> None:
+    class AlwaysBad(FakeClient):
+        calls = 0
+
+        async def chat(self, user_message, *, system=None, max_tokens=4096, temperature=0.0):
+            AlwaysBad.calls += 1
+            return '{"score": "not-a-number"}'
+
+    matcher = LLMMatcher(client=AlwaysBad(""))
+
+    result = await matcher.match(make_job(), Profile(name="Julien"))
+
+    assert result.score == 0.0
+    assert result.evaluation_failed is True, "failure must be distinguishable from no-match"
+    assert "failed" in result.reasoning[0].lower()
+    assert AlwaysBad.calls == 2, "one self-healing retry before giving up"
+
+
+@pytest.mark.asyncio
+async def test_retry_recovers_from_one_malformed_answer() -> None:
+    class Flaky(FakeClient):
+        def __init__(self) -> None:
+            super().__init__("")
+            self.calls = 0
+
+        async def chat(self, user_message, *, system=None, max_tokens=4096, temperature=0.0):
+            self.calls += 1
+            if self.calls == 1:
+                return "Sure! Here is the result:\n```\ngarbage not json\n```"
+            return '{"score": 0.9, "reasoning": ["ok"], "matched_skills": [], "missing_skills": []}'
+
+    client = Flaky()
+    matcher = LLMMatcher(client=client)
+
+    result = await matcher.match(make_job(), Profile(name="Julien"))
+
+    assert result.score == 0.9
+    assert result.evaluation_failed is False
+    assert client.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_json_extraction_handles_surrounding_prose() -> None:
+    client = FakeClient(
+        'Here is my evaluation:\n```json\n{"score": 0.7, "reasoning": ["ok"], '
+        '"matched_skills": [], "missing_skills": []}\n```\nHope this helps!'
+    )
+    matcher = LLMMatcher(client=client)
+
+    result = await matcher.match(make_job(), Profile(name="Julien"))
+
+    assert result.score == 0.7
+
+
+@pytest.mark.asyncio
+async def test_json_extraction_handles_bare_object_with_prose() -> None:
+    client = FakeClient(
+        'The result is {"score": 0.6, "reasoning": ["ok"], '
+        '"matched_skills": [], "missing_skills": []} as requested.'
+    )
+    matcher = LLMMatcher(client=client)
+
+    result = await matcher.match(make_job(), Profile(name="Julien"))
+
+    assert result.score == 0.6
+
+
+@pytest.mark.asyncio
+async def test_invalid_response_returns_safe_zero_score_legacy() -> None:
     matcher = LLMMatcher(client=FakeClient('{"score": "not-a-number"}'))
 
     result = await matcher.match(make_job(), Profile(name="Julien"))
 
     assert result.score == 0.0
-    assert "failed" in result.reasoning[0].lower()
+    assert result.evaluation_failed is True

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -79,6 +80,19 @@ class LocalOpportunityArtifacts:
     ) -> None:
         self._root = root.expanduser().resolve()
         self._clock = clock or (lambda: datetime.now().astimezone())
+        # Manifest read-modify-write must be serialized: two concurrent
+        # save_analysis calls for the same opportunity would both compute
+        # the same version and clobber each other's manifest.
+        self._locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def _lock_for(self, opportunity_id: str) -> threading.Lock:
+        with self._locks_guard:
+            lock = self._locks.get(opportunity_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._locks[opportunity_id] = lock
+            return lock
 
     def save_analysis(
         self,
@@ -99,6 +113,30 @@ class LocalOpportunityArtifacts:
         if not company or not role or not job_description or not analysis_report:
             raise ValueError("company, role, JD, and analysis report are required")
         opportunity_id = _opportunity_id(company, role, job_description)
+        with self._lock_for(opportunity_id):
+            return self._save_analysis_locked(
+                opportunity_id=opportunity_id,
+                company=company,
+                role=role,
+                job_description=job_description,
+                analysis_report=analysis_report,
+                fit=fit,
+                application_state=application_state,
+            )
+
+    def _save_analysis_locked(
+        self,
+        *,
+        opportunity_id: str,
+        company: str,
+        role: str,
+        job_description: str,
+        analysis_report: str,
+        fit: FitDecision,
+        application_state: ApplicationState,
+    ) -> SavedOpportunityAnalysis:
+        """Manifest read-modify-write; caller must hold the opportunity lock."""
+
         directory = self._root / opportunity_id
         manifest_path = directory / "manifest.json"
         jd_path = directory / "jd.md"
