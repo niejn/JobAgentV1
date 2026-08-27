@@ -41,6 +41,27 @@ class Settings(BaseSettings):
         description="LLM backend; first release supports openai-compatible only.",
     )
     jobagent_llm_model: str = Field(default="gpt-4o-mini")
+    jobagent_llm_fallback_model: str = Field(
+        default="",
+        description=(
+            "Backup model name (e.g. deepseek-chat) used when the primary "
+            "fails with provider-level errors (429/403/401/5xx/connection). "
+            "Empty disables fallback."
+        ),
+    )
+    jobagent_llm_fallback_base_url: str = Field(
+        default="",
+        description="Backup provider base URL; empty reuses the primary base_url.",
+    )
+    jobagent_llm_fallback_api_key: str | None = Field(
+        default=None,
+        description="Backup provider API key; empty reuses the primary key.",
+    )
+    jobagent_llm_fallback_max_tokens: int = Field(
+        default=8_192,
+        ge=1,
+        description="Backup model max_completion_tokens (defaults fit deepseek).",
+    )
     jobagent_llm_context_window: int = Field(default=128_000, ge=1)
     jobagent_llm_max_tokens: int = Field(default=4_096, ge=1)
     jobagent_llm_timeout: int = Field(default=180, ge=10, le=600)
