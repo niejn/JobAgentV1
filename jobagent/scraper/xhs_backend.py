@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Protocol, Self, cast
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from jobagent.auth.cookie_manager import get_cookies
 from jobagent.config import Settings
@@ -35,6 +35,25 @@ logger = logging.getLogger(__name__)
 _XHS_BASE = "https://www.xiaohongshu.com"
 _REQUIRED_COOKIE_NAMES = frozenset({"a1", "web_session"})
 _IMAGE_INDEX_RE = re.compile(r"image_(\d+)", re.IGNORECASE)
+
+
+def strip_xsec_token(url: str) -> str:
+    """Remove the ephemeral xsec_token query param for model-facing output.
+
+    architecture.md: ephemeral source tokens are never returned in Tool
+    results. Internal fetch paths keep the full URL; only projections to
+    the agent/user go through this.
+    """
+
+    parts = urlsplit(url)
+    if "xsec_token" not in (parts.query or ""):
+        return url
+    kept = "&".join(
+        piece
+        for piece in parts.query.split("&")
+        if piece and not piece.startswith("xsec_token=")
+    )
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, kept, parts.fragment))
 
 
 class SpiderXhsError(RuntimeError):
