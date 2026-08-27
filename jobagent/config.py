@@ -87,7 +87,6 @@ class Settings(BaseSettings):
     boss_apply_delay_max: float = Field(default=8.0, ge=1.0)
     boss_daily_limit: int = Field(default=100, ge=1, le=150)
     boss_skip_inactive_days: int = Field(default=7, ge=1)
-    boss_api_rate_period_seconds: float = Field(default=1.0, gt=0)
     boss_risk_cooldown_seconds: int = Field(default=900, ge=60, le=86_400)
     boss_max_searches_per_session: int = Field(
         default=10,
@@ -160,16 +159,24 @@ class Settings(BaseSettings):
         ge=1,
         description="Per-account Boss bucket: page loads must not exceed this rate.",
     )
-    boss_crawl_rate_period_seconds: float = Field(default=1.0, gt=0)
+    boss_crawl_rate_period_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "Boss bucket period. 1 page load per 30s mirrors a human "
+            "scanning a result list; 1/s got three back-to-back searches "
+            "anti-bot flagged (2026-08-27)."
+        ),
+    )
     boss_crawl_jitter_min_seconds: float = Field(
-        default=1.0,
+        default=8.0,
         ge=0.0,
-        description="Min random pause after each Boss page load permit.",
+        description="Min random pause after each Boss page load permit (reading time).",
     )
     boss_crawl_jitter_max_seconds: float = Field(
-        default=4.0,
+        default=25.0,
         ge=0.0,
-        description="Max random pause after each Boss page load permit.",
+        description="Max random pause after each Boss page load permit (reading time).",
     )
     xhs_scrape_delay_min: float = Field(
         default=45.0,
