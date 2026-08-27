@@ -24,7 +24,10 @@ class DiscordNotifier:
         Returns:
             True if message was sent successfully.
         """
-        payload = {"content": text[:2000]}  # Discord message limit
+        # Discord limit is 2000; truncate with ellipsis so receiver knows
+        if len(text) > 2000:
+            text = text[:1997] + "…"
+        payload = {"content": text}
 
         try:
             async with httpx.AsyncClient() as client:

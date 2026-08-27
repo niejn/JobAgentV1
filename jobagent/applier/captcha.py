@@ -8,14 +8,15 @@ from playwright.async_api import Page
 
 logger = logging.getLogger(__name__)
 
-# Known captcha selectors on Boss直聘
+# Known captcha selectors on Boss直聘 (narrow to concrete components)
 _CAPTCHA_SELECTORS = [
     "#captcha",
     ".slide-verify",
     ".geetest_panel",
     ".captcha-wrapper",
-    "[class*='verify']",
-    "[class*='captcha']",
+    ".nc-container",
+    ".nc-lang-cnt",
+    ".gt_slider_knob",
     "div.dialog-container:has(canvas)",  # slider captcha dialog
 ]
 
