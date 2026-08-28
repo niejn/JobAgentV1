@@ -599,3 +599,30 @@ def test_default_agent_registers_safe_user_document_reader(tmp_path) -> None:
         "extract_shared_url",
         "browse_xhs_author_posts",
     } <= tool_names
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_works_before_any_chat(tmp_path) -> None:
+    """Regression: ``jobagent chat --sessions`` runs list_sessions before any
+    reply has initialized the deep agent, so ``_connection`` is None and the
+    CLI used to report "no sessions" while the db held 5 (live bug: 9 stored
+    sessions, CLI showed 0). The query must open the db on demand."""
+    settings = Settings(
+        _env_file=None,
+        jobagent_checkpoint_db=tmp_path / "checkpoints.db",
+    )
+    seeding = build_job_agent(settings, model=HistoryAwareFakeModel(), tools=[])
+    try:
+        await seeding.reply("第一条", session_id="session-seeded")
+    finally:
+        await seeding.close()
+
+    fresh = build_job_agent(settings, model=HistoryAwareFakeModel(), tools=[])
+    try:
+        assert fresh._connection is None  # precondition: never chatted
+        sessions = await fresh.list_sessions()
+    finally:
+        await fresh.close()
+
+    assert [s.session_id for s in sessions] == ["session-seeded"]
+    assert sessions[0].message_count == 1

@@ -101,7 +101,18 @@ def test_max_tokens_cannot_exceed_context_window() -> None:
         resolve_llm_config(settings)
 
 
-def test_agent_model_is_native_chat_model_with_ark_compatible_max_tokens() -> None:
+def test_agent_model_is_native_chat_model_with_ark_compatible_max_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Asserts the fallback-off shape; strip shell-exported fallback vars
+    # (live leak: polluted shell flipped this to FallbackChatModel).
+    for var in (
+        "JOBAGENT_LLM_FALLBACK_MODEL",
+        "JOBAGENT_LLM_FALLBACK_BASE_URL",
+        "JOBAGENT_LLM_FALLBACK_API_KEY",
+        "JOBAGENT_LLM_FALLBACK_MAX_TOKENS",
+    ):
+        monkeypatch.delenv(var, raising=False)
     settings = Settings(
         _env_file=None,
         openai_api_key="test-key",

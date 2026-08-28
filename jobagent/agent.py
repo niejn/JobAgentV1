@@ -549,11 +549,27 @@ class JobAgent:
         return ConversationHistory(summary=None, recent=recent, compacted=False)
 
     async def list_sessions(self, *, limit: int = 50) -> tuple[ConversationSession, ...]:
-        """List durable sessions newest-first by decoding UUID v6 checkpoint_id."""
+        """List durable sessions newest-first by decoding UUID v6 checkpoint_id.
 
-        connection = self._connection
-        if connection is None:
-            return ()
+        Self-contained: ``jobagent chat --sessions`` runs before any chat has
+        initialized the agent, so open the checkpoint db on demand instead of
+        silently reporting "no sessions" (bug: 5 stored sessions, CLI showed 0).
+        """
+
+        if self._connection is None:
+            path = self._checkpoint_db.expanduser().resolve()
+            if not path.is_file():
+                return ()
+            standalone = await aiosqlite.connect(str(path))
+            try:
+                return await self._list_sessions_on(standalone, limit)
+            finally:
+                await standalone.close()
+        return await self._list_sessions_on(self._connection, limit)
+
+    async def _list_sessions_on(
+        self, connection: aiosqlite.Connection, limit: int
+    ) -> tuple[ConversationSession, ...]:
         cursor = await connection.execute(
             """
             SELECT thread_id,

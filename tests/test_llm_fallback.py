@@ -188,6 +188,20 @@ def test_fallback_exception_surface_covers_user_incidents() -> None:
 # ---- 配置接线 ------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _no_fallback_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fallback-off tests must not be flipped by a developer shell that
+    exports JOBAGENT_LLM_FALLBACK_* (live leak seen: shell env polluted the
+    suite, 3 tests failed only inside that shell)."""
+    for var in (
+        "JOBAGENT_LLM_FALLBACK_MODEL",
+        "JOBAGENT_LLM_FALLBACK_BASE_URL",
+        "JOBAGENT_LLM_FALLBACK_API_KEY",
+        "JOBAGENT_LLM_FALLBACK_MAX_TOKENS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
 def test_build_agent_model_without_fallback_stays_native(tmp_path) -> None:
     from langchain_openai import ChatOpenAI
 
