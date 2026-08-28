@@ -825,6 +825,39 @@ async def _login(platforms: list[str], timeout: int, check_only: bool) -> None:
             click.echo(click.style(f"[{plat}] ❌ Login failed: {e}", fg="red"))
 
 
+@main.command("boss-circuit")
+@click.argument("action", type=click.Choice(["status", "reset"]), default="status")
+def boss_circuit_command(action: str) -> None:
+    """Show or reset the Boss circuit breaker (anti-bot cooldown)."""
+
+    from datetime import datetime
+
+    from jobagent.applier.boss_circuit import BossCircuit, boss_circuit_path
+    from jobagent.config import get_settings
+
+    circuit = BossCircuit(boss_circuit_path(get_settings().jobagent_state_db))
+    if action == "reset":
+        circuit._save({})
+        click.echo(click.style("Boss circuit reset.", fg="green"))
+        return
+    refusal = circuit.check()
+    if refusal is None:
+        state = circuit._load()
+        failures = state.get("failures", 0)
+        click.echo(f"Boss circuit: closed ({failures} consecutive failure(s)).")
+    else:
+        click.echo(
+            click.style(
+                f"Boss circuit: OPEN - {refusal['message']}",
+                fg="yellow",
+            )
+        )
+        until = datetime.fromisoformat(refusal["retry_after"])
+        remaining = until - datetime.now().astimezone()
+        mins = max(0, int(remaining.total_seconds() // 60))
+        click.echo(f"  resets automatically in ~{mins} min (or: jobagent boss-circuit reset)")
+
+
 async def _scrape(platform: str, query: str, location: str | None, limit: int) -> None:
     """Internal async scrape workflow."""
 
