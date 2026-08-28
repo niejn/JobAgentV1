@@ -65,11 +65,18 @@ def build_boss_resume_upload_tool(
             }
         # Upload runs in its own CDP session; never touches the pages the
         # user is interacting with (warlock blanks pages under debug attach).
+        from jobagent.applier.boss_circuit import BossCircuit, boss_circuit_path
+
+        circuit = BossCircuit(boss_circuit_path(settings.jobagent_state_db))
+        if (refusal := circuit.check()) is not None:
+            return refusal
         from jobagent.applier.boss_resume import BossResumeUploader
 
         uploader = BossResumeUploader(settings, crawl_gate=crawl_gate)
         async with uploader:
-            return await uploader.upload_pdf(pdf_path, allow_delete=allow_delete)
+            result = await uploader.upload_pdf(pdf_path, allow_delete=allow_delete)
+        circuit.record(result)
+        return result
 
     return StructuredTool.from_function(
         coroutine=upload_boss_resume_pdf,

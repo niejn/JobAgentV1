@@ -36,12 +36,19 @@ def build_boss_chat_list_tool(settings: Settings) -> StructuredTool:
         label_id: int | None = None,
         limit: int = 50,
     ) -> dict[str, Any]:
+        from jobagent.applier.boss_circuit import BossCircuit, boss_circuit_path
+
+        circuit = BossCircuit(boss_circuit_path(settings.jobagent_state_db))
+        if (refusal := circuit.check()) is not None:
+            return refusal
         from jobagent.applier.boss_chat import BossChatReader
 
         async with BossChatReader(settings) as reader:
-            return await reader.list_greetings(
+            result = await reader.list_greetings(
                 filter_name=filter_name, label_id=label_id, limit=limit
             )
+        circuit.record(result)
+        return result
 
     return StructuredTool.from_function(
         coroutine=_run,
@@ -74,10 +81,17 @@ def build_boss_chat_history_tool(settings: Settings) -> StructuredTool:
     """Expose BossChatReader.read_conversation as an agent tool."""
 
     async def _run(hr_name: str, page: int = 1) -> dict[str, Any]:
+        from jobagent.applier.boss_circuit import BossCircuit, boss_circuit_path
+
+        circuit = BossCircuit(boss_circuit_path(settings.jobagent_state_db))
+        if (refusal := circuit.check()) is not None:
+            return refusal
         from jobagent.applier.boss_chat import BossChatReader
 
         async with BossChatReader(settings) as reader:
-            return await reader.read_conversation(hr_name=hr_name, page=page)
+            result = await reader.read_conversation(hr_name=hr_name, page=page)
+        circuit.record(result)
+        return result
 
     return StructuredTool.from_function(
         coroutine=_run,

@@ -35,10 +35,17 @@ def build_boss_chat_reply_tool(settings: Settings) -> StructuredTool:
                 "message": message,
                 "hint": "向用户展示完整文案，确认后携带 user_confirmed=true 重试。",
             }
+        from jobagent.applier.boss_circuit import BossCircuit, boss_circuit_path
+
+        circuit = BossCircuit(boss_circuit_path(settings.jobagent_state_db))
+        if (refusal := circuit.check()) is not None:
+            return refusal
         from jobagent.applier.boss_chat_send import BossChatSender
 
         async with BossChatSender(settings) as sender:
-            return await sender.send_reply(hr_name=hr_name, message=message)
+            result = await sender.send_reply(hr_name=hr_name, message=message)
+        circuit.record(result)
+        return result
 
     return StructuredTool.from_function(
         coroutine=_run,
