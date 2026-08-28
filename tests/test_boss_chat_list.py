@@ -192,9 +192,10 @@ def _reader_with_pool(pool: MagicMock) -> BossChatReader:
 
 
 @pytest.mark.asyncio
-async def test_read_conversation_chains_list_then_history() -> None:
-    """read_conversation: finds the HR in the list (needs securityId),
-    then calls historyMsg with the live-verified query credentials."""
+async def test_read_conversation_single_evaluate_chain() -> None:
+    """read_conversation runs list -> creds -> history as ONE page
+    evaluate (warlock tolerates only ~2-3 automated fetch rounds per page
+    load; the multi-stage Python flow burned the budget)."""
     import jobagent.applier.boss_chat as chat_mod
 
     chat_mod._parked_page = None
@@ -202,41 +203,16 @@ async def test_read_conversation_chains_list_then_history() -> None:
     page.url = "https://www.zhipin.com/web/geek/chat"
     page.is_closed = lambda: False
     page.goto = AsyncMock()
-    history_payloads: list[dict] = []
+    evaluate_payloads: list[dict] = []
 
     async def evaluate(script: str, payload: dict | None = None):
         if payload is None:
             return True
-        if "getGeekFriendList" in script:
-            # stage 2: securityId comes from the POST, not the label GET
+        if "geekFilterByLabel" in script and "historyMsg" in script:
+            # the merged full-chain script
+            evaluate_payloads.append(payload)
             return {
-                "code": 0,
-                "creds": [
-                    {
-                        "friendId": 20001,
-                        "friendSource": 1,
-                        "encryptBossId": "enc-boss-1",
-                        "securityId": "sec-token-1",
-                    }
-                ],
-            }
-        if "geekFilterByLabel" in script:
-            return {
-                "code": 0,
-                "friends": [
-                    {
-                        "friendId": 20001,
-                        "friendSource": 1,
-                        "name": "张HR",
-                        # securityId absent: forces the two-stage fetch
-                        "lastMessage": None,
-                    }
-                ],
-            }
-        if "historyMsg" in script:
-            history_payloads.append(payload)
-            return {
-                "code": 0,
+                "step": "done",
                 "messages": [
                     {"fromId": 20001, "toId": 1, "time": 1787900100,
                      "type": 1, "text": "你好，我们团队在招后端"},
@@ -257,13 +233,12 @@ async def test_read_conversation_chains_list_then_history() -> None:
     assert result["status"] == "ok"
     assert result["count"] == 2
     assert result["messages"][0]["text"].startswith("你好")
-    assert history_payloads == [
-        {"bossId": "enc-boss-1", "securityId": "sec-token-1", "page": 1}
-    ]
+    # exactly ONE automated fetch round, with the merged script
+    assert evaluate_payloads == [{"hrName": "张HR", "page": 1}]
 
 
 @pytest.mark.asyncio
-async def test_read_conversation_without_security_id_fails_loudly() -> None:
+async def test_read_conversation_step_failures_are_typed() -> None:
     import jobagent.applier.boss_chat as chat_mod
 
     chat_mod._parked_page = None
@@ -272,18 +247,18 @@ async def test_read_conversation_without_security_id_fails_loudly() -> None:
     page.is_closed = lambda: False
     page.goto = AsyncMock()
 
+    outcomes = iter(
+        [
+            {"step": "match", "code": 0, "message": "conversation not found"},
+            {"step": "creds", "code": 0, "message": "no securityId returned"},
+            {"step": "history", "code": 121, "message": "请求不合法"},
+        ]
+    )
+
     async def evaluate(script: str, payload: dict | None = None):
         if payload is None:
             return True
-        if "geekFilterByLabel" in script:
-            return {
-                "code": 0,
-                "friends": [{"friendId": 91001, "friendSource": 0, "name": "旧会话",
-                             "securityId": "", "lastMessage": None}],
-            }
-        if "getGeekFriendList" in script:
-            return {"code": 0, "creds": []}  # stage 2 finds nothing
-        return True
+        return next(outcomes)
 
     page.evaluate = evaluate
     pool = MagicMock()
@@ -291,7 +266,13 @@ async def test_read_conversation_without_security_id_fails_loudly() -> None:
     pool.detach = AsyncMock()
     reader = _reader_with_pool(pool)
 
-    result = await reader.read_conversation(hr_name="旧会话")
+    r1 = await reader.read_conversation(hr_name="无此人")
+    r2 = await reader.read_conversation(hr_name="张HR")
+    r3 = await reader.read_conversation(hr_name="张HR")
 
-    assert result["status"] == "failed"
-    assert result["error_type"] == "security_id_unavailable"
+    assert (r1["error_type"], r2["error_type"], r3["error_type"]) == (
+        "conversation_not_found",
+        "security_id_unavailable",
+        "api_rejected",
+    )
+    assert r3["api_step"] == "history"

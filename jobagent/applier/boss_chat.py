@@ -100,7 +100,11 @@ async (payload) => {
 """
 
 
-_FETCH_FRIEND_CREDS_JS = """
+# Full conversation read in ONE evaluate: list -> match -> creds ->
+# history, all page-internal fetches with a single CDP round-trip.
+# (Live finding: warlock tolerates only ~2-3 automated fetch rounds per
+# page load; the previous 3-stage Python flow burned them all at once.)
+_FETCH_CONVERSATION_JS = """
 async (payload) => {
   const pageToken = ((window._PAGE || {}).token || "").split("|")[0];
   const base = {
@@ -110,76 +114,69 @@ async (payload) => {
       + Date.now().toString(36),
   };
   if (pageToken) base.token = pageToken;
-  // Live-verified (chat-core fetchFriendList): friendIds/dzFriendIds are
-  // comma-joined id lists split by friendSource (0=boss, 1=dz).
-  const body = {};
-  if (payload.bossIds) body.friendIds = payload.bossIds;
-  if (payload.dzIds) body.dzFriendIds = payload.dzIds;
-  const res = await fetch(
-    "/wapi/zprelation/friend/getGeekFriendList.json?_=" + Date.now(),
-    {method: "POST", credentials: "include",
-     headers: base, body: JSON.stringify(body)},
-  ).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
-  if (res.code !== 0) return {code: res.code, message: res.message};
-  const list = (res.zpData && res.zpData.result) || [];
-  return {
-    code: 0,
-    creds: list.map((f) => ({
-      friendId: f.friendId || f.uid,
-      friendSource: f.friendSource,
-      encryptBossId: f.encryptBossId || "",
-      securityId: f.securityId || "",
-    })).filter((f) => f.securityId),
-  };
-}
-"""
+  const jq = (p) => "&_=" + Date.now();
 
-_FETCH_HISTORY_JS = """
-async (payload) => {
-  const pageToken = ((window._PAGE || {}).token || "").split("|")[0];
-  const base = {
-    "X-Requested-With": "XMLHttpRequest",
-    "Content-Type": "application/json;charset=UTF-8",
-    "traceId": "F-" + Math.random().toString(36).slice(2, 8)
-      + Date.now().toString(36),
-  };
-  if (pageToken) base.token = pageToken;
-  // Live-verified query shape (net capture 2026-08-28):
-  //   historyMsg?bossId=<encryptBossId>&maxMsgId=0&c=20&page=1&src=0
-  //   &securityId=<per-friend token from the friendList item>
-  const qs = "bossId=" + encodeURIComponent(payload.bossId)
-    + "&maxMsgId=0&c=20&page=" + payload.page + "&src=0"
-    + "&securityId=" + encodeURIComponent(payload.securityId)
-    + "&_=" + Date.now();
-  const res = await fetch(
-    "/wapi/zpchat/geek/historyMsg?" + qs,
+  // 1) label list -> find the friend by name
+  const list = await fetch(
+    "/wapi/zprelation/friend/geekFilterByLabel?labelId=0" + jq(),
     {method: "GET", credentials: "include", headers: base},
   ).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
-  if (res.code !== 0) return {
-    code: res.code, message: res.message,
-    stokenPresent: document.cookie.indexOf("__zp_stoken__") !== -1,
-  };
-  const msgs = (res.zpData && res.zpData.messages) || [];
-  // Message shape is version-dependent; extract loosely and keep the raw
-  // body for fields we cannot name yet.
+  if (list.code !== 0) return {step: "list", code: list.code, message: list.message};
+  const friends = ((list.zpData || {}).friendList) || [];
+  const target = friends.find(
+    (f) => f.name === payload.hrName && Number(f.friendId) > 1000);
+  if (!target) return {step: "match", code: 0, message: "conversation not found"};
+
+  // 2) credentials (securityId rides in getGeekFriendList's result)
+  let securityId = target.securityId || "";
+  let bossId = target.encryptBossId || target.encryptFriendId || "";
+  if (!securityId) {
+    const body = String(target.friendSource) === "1"
+      ? {dzFriendIds: String(target.friendId)}
+      : {friendIds: String(target.friendId)};
+    const creds = await fetch(
+      "/wapi/zprelation/friend/getGeekFriendList.json" + jq(),
+      {method: "POST", credentials: "include", headers: base,
+       body: JSON.stringify(body)},
+    ).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
+    if (creds.code !== 0) {
+      return {step: "creds", code: creds.code, message: creds.message};
+    }
+    const full = ((creds.zpData || {}).result || []).find(
+      (f) => String(f.friendId || f.uid) === String(target.friendId));
+    if (!full || !full.securityId) {
+      return {step: "creds", code: 0, message: "no securityId returned"};
+    }
+    securityId = full.securityId;
+    bossId = full.encryptBossId || bossId;
+  }
+  if (!bossId) return {step: "creds", code: 0, message: "no encryptBossId"};
+
+  // 3) history
+  const hist = await fetch(
+    "/wapi/zpchat/geek/historyMsg?bossId=" + encodeURIComponent(bossId)
+      + "&maxMsgId=0&c=20&page=" + payload.page + "&src=0"
+      + "&securityId=" + encodeURIComponent(securityId) + jq(),
+    {method: "GET", credentials: "include", headers: base},
+  ).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
+  if (hist.code !== 0) return {step: "history", code: hist.code, message: hist.message};
+  const msgs = ((hist.zpData || {}).messages) || [];
   return {
-    code: 0,
+    step: "done",
     messages: msgs.map((m) => {
-      const body = m.body || {};
+      const b = m.body || {};
       return {
         fromId: m.fromId || (m.from && m.from.uid) || 0,
         toId: m.toId || (m.to && m.to.uid) || 0,
         time: m.time || m.createTime || 0,
         type: m.type != null ? m.type : m.messageType,
-        text: String(
-          body.text || m.text || body.content || m.content || "",
-        ).slice(0, 500),
+        text: String(b.text || m.text || b.content || m.content || "")
+          .slice(0, 500),
       };
     }),
   };
 }
 """
-
 
 class BossChatReader:
     """List Boss chat conversations (who greeted us) - read-only."""
@@ -254,47 +251,15 @@ class BossChatReader:
     async def read_conversation(
         self, *, hr_name: str, page: int = 1
     ) -> dict[str, Any]:
-        """Read the chat history with one HR (found by name via the list)."""
+        """Read the chat history with one HR in a SINGLE page evaluate.
+
+        Three page-internal fetches (label list -> credentials -> history)
+        with one CDP round-trip: warlock tolerates only ~2-3 automated
+        fetch rounds per page load, so the previous multi-stage Python
+        flow burned the budget and the page died mid-chain.
+        """
 
         assert self._tab_pool is not None
-        listing = await self.list_greetings(filter_name="全部")
-        if listing.get("status") != "ok":
-            return listing
-        match = next(
-            (f for f in listing["greetings"] if f.get("name") == hr_name), None
-        )
-        if match is None:
-            return {
-                "status": "failed",
-                "error_type": "conversation_not_found",
-                "message": f"会话列表中没有找到「{hr_name}」。",
-            }
-        if not match.get("securityId"):
-            # geekFilterByLabel's response carries no securityId (live
-            # 2026-08-28); chat-core itself re-fetches creds via POST
-            # getGeekFriendList - mirror that second stage.
-            creds = await self._fetch_friend_creds(
-                [str(match.get("friendId"))], str(match.get("friendSource"))
-            )
-            if creds is None or not creds.get("securityId"):
-                return {
-                    "status": "failed",
-                    "error_type": "security_id_unavailable",
-                    "message": (
-                        f"无法为「{hr_name}」获取会话凭据"
-                        f"（getGeekFriendList 未返回 securityId）。"
-                    ),
-                }
-            match["securityId"] = creds["securityId"]
-            match["encryptBossId"] = (
-                creds.get("encryptBossId") or match.get("encryptBossId")
-            )
-        if not match.get("encryptBossId"):
-            return {
-                "status": "failed",
-                "error_type": "boss_id_missing",
-                "message": f"「{hr_name}」缺少 encryptBossId，无法查询历史。",
-            }
         try:
             page_obj, fresh = await _get_parked_page(self._tab_pool)
             if fresh:
@@ -303,12 +268,7 @@ class BossChatReader:
                     return prepared
             raw = await asyncio.wait_for(
                 page_obj.evaluate(
-                    _FETCH_HISTORY_JS,
-                    {
-                        "bossId": match["encryptBossId"],
-                        "securityId": match["securityId"],
-                        "page": page,
-                    },
+                    _FETCH_CONVERSATION_JS, {"hrName": hr_name, "page": page}
                 ),
                 timeout=_LIST_TIMEOUT_S,
             )
@@ -318,54 +278,50 @@ class BossChatReader:
                 "error_type": "tab_pool_timeout",
                 "message": "浏览器 tab 池或请求超时。",
             }
-        if not isinstance(raw, dict) or raw.get("code") != 0:
+        except Exception as exc:
+            return {
+                "status": "failed",
+                "error_type": "page_lost",
+                "message": f"页内读取被中断（页面可能被反爬跳转）: {exc}",
+            }
+        if not isinstance(raw, dict):
             return {
                 "status": "failed",
                 "error_type": "api_rejected",
-                "message": str(raw.get("message", raw))[:200]
-                if isinstance(raw, dict)
-                else str(raw)[:200],
+                "message": f"接口返回无法解析: {str(raw)[:150]}",
             }
-        messages = list(raw.get("messages", []))
-        logger.info(
-            "Boss chat history: %d messages with %s", len(messages), hr_name
-        )
-        return {
-            "status": "ok",
-            "hr_name": hr_name,
-            "page": page,
-            "count": len(messages),
-            "messages": messages,
-        }
-
-    async def _fetch_friend_creds(
-        self, friend_ids: list[str], friend_source: str
-    ) -> dict[str, Any] | None:
-        """POST getGeekFriendList for securityId/encryptBossId (stage 2)."""
-
-        assert self._tab_pool is not None
-        try:
-            page, fresh = await _get_parked_page(self._tab_pool)
-            if fresh:
-                prepared = await self._prepare_parked_page(page)
-                if prepared is not None:
-                    return None
-            payload: dict[str, Any] = {}
-            if friend_source == "1":
-                payload["dzIds"] = ",".join(friend_ids)
-            else:
-                payload["bossIds"] = ",".join(friend_ids)
-            raw = await asyncio.wait_for(
-                page.evaluate(_FETCH_FRIEND_CREDS_JS, payload),
-                timeout=_LIST_TIMEOUT_S,
+        step = str(raw.get("step", ""))
+        if step == "done":
+            messages = list(raw.get("messages", []))
+            logger.info(
+                "Boss chat history: %d messages with %s", len(messages), hr_name
             )
-        except TimeoutError:
-            return None
-        if not isinstance(raw, dict) or raw.get("code") != 0:
-            logger.warning("Boss chat creds fetch rejected: %s", raw)
-            return None
-        creds = list(raw.get("creds", []))
-        return creds[0] if creds else None
+            return {
+                "status": "ok",
+                "hr_name": hr_name,
+                "page": page,
+                "count": len(messages),
+                "messages": messages,
+            }
+        if step == "match":
+            return {
+                "status": "failed",
+                "error_type": "conversation_not_found",
+                "message": f"会话列表中没有找到「{hr_name}」。",
+            }
+        if step == "creds":
+            return {
+                "status": "failed",
+                "error_type": "security_id_unavailable",
+                "message": f"会话凭据获取失败：{str(raw.get('message', ''))[:120]}",
+            }
+        return {
+            "status": "failed",
+            "error_type": "api_rejected",
+            "api_step": step or "list",
+            "code": raw.get("code"),
+            "message": str(raw.get("message", ""))[:200],
+        }
 
     async def _prepare_parked_page(self, page: Any) -> dict[str, Any] | None:
         """Navigate+settle a fresh parked page; failure dict or None."""
