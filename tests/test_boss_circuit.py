@@ -6,6 +6,8 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from jobagent.applier.boss_circuit import BossCircuit, boss_circuit_path
 
 PAGE_KILLED = {"status": "failed", "error_type": "page_lost"}
@@ -68,3 +70,18 @@ def test_state_survives_across_processes(tmp_path: Path) -> None:
         first.record(PAGE_KILLED)
     # a NEW instance (next `chat -c` process) must see the same state
     assert _circuit(tmp_path).check() is not None
+
+
+def test_env_bypass_forces_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    circuit = _circuit(tmp_path)
+    for _ in range(3):
+        circuit.record(PAGE_KILLED)
+    assert circuit.check() is not None
+
+    monkeypatch.setenv("JOBAGENT_BOSS_IGNORE_CIRCUIT", "1")
+    assert circuit.check() is None  # forced through for debugging
+
+    monkeypatch.setenv("JOBAGENT_BOSS_IGNORE_CIRCUIT", "false")
+    assert circuit.check() is not None  # non-truthy values keep the gate

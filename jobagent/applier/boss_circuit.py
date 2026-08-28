@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -44,8 +45,23 @@ class BossCircuit:
     # -- public API ---------------------------------------------------------
 
     def check(self) -> dict[str, Any] | None:
-        """Return the refusal dict when tripped, else None."""
+        """Return the refusal dict when tripped, else None.
 
+        Setting JOBAGENT_BOSS_IGNORE_CIRCUIT=1 bypasses the breaker for
+        debugging - each forced call still runs (and still feeds warlock
+        negative samples while the account is flagged, so use it knowing
+        the breaker exists precisely to prevent that).
+        """
+
+        if os.environ.get("JOBAGENT_BOSS_IGNORE_CIRCUIT", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            logger.warning(
+                "Boss circuit BYPASSED via JOBAGENT_BOSS_IGNORE_CIRCUIT"
+            )
+            return None
         state = self._load()
         until = state.get("until")
         if not until:
