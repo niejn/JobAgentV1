@@ -116,6 +116,8 @@ JD + Candidate Background
 | TR-2 | Agent Tools：`save_tailored_resume`（存 draft）、`confirm_tailored_resume`（用户确认）、`get_tailored_resumes`（面试查回）；prompt 政策：每事实映射 Candidate Background，投递前必须 confirmed | 零 | 无 confirmed 简历的岗位不允许走投递流程 |
 | TR-4a | ✅ 已交付（2026-08-27）：`upload_boss_resume_pdf` 工具——CDP 走用户 Chrome，首页点"简历"入口→点"附件上传"→`expect_file_chooser` 拦截喂 PDF（不弹 OS 窗口）；成功判定 = 被动捕获 `/wapi/zpgeek/resume/attachment/save.json` 返回 code=0。HITL：`user_confirmed` 必填。**附件上限 3 个**：撞限返回 `attachment_limit`；`allow_delete=True`（须用户同意删除）时自动删最旧重试 | 已上线 | 删除旧附件的选择器为人工走查提供，待真机校准 |
 | TR-4b | 📋 打招呼后自动发送对应附件简历：聊天窗口"发送简历"按钮流程（需要一次人工走查提供该按钮 DOM + 发送后确认信号） | 高（用户 2026-08-27 定） | HR 收到 PDF；每个岗位发送的简历版本入册 |
+| TR-5 | `list_boss_greetings`：查看哪些 HR 打过招呼，支持过滤器（全部/未读/新招呼/仅沟通/有交换/有面试/不感兴趣）。走已验证的页内 fetch 直传路线（读操作，风险低） | 高（用户 2026-08-28 提出） | API 已挖到（geek-chat-core.2.0.3.umd.min.js，静态分析）：`GET /wapi/zprelation/friend/geekFilterByLabel?labelId=<n>` 按标签过滤 + `POST /wapi/zprelation/friend/getGeekFriendList.json` 分页列表 + `/wapi/zpmsg/history/pull`、`/wapi/zpchat/boss/historyMsg` 历史消息。labelId 与 8 个过滤 tab 的映射需真机校准（已知 labelId:-1 与 0 的用法） |
+| TR-6 | `reply_boss_greeting`：回复打招呼的 HR（HITL：文案必须用户确认后发送，同 boss_greet 模式）。⚠️ 消息发送不走 REST——走 WebSocket（`/wapi/zpchat/config/ws` 拿配置 + SharedWorker RPC，协议在 geek-chat-core）。首选路线：页内驱动聊天页已加载的 chat-core 实例发消息（Boss 自己的代码在发，指纹完全一致）；备选：聊天页 UI 自动化（风险未知，chat 页点击未实测） | 高（依赖 TR-5 先通） | 频控严格：回复间隔 + 每日上限；内容审核（Boss 对消息内容有风控）；失败如实报告 |
 | TR-3 | `update_boss_online_resume`：CDP 打开 Boss 简历编辑页，自动更新"个人优势"等简单模块，复杂模块导航到位提示手动完成；HITL 确认 | 低（用户 2026-08-27 降级） | 真机校准选择器；失败如实报告 |
 | TR-5 | `boss_greet_jobs` 成功后自动 `mark_submitted`，招呼关联简历版本 | 低 | 投递记录含 resume version |
 
