@@ -45,6 +45,13 @@ def _happy_page() -> MagicMock:
     async def evaluate(script: str):
         return True  # settle probes
 
+    async def evaluate(script: str, payload: dict | None = None):
+        if payload is None:
+            return True  # settle probe
+        if isinstance(payload, str):  # strong verify: panel echo check
+            return True
+        return True
+
     page.evaluate = evaluate
 
     search, row, input_area, send = _loc(), _loc(), _loc(), _loc()
@@ -135,7 +142,8 @@ async def test_send_unconfirmed_residual_input(tmp_path: Path) -> None:
         holder = MagicMock()
         loc = _loc()
         if "textarea" in selector or "contenteditable" in selector:
-            loc.input_value = AsyncMock(return_value="您好，感谢关注！")  # still there
+            # draft still sitting in the (contenteditable) editor
+            loc.inner_text = AsyncMock(return_value="您好，感谢关注！")
         holder.first = loc
         return holder
 

@@ -272,22 +272,41 @@ class BossChatSender:
                 ),
                 "page_diag": await self._page_diag(page),
             }
-        # 5) Verify the input area cleared = message accepted by the page.
+        # 5) STRONG verification (live lie, 2026-08-28: "input cleared"
+        # misread a contenteditable editor - input_value() THROWS on
+        # contenteditable, the except-branch read empty text and reported
+        # success while nothing was sent). Sent only if the message tail
+        # renders in the conversation panel AND the editor no longer
+        # holds it.
+        tail = message.strip().replace("\n", "")[-24:]
         await asyncio.sleep(1.5)
         try:
-            residual = await input_area.input_value()
+            editor_text = (await input_area.inner_text()) or ""
         except Exception:
-            try:
-                residual = (await input_area.inner_text()).strip()
-            except Exception:
-                residual = ""
-        if isinstance(residual, str) and residual.strip():
+            editor_text = ""
+        try:
+            panel_has_it = bool(
+                await page.evaluate(
+                    "t => document.body.innerText.replace(/\\s+/g, '').includes(t)",
+                    tail,
+                )
+            )
+        except Exception:
+            panel_has_it = False
+        editor_holds_it = tail in editor_text.replace("\n", "")
+        if editor_holds_it or not panel_has_it:
             return {
                 "status": "failed",
                 "error_type": "send_unconfirmed",
-                "message": "输入框未清空，消息可能未发出。请人工确认。",
+                "message": (
+                    "消息未确认发出：输入框残留="
+                    f"{editor_holds_it}，聊天面板出现文案={panel_has_it}。"
+                    "若文案仍在输入框，人工按回车即可发出。"
+                ),
+                "editor_residual": editor_holds_it,
+                "panel_echo": panel_has_it,
             }
-        logger.info("Boss chat reply sent to %s (%d chars)", hr_name, len(message))
+        logger.info("Boss chat reply verified in panel: %s", hr_name)
         return {"status": "ok", "to": hr_name, "chars": len(message)}
 
     async def _page_diag(self, page: Any) -> dict[str, Any]:
