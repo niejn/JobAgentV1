@@ -1,31 +1,35 @@
 """Upload a PDF resume attachment to Boss直聘 via the user's Chrome (CDP).
 
-Flow verified from a chrome://net-export capture + manual walk-through
-(2026-08-27):
+Transport (v2, page-fetch - verified 2026-08-28): the filechooser route is
+DEAD - warlock blanks the page the instant a file chooser opens, even for
+manual clicks (net-export evidence: FILECHOOSER event and NAV -> about:blank
+in the same second). Instead we run Boss's own upload calls from inside the
+resume page via page.evaluate(fetch):
 
-    homepage -> click header link 简历 (a[ka='header-resume'])
-      -> resume page -> click 附件上传 button (<span>附件上传</span>)
-      -> filechooser -> JS POSTs
-           /wapi/zpupload/resume/uploadFile.json   (multipart file body)
-           /wapi/zpgeek/resume/attachment/save.json (attach record)
-      -> success = save.json returns code == 0
+    POST /wapi/zpupload/resume/uploadFile.json
+         multipart: file=<File>, fileType=1   -> zpData.previewUrl
+    POST /wapi/zpgeek/resume/attachment/save.json
+         ?previewUrl=<url>&annexType=0&from=8 -> zpData.resumeId
 
-Platform constraint: at most THREE attachment resumes exist at once; a
-fourth upload is rejected until an old one is deleted
-(/wapi/zpgeek/resume/attachment/delete.json).
+Both endpoints and field names extracted from Boss's public JS bundle
+(resume~2.33dc2c5d.js): FormData.append("file", file), append("fileType", 1),
+then save.json with previewUrl query params. A domain-internal fetch with
+credentials carries the same cookies/origin as Boss's own axios calls - no
+file chooser, no synthetic clicks, no upload-control interaction.
 
-We never call those APIs directly (they sit behind warlock device
-checks); the page's own JS uploads with its native fingerprint after we
-hand it the file. The filechooser is intercepted via Playwright's
-expect_file_chooser - no OS dialog opens, and no Runtime.enable is
-attached to already-loaded pages (which is what trips warlock's
-console-getter anti-debug trap; verified: F12 or a CDP listener attach
-both blank the page).
+Platform constraint: at most THREE attachment resumes at once; a fourth is
+rejected until one is deleted (attachment/delete.json - endpoint known,
+request format not yet extracted).
+
+We never touch input[type=file] or filechooser (verified warlock tripwires:
+filechooser interception, F12, Runtime.enable listener attaches all blank
+the page).
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from pathlib import Path
 from typing import Any
@@ -40,25 +44,49 @@ logger = logging.getLogger(__name__)
 
 _HEADER_RESUME_LINK = "a[ka='header-resume']"
 _RESUME_PAGE_PATH = "/web/geek/resume"
-_UPLOAD_BUTTONS = [
-    "span:has-text('附件上传')",
-    "button:has-text('附件上传')",
-    "a:has-text('附件上传')",
-]
 _DELETE_BUTTONS = [
     "span:has-text('删除')",
     "a:has-text('删除')",
     "button:has-text('删除')",
     "text=删除",
 ]
-_FILE_INPUT = "input[type=file]"
-_SAVE_API = "/wapi/zpgeek/resume/attachment/save.json"
 _DELETE_API = "/wapi/zpgeek/resume/attachment/delete.json"
-_UPLOAD_API = "/wapi/zpupload/resume/uploadFile.json"
 _MAX_ATTACHMENTS = 3
 _NAV_TIMEOUT_MS = 30_000
 _UPLOAD_TIMEOUT_S = 90.0
 _LIMIT_MARKERS = ("最多", "上限", "三个", "3个", "不能超过")
+
+# Runs inside the resume page: POST uploadFile.json (multipart), then
+# save.json (previewUrl from step 1). Field names and both endpoints
+# extracted verbatim from Boss's public bundle resume~2.33dc2c5d.js.
+_FETCH_UPLOAD_JS = """
+async (payload) => {
+  const bin = atob(payload.b64);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  const file = new File([buf], payload.name, {type: "application/pdf"});
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("fileType", "1");
+  const up = await fetch("/wapi/zpupload/resume/uploadFile.json", {
+    method: "POST", body: fd, credentials: "include",
+    headers: {"X-Requested-With": "XMLHttpRequest"},
+  }).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
+  if (up.code !== 0) return {step: "upload", code: up.code, message: up.message};
+  const previewUrl = up.zpData && up.zpData.previewUrl;
+  if (!previewUrl) return {step: "upload", code: up.code, message: "no previewUrl"};
+  const save = await fetch(
+    "/wapi/zpgeek/resume/attachment/save.json?previewUrl="
+      + encodeURIComponent(previewUrl) + "&annexType=0&from=8",
+    {method: "POST", credentials: "include",
+     headers: {"X-Requested-With": "XMLHttpRequest"}},
+  ).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
+  if (save.code !== 0) return {step: "save", code: save.code, message: save.message};
+  return {step: "done",
+          resumeId: save.zpData && save.zpData.resumeId,
+          previewUrl};
+}
+"""
 
 
 class BossResumeUploader:
@@ -202,111 +230,95 @@ class BossResumeUploader:
             except Exception:
                 logger.info("Boss resume: direct nav interrupted", exc_info=True)
 
-        # 2) Wait until the resume page has rendered its upload controls.
+        # 2) Wait until the resume page has settled (the fetch transport
+        # does not need the upload widgets - only a live, logged-in page).
         deadline = asyncio.get_event_loop().time() + 30.0
         while asyncio.get_event_loop().time() < deadline:
             if urlsplit(str(page.url or "")).path == _RESUME_PAGE_PATH:
-                if await page.query_selector(_FILE_INPUT) is not None:
+                try:
+                    settled = await page.evaluate("document.readyState === 'complete'")
+                except Exception:
+                    settled = False
+                if settled:
                     break
             await asyncio.sleep(0.5)
         else:
-            if (
-                urlsplit(str(page.url or "")).path != _RESUME_PAGE_PATH
-                or await page.query_selector(_FILE_INPUT) is None
-            ):
-                return {
-                    "status": "failed",
-                    "error_type": "resume_page_blocked",
-                    "message": (
-                        "未能在简历页找到上传控件（页面可能被反爬跳转到空白页）。"
-                        "建议稍后重试；若反复出现请先在 Chrome 中人工打开一次简历页。"
-                    ),
-                }
-
-        # 3) Hand the file over. Prefer intercepting the filechooser the
-        # 附件上传 button opens; fall back to feeding the hidden input.
-        outcome: dict[str, Any] | None = None
-
-        async def on_response(response: Any) -> None:
-            nonlocal outcome
-            try:
-                path_part = urlsplit(str(getattr(response, "url", "") or "")).path
-                if path_part == _SAVE_API:
-                    body = await response.json()
-                    if isinstance(body, dict):
-                        failed = body.get("code") != 0
-                        outcome = {
-                            "status": "failed" if failed else "ok",
-                            "api": "attachment/save.json",
-                            "code": body.get("code"),
-                            "message": str(body.get("message", ""))[:200],
-                        }
-                        if failed and _looks_like_limit(outcome["message"]):
-                            outcome["error_type"] = "attachment_limit"
-                elif path_part == _UPLOAD_API:
-                    body = await response.json()
-                    if isinstance(body, dict) and body.get("code") not in (0, None):
-                        message = str(body.get("message", ""))[:200]
-                        outcome = outcome or {
-                            "status": "failed",
-                            "api": "uploadFile.json",
-                            "code": body.get("code"),
-                            "message": message,
-                        }
-                        if _looks_like_limit(message):
-                            outcome.setdefault("error_type", "attachment_limit")
-            except Exception:
-                pass  # body races are fine; the final poll decides
-
-        page.on("response", on_response)
-        try:
-            await self._hand_file_over(page, path)
-        except Exception as exc:
             return {
                 "status": "failed",
-                "error_type": "input_rejected",
-                "message": f"向简历页提交文件失败: {exc}",
+                "error_type": "resume_page_blocked",
+                "message": (
+                    "简历页未能稳定加载（页面可能被反爬跳转到空白页）。"
+                    "建议稍后重试；若反复出现请先在 Chrome 中人工打开一次简历页。"
+                ),
             }
 
-        # 4) Await the save/upload API verdict.
-        deadline = asyncio.get_event_loop().time() + _UPLOAD_TIMEOUT_S
-        while outcome is None and asyncio.get_event_loop().time() < deadline:
-            await asyncio.sleep(0.5)
-        if outcome is None:
-            return {
-                "status": "failed",
-                "error_type": "no_upload_response",
-                "message": "文件已提交但未捕获到上传结果（网络慢或页面被拦截）。",
-            }
-        outcome.setdefault("file", str(path))
-        if outcome["status"] == "ok":
+        # 3) Transport: run Boss's own upload chain via page-scope fetch.
+        # (v1 used filechooser interception - warlock blanks the page the
+        # instant a file chooser opens; see module docstring.)
+        result = await self._upload_via_page_fetch(page, path)
+        result.setdefault("file", str(path))
+        if result["status"] == "ok":
             logger.info("Boss resume upload SUCCESS: %s", path.name)
         else:
-            logger.warning("Boss resume upload rejected: %s", outcome)
-        return outcome
+            logger.warning("Boss resume upload rejected: %s", result)
+        return result
 
-    async def _hand_file_over(self, page: Any, path: Path) -> None:
-        """Click 附件上传 and feed the filechooser; fallback to the input."""
+    async def _upload_via_page_fetch(self, page: Any, path: Path) -> dict[str, Any]:
+        """POST uploadFile.json + save.json from inside the resume page.
 
-        for selector in _UPLOAD_BUTTONS:
-            button = page.locator(selector).first
-            try:
-                if not await button.is_visible():
-                    continue
-                async with page.expect_file_chooser(timeout=6_000) as fc_info:
-                    await button.click()
-                file_chooser = await fc_info.value
-                await file_chooser.set_files(str(path))
-                return
-            except Exception:
-                logger.debug(
-                    "Boss resume: filechooser path failed for %s", selector, exc_info=True
-                )
-        # Fallback: the hidden <input type=file> accepts files directly.
-        file_input = await page.query_selector(_FILE_INPUT)
-        if file_input is None:
-            raise RuntimeError("简历页没有可用的文件上传控件")
-        await file_input.set_input_files(str(path))
+        The fetch runs with the page's own origin, cookies and headers -
+        byte-identical surface to Boss's own axios calls. The PDF crosses
+        the CDP boundary as base64 and is reassembled with the page's File
+        constructor (no file chooser, no synthetic click on upload widgets).
+        """
+
+        try:
+            payload = base64.b64encode(path.read_bytes()).decode("ascii")
+        except OSError as exc:
+            return {
+                "status": "failed",
+                "error_type": "file_not_found",
+                "message": f"无法读取 PDF: {exc}",
+            }
+        try:
+            raw = await asyncio.wait_for(
+                page.evaluate(
+                    _FETCH_UPLOAD_JS,
+                    {"b64": payload, "name": path.name},
+                ),
+                timeout=_UPLOAD_TIMEOUT_S,
+            )
+        except Exception as exc:
+            # evaluate dies when warlock navigates the page mid-call
+            return {
+                "status": "failed",
+                "error_type": "page_lost",
+                "message": f"页内上传被中断（页面可能被反爬跳转）: {exc}",
+            }
+        if not isinstance(raw, dict):
+            return {
+                "status": "failed",
+                "error_type": "api_rejected",
+                "message": f"上传接口返回了无法解析的结果: {raw!r:.200}",
+            }
+        step = str(raw.get("step", ""))
+        if step == "done":
+            return {
+                "status": "ok",
+                "api": "attachment/save.json",
+                "resume_id": raw.get("resumeId"),
+                "message": "附件简历上传成功。",
+            }
+        message = str(raw.get("message", ""))[:200]
+        result: dict[str, Any] = {
+            "status": "failed",
+            "api": "uploadFile.json" if step == "upload" else "attachment/save.json",
+            "code": raw.get("code"),
+            "message": message,
+        }
+        if _looks_like_limit(message):
+            result["error_type"] = "attachment_limit"
+        return result
 
     async def _delete_one_attachment(self, page: Any) -> bool:
         """Delete one existing attachment through the page's own UI.

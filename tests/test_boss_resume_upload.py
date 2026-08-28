@@ -96,43 +96,30 @@ def _ok_cooldown() -> MagicMock:
 
 
 @pytest.mark.asyncio
-async def test_upload_happy_path_via_filechooser(tmp_path: Path) -> None:
-    """nav -> click 附件上传 -> filechooser fed -> save.json code=0."""
+async def test_upload_happy_path_via_page_fetch(tmp_path: Path) -> None:
+    """nav -> resume page settles -> page-scope fetch chain returns done."""
     pdf = tmp_path / "resume.pdf"
     pdf.write_bytes(b"%PDF-1.4 fake")
 
     uploader = BossResumeUploader(_settings(tmp_path))
     page = MagicMock()
     page.url = "https://www.zhipin.com/web/geek/resume"
-
-    async def fake_json():
-        return {"code": 0, "message": "Success"}
-
-    save_response = MagicMock()
-    save_response.url = "https://www.zhipin.com/wapi/zpgeek/resume/attachment/save.json"
-    save_response.json = fake_json
-
-    captured: list[Any] = []
-
-    async def fake_hand_over(*args: Any) -> None:
-        p, path = args[-2], args[-1]  # patched bound method -> (self, page, path)
-        captured.append((path, p))
-        # simulate Boss uploading and the save API responding
-        for handler in p._response_handlers:
-            await handler(save_response)
-
-    page._response_handlers = []
-    page.on = lambda event, handler: page._response_handlers.append(handler)
     page.goto = AsyncMock()
-    page.query_selector = AsyncMock(return_value=MagicMock())
     page.locator = MagicMock()
 
-    with (
-        patch(
-            "jobagent.applier.boss_resume.get_boss_cooldown",
-            return_value=_ok_cooldown(),
-        ),
-        patch.object(BossResumeUploader, "_hand_file_over", fake_hand_over),
+    async def fake_evaluate(script: str, payload: dict | None = None):
+        if payload is None:
+            return True  # settle probe: document.readyState check
+        assert "uploadFile.json" in script and "save.json" in script
+        assert payload["name"] == "resume.pdf"
+        assert payload["b64"]  # base64 payload delivered
+        return {"step": "done", "resumeId": 12345, "previewUrl": "//x/b.pdf"}
+
+    page.evaluate = fake_evaluate
+
+    with patch(
+        "jobagent.applier.boss_resume.get_boss_cooldown",
+        return_value=_ok_cooldown(),
     ):
         uploader._context = MagicMock()
         pool = MagicMock()
@@ -143,7 +130,78 @@ async def test_upload_happy_path_via_filechooser(tmp_path: Path) -> None:
         result = await uploader.upload_pdf(pdf)
 
     assert result["status"] == "ok"
-    assert captured[0][0] == pdf
+    assert result["resume_id"] == 12345
+
+
+@pytest.mark.asyncio
+async def test_upload_api_rejection_is_structured(tmp_path: Path) -> None:
+    """uploadFile.json code!=0 -> failed + api named + message surfaced."""
+    pdf = tmp_path / "resume.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+
+    uploader = BossResumeUploader(_settings(tmp_path))
+    page = MagicMock()
+    page.url = "https://www.zhipin.com/web/geek/resume"
+    page.goto = AsyncMock()
+    page.locator = MagicMock()
+
+    async def fake_evaluate(script: str, payload: dict | None = None):
+        if payload is None:
+            return True  # settle probe
+        return {"step": "upload", "code": 1001, "message": "附件简历最多可上传3个"}
+
+    page.evaluate = fake_evaluate
+
+    with patch(
+        "jobagent.applier.boss_resume.get_boss_cooldown",
+        return_value=_ok_cooldown(),
+    ):
+        uploader._context = MagicMock()
+        pool = MagicMock()
+        pool.acquire = AsyncMock(return_value=page)
+        pool.release = AsyncMock()
+        uploader._tab_pool = pool
+
+        result = await uploader.upload_pdf(pdf)
+
+    assert result["status"] == "failed"
+    assert result["api"] == "uploadFile.json"
+    assert result["error_type"] == "attachment_limit"
+
+
+@pytest.mark.asyncio
+async def test_upload_page_lost_is_typed(tmp_path: Path) -> None:
+    """evaluate raising (warlock navigated the page) -> page_lost, no hang."""
+    pdf = tmp_path / "resume.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+
+    uploader = BossResumeUploader(_settings(tmp_path))
+    page = MagicMock()
+    page.url = "https://www.zhipin.com/web/geek/resume"
+    page.goto = AsyncMock()
+    page.locator = MagicMock()
+
+    async def fake_evaluate(script: str, payload: dict | None = None):
+        if payload is None:
+            return True  # settle probe
+        raise RuntimeError("Execution context was destroyed")
+
+    page.evaluate = fake_evaluate
+
+    with patch(
+        "jobagent.applier.boss_resume.get_boss_cooldown",
+        return_value=_ok_cooldown(),
+    ):
+        uploader._context = MagicMock()
+        pool = MagicMock()
+        pool.acquire = AsyncMock(return_value=page)
+        pool.release = AsyncMock()
+        uploader._tab_pool = pool
+
+        result = await uploader.upload_pdf(pdf)
+
+    assert result["status"] == "failed"
+    assert result["error_type"] == "page_lost"
 
 
 @pytest.mark.asyncio
