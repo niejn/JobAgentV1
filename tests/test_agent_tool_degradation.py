@@ -27,6 +27,7 @@ DEFAULT_TOOL_NAMES = {
     "boss_greet_jobs",
     "upload_boss_resume_pdf",
     "list_boss_greetings",
+    "read_boss_conversation",
     "reply_boss_greeting",
     "update_job_progress",
     "get_job_progress",

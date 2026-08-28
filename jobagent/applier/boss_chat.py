@@ -37,6 +37,13 @@ from jobagent.scraper.cdp_tab_pool import CdpTabPool
 
 logger = logging.getLogger(__name__)
 
+
+async def _get_parked_page(pool: Any) -> tuple[Any, bool]:
+    from jobagent.applier.boss_chat_session import get_chat_page
+
+    return await get_chat_page(pool)
+
+
 _CHAT_PAGE_PATH = "/web/geek/chat"
 _LABEL_IDS = {"全部": 0}  # calibration point: remaining tabs' ids unknown
 _NAV_TIMEOUT_MS = 30_000
@@ -68,6 +75,8 @@ async (payload) => {
       friendId: f.friendId,
       friendSource: f.friendSource,
       encryptFriendId: f.encryptFriendId || "",
+      encryptBossId: f.encryptBossId || f.encryptFriendId || "",
+      securityId: f.securityId || "",
       name: f.name || "",
       brandName: f.brandName || "",
       jobName: f.jobName || "",
@@ -85,6 +94,52 @@ async (payload) => {
         fromId: f.lastMessageInfo.fromId || 0,
       }) || null,
     })),
+  };
+}
+"""
+
+
+_FETCH_HISTORY_JS = """
+async (payload) => {
+  const pageToken = ((window._PAGE || {}).token || "").split("|")[0];
+  const base = {
+    "X-Requested-With": "XMLHttpRequest",
+    "Content-Type": "application/x-www-form-urlencoded",
+    "traceId": String(Date.now()) + Math.random().toString(16).slice(2, 10),
+  };
+  if (pageToken) base.token = pageToken;
+  // Live-verified query shape (net capture 2026-08-28):
+  //   historyMsg?bossId=<encryptBossId>&maxMsgId=0&c=20&page=1&src=0
+  //   &securityId=<per-friend token from the friendList item>
+  const qs = "bossId=" + encodeURIComponent(payload.bossId)
+    + "&maxMsgId=0&c=20&page=" + payload.page + "&src=0"
+    + "&securityId=" + encodeURIComponent(payload.securityId)
+    + "&_=" + Date.now();
+  const res = await fetch(
+    "/wapi/zpchat/geek/historyMsg?" + qs,
+    {method: "GET", credentials: "include", headers: base},
+  ).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
+  if (res.code !== 0) return {
+    code: res.code, message: res.message,
+    stokenPresent: document.cookie.indexOf("__zp_stoken__") !== -1,
+  };
+  const msgs = (res.zpData && res.zpData.messages) || [];
+  // Message shape is version-dependent; extract loosely and keep the raw
+  // body for fields we cannot name yet.
+  return {
+    code: 0,
+    messages: msgs.map((m) => {
+      const body = m.body || {};
+      return {
+        fromId: m.fromId || (m.from && m.from.uid) || 0,
+        toId: m.toId || (m.to && m.to.uid) || 0,
+        time: m.time || m.createTime || 0,
+        type: m.type != null ? m.type : m.messageType,
+        text: String(
+          body.text || m.text || body.content || m.content || "",
+        ).slice(0, 500),
+      };
+    }),
   };
 }
 """
@@ -160,20 +215,110 @@ class BossChatReader:
                 "message": "浏览器 tab 池超时。",
             }
 
+    async def read_conversation(
+        self, *, hr_name: str, page: int = 1
+    ) -> dict[str, Any]:
+        """Read the chat history with one HR (found by name via the list)."""
+
+        assert self._tab_pool is not None
+        listing = await self.list_greetings(filter_name="全部")
+        if listing.get("status") != "ok":
+            return listing
+        match = next(
+            (
+                f
+                for f in listing["greetings"]
+                if f.get("name") == hr_name and f.get("securityId")
+            ),
+            None,
+        )
+        if match is None:
+            return {
+                "status": "failed",
+                "error_type": "conversation_not_found",
+                "message": f"会话列表中没有找到带 securityId 的「{hr_name}」。",
+            }
+        try:
+            page_obj, fresh = await _get_parked_page(self._tab_pool)
+            if fresh:
+                prepared = await self._prepare_parked_page(page_obj)
+                if prepared is not None:
+                    return prepared
+            raw = await asyncio.wait_for(
+                page_obj.evaluate(
+                    _FETCH_HISTORY_JS,
+                    {
+                        "bossId": match["encryptBossId"],
+                        "securityId": match["securityId"],
+                        "page": page,
+                    },
+                ),
+                timeout=_LIST_TIMEOUT_S,
+            )
+        except TimeoutError:
+            return {
+                "status": "failed",
+                "error_type": "tab_pool_timeout",
+                "message": "浏览器 tab 池或请求超时。",
+            }
+        if not isinstance(raw, dict) or raw.get("code") != 0:
+            return {
+                "status": "failed",
+                "error_type": "api_rejected",
+                "message": str(raw.get("message", raw))[:200]
+                if isinstance(raw, dict)
+                else str(raw)[:200],
+            }
+        messages = list(raw.get("messages", []))
+        logger.info(
+            "Boss chat history: %d messages with %s", len(messages), hr_name
+        )
+        return {
+            "status": "ok",
+            "hr_name": hr_name,
+            "page": page,
+            "count": len(messages),
+            "messages": messages,
+        }
+
+    async def _prepare_parked_page(self, page: Any) -> dict[str, Any] | None:
+        """Navigate+settle a fresh parked page; failure dict or None."""
+
+        try:
+            await page.goto(
+                f"https://www.zhipin.com{_CHAT_PAGE_PATH}",
+                wait_until="domcontentloaded",
+                timeout=_NAV_TIMEOUT_MS,
+            )
+        except Exception:
+            logger.info("Boss chat: chat page nav interrupted", exc_info=True)
+        deadline = asyncio.get_event_loop().time() + 30.0
+        while asyncio.get_event_loop().time() < deadline:
+            if urlsplit(str(page.url or "")).path == _CHAT_PAGE_PATH:
+                try:
+                    settled = await page.evaluate(
+                        "document.readyState === 'complete'"
+                    )
+                except Exception:
+                    settled = False
+                if settled:
+                    return None
+            await asyncio.sleep(0.5)
+        return {
+            "status": "failed",
+            "error_type": "chat_page_blocked",
+            "message": "聊天页未能稳定加载（页面可能被反爬跳转到空白页）。",
+        }
+
     async def _list_on_page(
         self, pool: Any, *, label_id: int, limit: int
     ) -> dict[str, Any]:
-        from jobagent.applier.boss_chat_session import (
-            chat_page_url_path,
-            get_chat_page,
-        )
-
-        page, fresh = await get_chat_page(pool)
+        page, fresh = await _get_parked_page(pool)
         if fresh:
             # First use this process: load the chat page once and park it.
             try:
                 await page.goto(
-                    f"https://www.zhipin.com{chat_page_url_path()}",
+                    f"https://www.zhipin.com{_CHAT_PAGE_PATH}",
                     wait_until="domcontentloaded",
                     timeout=_NAV_TIMEOUT_MS,
                 )

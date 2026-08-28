@@ -189,3 +189,95 @@ def _reader_with_pool(pool: MagicMock) -> BossChatReader:
     reader._context = MagicMock()
     reader._tab_pool = pool
     return reader
+
+
+@pytest.mark.asyncio
+async def test_read_conversation_chains_list_then_history() -> None:
+    """read_conversation: finds the HR in the list (needs securityId),
+    then calls historyMsg with the live-verified query credentials."""
+    import jobagent.applier.boss_chat as chat_mod
+
+    chat_mod._parked_page = None
+    page = MagicMock()
+    page.url = "https://www.zhipin.com/web/geek/chat"
+    page.is_closed = lambda: False
+    page.goto = AsyncMock()
+    history_payloads: list[dict] = []
+
+    async def evaluate(script: str, payload: dict | None = None):
+        if payload is None:
+            return True
+        if "geekFilterByLabel" in script:
+            return {
+                "code": 0,
+                "friends": [
+                    {
+                        "friendId": 20001,
+                        "friendSource": 1,
+                        "name": "张HR",
+                        "encryptBossId": "enc-boss-1",
+                        "securityId": "sec-token-1",
+                        "lastMessage": None,
+                    }
+                ],
+            }
+        if "historyMsg" in script:
+            history_payloads.append(payload)
+            return {
+                "code": 0,
+                "messages": [
+                    {"fromId": 20001, "toId": 1, "time": 1787900100,
+                     "type": 1, "text": "你好，我们团队在招后端"},
+                    {"fromId": 1, "toId": 20001, "time": 1787900200,
+                     "type": 1, "text": "您好，感谢关注"},
+                ],
+            }
+        return True
+
+    page.evaluate = evaluate
+    pool = MagicMock()
+    pool.acquire = AsyncMock(return_value=page)
+    pool.detach = AsyncMock()
+    reader = _reader_with_pool(pool)
+
+    result = await reader.read_conversation(hr_name="张HR")
+
+    assert result["status"] == "ok"
+    assert result["count"] == 2
+    assert result["messages"][0]["text"].startswith("你好")
+    assert history_payloads == [
+        {"bossId": "enc-boss-1", "securityId": "sec-token-1", "page": 1}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_read_conversation_without_security_id_fails_loudly() -> None:
+    import jobagent.applier.boss_chat as chat_mod
+
+    chat_mod._parked_page = None
+    page = MagicMock()
+    page.url = "https://www.zhipin.com/web/geek/chat"
+    page.is_closed = lambda: False
+    page.goto = AsyncMock()
+
+    async def evaluate(script: str, payload: dict | None = None):
+        if payload is None:
+            return True
+        if "geekFilterByLabel" in script:
+            return {
+                "code": 0,
+                "friends": [{"friendId": 9, "name": "旧会话",
+                             "securityId": "", "lastMessage": None}],
+            }
+        return True
+
+    page.evaluate = evaluate
+    pool = MagicMock()
+    pool.acquire = AsyncMock(return_value=page)
+    pool.detach = AsyncMock()
+    reader = _reader_with_pool(pool)
+
+    result = await reader.read_conversation(hr_name="旧会话")
+
+    assert result["status"] == "failed"
+    assert result["error_type"] == "conversation_not_found"

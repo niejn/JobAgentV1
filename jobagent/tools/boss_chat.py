@@ -55,4 +55,37 @@ def build_boss_chat_list_tool(settings: Settings) -> StructuredTool:
     )
 
 
-__all__ = ["BossChatListRequest", "build_boss_chat_list_tool"]
+__all__ = [
+    "BossChatHistoryRequest",
+    "build_boss_chat_history_tool",
+    "BossChatListRequest",
+    "build_boss_chat_list_tool",
+]
+
+
+class BossChatHistoryRequest(BaseModel):
+    """Read the chat history with one HR. Read-only."""
+
+    hr_name: str = Field(description="HR 姓名（与 list_boss_greetings 返回的 name 一致）。")
+    page: int = Field(default=1, ge=1, le=10, description="消息页码（每页 20 条，从最新往回）。")
+
+
+def build_boss_chat_history_tool(settings: Settings) -> StructuredTool:
+    """Expose BossChatReader.read_conversation as an agent tool."""
+
+    async def _run(hr_name: str, page: int = 1) -> dict[str, Any]:
+        from jobagent.applier.boss_chat import BossChatReader
+
+        async with BossChatReader(settings) as reader:
+            return await reader.read_conversation(hr_name=hr_name, page=page)
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="read_boss_conversation",
+        description=(
+            "读取与指定 HR 的 Boss 聊天记录（REST 接口，只读，不操作页面）。"
+            "hr_name 用 list_boss_greetings 查到的 name。返回按时间排列的消息"
+            "（发送方向/时间/文本）。"
+        ),
+        args_schema=BossChatHistoryRequest,
+    )

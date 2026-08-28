@@ -64,6 +64,7 @@ from jobagent.tools import (
     SharedUrlSaver,
     UserDocumentReader,
     XhsAuthorPostsBrowser,
+    build_boss_chat_history_tool,
     build_boss_chat_list_tool,
     build_boss_chat_reply_tool,
     build_boss_greet_jobs_tool,
@@ -988,6 +989,10 @@ def build_job_agent(
                 lambda: build_boss_resume_upload_tool(settings, crawl_gate=crawl_gate),
             ),
             ("list_boss_greetings", lambda: build_boss_chat_list_tool(settings)),
+            (
+                "read_boss_conversation",
+                lambda: build_boss_chat_history_tool(settings),
+            ),
             ("reply_boss_greeting", lambda: build_boss_chat_reply_tool(settings)),
             ("update_job_progress", lambda: build_update_job_progress_tool(state_db)),
             ("get_job_progress", lambda: build_get_job_progress_tool(state_db)),
