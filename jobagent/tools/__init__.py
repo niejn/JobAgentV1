@@ -1,5 +1,6 @@
 """Business tools available to the conversational JobAgent."""
 
+from jobagent.tools.boss_chat import build_boss_chat_list_tool
 from jobagent.tools.boss_greet import (
     BossGreetingsManager,
     build_boss_greet_jobs_tool,
@@ -55,6 +56,7 @@ __all__ = [
     "BossGreetingsManager",
     "build_boss_greet_jobs_tool",
     "build_boss_resume_upload_tool",
+    "build_boss_chat_list_tool",
     "CandidateProfileManager",
     "BossJobDiscovery",
     "CandidateResumeFile",
