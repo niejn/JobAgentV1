@@ -60,7 +60,7 @@ def _happy_page() -> MagicMock:
             return _wrap(search)
         if "user-list" in selector:
             return _wrap(row)
-        if "textarea" in selector or "contenteditable" in selector:
+        if "chat-input" in selector or "textarea" in selector or "contenteditable" in selector:
             return _wrap(input_area)
         if "发送" in selector:
             return _wrap(send)
@@ -135,7 +135,7 @@ async def test_send_unconfirmed_residual_input(tmp_path: Path) -> None:
     def locator(selector: str):
         holder = MagicMock()
         loc = _loc()
-        if "textarea" in selector or "contenteditable" in selector:
+        if "chat-input" in selector or "textarea" in selector or "contenteditable" in selector:
             # draft still sitting in the (contenteditable) editor
             loc.inner_text = AsyncMock(return_value="您好，感谢关注！")
         holder.first = loc
@@ -253,7 +253,7 @@ async def test_multiline_message_uses_ctrl_enter_not_enter(tmp_path: Path) -> No
 
     def locator(selector: str):
         holder = MagicMock()
-        if "textarea" in selector or "contenteditable" in selector:
+        if "chat-input" in selector or "textarea" in selector or "contenteditable" in selector:
             area = _loc()
             area.type = AsyncMock(side_effect=lambda text, **k: typed.append(text))
             holder.first = area
@@ -289,7 +289,7 @@ async def test_send_unverified_when_editor_clears_but_echo_fails() -> None:
     def locator(selector: str):
         holder = MagicMock()
         loc = _loc()
-        if "textarea" in selector or "contenteditable" in selector:
+        if "chat-input" in selector or "textarea" in selector or "contenteditable" in selector:
             loc.inner_text = AsyncMock(return_value="")  # editor cleared
         holder.first = loc
         return holder
