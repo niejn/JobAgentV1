@@ -136,6 +136,21 @@ JD + Candidate Background
   CDP 监听（Runtime.enable）都会触发页面跳 about:blank。因此：
   (1) 禁止 attach 用户正在浏览的页面；(2) 自动化只用自建 tab（discover 模式）；
   (3) 情报采集用 chrome://net-export（进程外文件日志，页面不可见）而非 F12/CDP。
+- **net03 二次挖掘（420MB 版，覆盖 reply 真机测试时段）**：
+  `zpchat/session/geekEnter`（POST，zp_token+XRW+form 头，body 不可见——
+  Boss 前端点击会话时自动发送，reply 走 UI 时无需复刻）；
+  `zpgeek/geek/resume/synclist`（附件列表同步——上传后验证在列的接口）；
+  `zpgeek/resume/geek/preview/check|data`（附件预览，疑似简历请求「同意」
+  流程的一部分）；简历域大批配置接口（parser/restrict/complete/optimizer）。
+  **硬限制**：中间档无请求/响应体。质变需要一次 raw bytes 档录制
+  （可拿到 historyMsg 消息结构、getGeekFriendList 响应、15:33 简历请求
+  控件的完整消息体）。
+- **聊天消息类型枚举（chat-core 实锤）**：TEXT=1, SOUND=2, IMAGE=3,
+  ACTION=4, DIALOG=7, JOB_DESC=8, **RESUME=9**, HYPERLINK=12, VIDEO=13,
+  INTERVIEW=14, RESUME_SHARE=19, STICKER=20, STAR_RATE=25…
+  15:33 的空消息=简历请求卡片（type 9/action 类），渲染为「拒绝/同意」
+  按钮（`.btn-v2 btn-outline-v2` / `.btn-v2 btn-sure-v2`，app chunk
+  @1063580 组件）。
 - **接口头矩阵（net03 成功请求逐个比对，2026-08-28 定稿）**：
   `zp_token` 头的值 = cookie `bst`（chat-core CookieUtil.get("bst") 实锤）。
   各接口组合不同——filterByLabel: zp_token；getGeekFriendList: zp_token +
