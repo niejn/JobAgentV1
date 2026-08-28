@@ -128,22 +128,36 @@ class BossChatSender:
     async def _send_on_page(
         self, pool: Any, *, hr_name: str, message: str
     ) -> dict[str, Any]:
-        from jobagent.applier.boss_chat_session import (
-            chat_page_url_path,
-            get_chat_page,
-        )
-
-        page, fresh = await get_chat_page(pool)
-        if fresh:
-            # First use this process: load and park the chat page once.
+        # One-shot tab, NOT the parked page: the parked tab persists
+        # across processes (by design, for the read tools) and collects
+        # editor residue + diverges from the tab the user chats in
+        # manually. Live case (2026-08-28 22:32): the previous draft
+        # 「你好」 was still sitting in the parked editor and the new send
+        # shipped it together with (or instead of) the fresh text. A
+        # fresh tab per send starts clean and closes after - residue can
+        # never accumulate or leak between sends.
+        page = await pool.acquire()
+        try:
+            result = await self._send_flow(page, hr_name=hr_name, message=message)
+        finally:
             try:
-                await page.goto(
-                    f"https://www.zhipin.com{chat_page_url_path()}",
-                    wait_until="domcontentloaded",
-                    timeout=_NAV_TIMEOUT_MS,
-                )
+                await page.close()
             except Exception:
-                logger.info("Boss chat reply: nav interrupted", exc_info=True)
+                pass
+            await pool.release(page)
+        return result
+
+    async def _send_flow(
+        self, page: Any, *, hr_name: str, message: str
+    ) -> dict[str, Any]:
+        try:
+            await page.goto(
+                f"https://www.zhipin.com{_CHAT_PAGE_PATH}",
+                wait_until="domcontentloaded",
+                timeout=_NAV_TIMEOUT_MS,
+            )
+        except Exception:
+            logger.info("Boss chat reply: nav interrupted", exc_info=True)
             deadline = asyncio.get_event_loop().time() + 20.0
             while asyncio.get_event_loop().time() < deadline:
                 if urlsplit(str(page.url or "")).path == _CHAT_PAGE_PATH:
@@ -245,6 +259,10 @@ class BossChatSender:
             }
         try:
             await input_area.click(timeout=3_000)
+            # Defensive wipe: clear any residue before typing - the
+            # draft-then-send contract must be exact.
+            await page.keyboard.press("Control+a")
+            await page.keyboard.press("Delete")
             # ~33 chars/sec, human-ish. Newlines are Ctrl+Enter - typing a
             # bare \n would hit Enter and SEND a half-written message.
             segments = message.split("\n")

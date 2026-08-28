@@ -277,8 +277,11 @@ async def test_multiline_message_uses_ctrl_enter_not_enter(tmp_path: Path) -> No
 
     assert result["status"] == "ok"
     assert typed == ["第一行", "第二行", "第三行"]  # no \n ever typed
-    # exactly: newline,newline (between 3 segments) + ONE Enter to send
-    assert keys == ["Control+Enter", "Control+Enter", "Enter"]
+    # wipe (Ctrl+a + Delete), newlines between segments, ONE Enter to send
+    assert keys == [
+        "Control+a", "Delete",
+        "Control+Enter", "Control+Enter", "Enter",
+    ]
 
 
 @pytest.mark.asyncio
