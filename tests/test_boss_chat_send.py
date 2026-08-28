@@ -38,6 +38,9 @@ def _happy_page() -> MagicMock:
     page.url = "https://www.zhipin.com/web/geek/chat"
     page.is_closed = lambda: False
     page.goto = AsyncMock()
+    keyboard = MagicMock()
+    keyboard.press = AsyncMock()
+    page.keyboard = keyboard
 
     async def evaluate(script: str):
         return True  # settle probes
@@ -190,6 +193,9 @@ async def test_search_box_slow_mount_is_retried(tmp_path: Path) -> None:
     page.url = "https://www.zhipin.com/web/geek/chat"
     page.is_closed = lambda: False
     page.goto = AsyncMock()
+    keyboard = MagicMock()
+    keyboard.press = AsyncMock()
+    page.keyboard = keyboard
     page.title = AsyncMock(return_value="聊天")
 
     ready_states = ["loading", "loading", "complete"]
@@ -222,3 +228,49 @@ async def test_search_box_slow_mount_is_retried(tmp_path: Path) -> None:
 
     # search eventually visible -> flow proceeds to row click (not found here)
     assert result["error_type"] != "search_box_not_found"
+
+
+@pytest.mark.asyncio
+async def test_multiline_message_uses_ctrl_enter_not_enter(tmp_path: Path) -> None:
+    """Live contract (2026-08-28): Enter SENDS, Ctrl+Enter makes a newline.
+    A bare \\n inside type() would fire Enter per line and send a burst of
+    half-messages - typing must split on \\n and press Ctrl+Enter between
+    segments, with a single Enter at the very end."""
+    import jobagent.applier.boss_chat_session as session
+
+    session._parked = None
+    page = _happy_page()
+    typed: list[tuple[str, ...]] = []
+    keys: list[str] = []
+    keyboard = MagicMock()
+    keyboard.press = AsyncMock(side_effect=lambda k: keys.append(k))
+    page.keyboard = keyboard
+
+    # capture type() targets and press() calls
+    search = _loc()
+
+    def locator(selector: str):
+        holder = MagicMock()
+        if "textarea" in selector or "contenteditable" in selector:
+            area = _loc()
+            area.type = AsyncMock(side_effect=lambda text, **k: typed.append(text))
+            holder.first = area
+        elif "boss-search" in selector or "placeholder" in selector:
+            holder.first = search
+        elif "user-list" in selector:
+            holder.first = _loc()
+        else:
+            holder.first = _loc(visible=False)
+        return holder
+
+    page.locator = locator
+    sender = _sender_with(page)
+
+    result = await sender.send_reply(
+        hr_name="张HR", message="第一行\n第二行\n第三行"
+    )
+
+    assert result["status"] == "ok"
+    assert typed == ["第一行", "第二行", "第三行"]  # no \n ever typed
+    # exactly: newline,newline (between 3 segments) + ONE Enter to send
+    assert keys == ["Control+Enter", "Control+Enter", "Enter"]
