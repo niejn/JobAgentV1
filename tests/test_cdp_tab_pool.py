@@ -164,3 +164,25 @@ async def test_user_tabs_do_not_deadlock_the_pool() -> None:
     await pool.release(work)
     work2 = await pool.acquire()         # idle reuse, still no hang
     assert work2 is work
+
+
+@pytest.mark.asyncio
+async def test_prune_blank_tabs_keeps_keeper_only() -> None:
+    """Warlock victims pile up as about:blank tabs; pruning must close
+    all blanks except the keeper (itself blank by design) and never
+    touch real tabs."""
+    pool, ctx = _make(existing=2, max_tabs=6)
+    work = await pool.acquire()  # creates the (blank) keeper
+    await pool.release(work)
+    keeper = pool._keeper
+    # two pre-existing blank tabs (user-left / warlock victims)
+    for _ in range(2):
+        ctx.pages.append(FakePage(url="about:blank"))
+
+    closed = await pool.prune_blank_tabs()
+
+    assert closed == 2
+    blanks = [p for p in ctx.pages if p.url == "about:blank"]
+    assert len(blanks) == 1 and blanks[0] is keeper
+    # real tabs untouched: 2 existing + released work tab + keeper
+    assert len(ctx.pages) == 4

@@ -75,6 +75,7 @@ def _pool_with(page: MagicMock) -> MagicMock:
     pool.acquire = AsyncMock(return_value=page)
     pool.detach = AsyncMock()
     pool.release = AsyncMock()
+    pool.prune_blank_tabs = AsyncMock()
     return pool
 
 
@@ -233,35 +234,33 @@ async def test_search_box_slow_mount_is_retried(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_multiline_message_uses_ctrl_enter_not_enter(tmp_path: Path) -> None:
-    """Live contract (2026-08-28): Enter SENDS, Ctrl+Enter makes a newline.
-    A bare \\n inside type() would fire Enter per line and send a burst of
-    half-messages - typing must split on \\n and press Ctrl+Enter between
-    segments, with a single Enter at the very end."""
-    import jobagent.applier.boss_chat_session as session
-
-    session._parked = None
+async def test_message_written_via_single_inserttext(tmp_path: Path) -> None:
+    """Live contract (88-char failure, 2026-08-28): element.type's N
+    synthetic key events lose text on the contenteditable editor. The
+    write must be ONE page.evaluate(selectAll+insertText) - no per-char
+    typing - with a single element-bound Enter to send."""
     page = _happy_page()
-    typed: list[tuple[str, ...]] = []
-    keys: list[str] = []
-    keyboard = MagicMock()
-    keyboard.press = AsyncMock(side_effect=lambda k: keys.append(k))
-    page.keyboard = keyboard
+    written: list[object] = []
+    enters: list[str] = []
 
-    # capture type() targets and press() calls
-    search = _loc()
+    async def evaluate(script: str, payload: dict | None = None):
+        if isinstance(payload, str) and "insertText" in script:
+            written.append(payload)  # the single page-native write
+            return True
+        return True  # settle probes / panel echo
+
+    page.evaluate = evaluate
 
     def locator(selector: str):
         holder = MagicMock()
         if "chat-input" in selector or "textarea" in selector or "contenteditable" in selector:
             area = _loc()
-            area.type = AsyncMock(side_effect=lambda text, **k: typed.append(text))
             area.press = AsyncMock(
-                side_effect=lambda key, **k: keys.append(key)
-            )  # element-bound Enter send path
+                side_effect=lambda key, **k: enters.append(key)
+            )
             holder.first = area
         elif "boss-search" in selector or "placeholder" in selector:
-            holder.first = search
+            holder.first = _loc()
         elif "user-list" in selector:
             holder.first = _loc()
         else:
@@ -276,12 +275,9 @@ async def test_multiline_message_uses_ctrl_enter_not_enter(tmp_path: Path) -> No
     )
 
     assert result["status"] == "ok"
-    assert typed == ["第一行", "第二行", "第三行"]  # no \n ever typed
-    # wipe (Ctrl+a + Delete), newlines between segments, ONE Enter to send
-    assert keys == [
-        "Control+a", "Delete",
-        "Control+Enter", "Control+Enter", "Enter",
-    ]
+    assert written == ["第一行\n第二行\n第三行"]
+    # and a single element-bound Enter sends it
+    assert enters == ["Enter"]
 
 
 @pytest.mark.asyncio
@@ -303,9 +299,11 @@ async def test_send_unverified_when_editor_clears_but_echo_fails() -> None:
     page.locator = locator
 
     async def evaluate(script: str, payload: dict | None = None):
-        if payload is None:
-            return True
-        raise RuntimeError("execution context destroyed")  # echo check dies
+        if "insertText" in script:
+            return True  # the write succeeds
+        if "innerText" in script:
+            raise RuntimeError("execution context destroyed")  # echo dies
+        return True  # settle probes
 
     page.evaluate = evaluate
     sender = _sender_with(page)

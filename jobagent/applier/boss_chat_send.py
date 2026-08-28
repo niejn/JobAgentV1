@@ -136,6 +136,7 @@ class BossChatSender:
         # shipped it together with (or instead of) the fresh text. A
         # fresh tab per send starts clean and closes after - residue can
         # never accumulate or leak between sends.
+        await pool.prune_blank_tabs()  # warlock victims pile up otherwise
         page = await pool.acquire()
         try:
             result = await self._send_flow(page, hr_name=hr_name, message=message)
@@ -259,18 +260,32 @@ class BossChatSender:
             }
         try:
             await input_area.click(timeout=3_000)
-            # Defensive wipe: clear any residue before typing - the
-            # draft-then-send contract must be exact.
-            await page.keyboard.press("Control+a")
-            await page.keyboard.press("Delete")
-            # ~33 chars/sec, human-ish. Newlines are Ctrl+Enter - typing a
-            # bare \n would hit Enter and SEND a half-written message.
-            segments = message.split("\n")
-            for index, segment in enumerate(segments):
-                if segment:
-                    await input_area.type(segment, delay=30)
-                if index < len(segments) - 1:
-                    await page.keyboard.press(_NEWLINE_KEYS)
+            # Page-native write: selectAll + insertText in ONE evaluate.
+            # Live finding (88-char send, 2026-08-28): element.type's 88
+            # synthetic key events on the contenteditable editor lost the
+            # text entirely (editor read back EMPTY after "typing"), so
+            # Enter shipped nothing. execCommand('insertText') is the
+            # editor's real input path (fires the input event Vue binds
+            # to) with ZERO synthetic keystrokes.
+            inserted = await page.evaluate(
+                """(text) => {
+                    const ed = document.querySelector('#chat-input');
+                    if (!ed) return false;
+                    ed.focus();
+                    document.execCommand('selectAll', false, null);
+                    document.execCommand('insertText', false, text);
+                    return (ed.innerText || '').includes(
+                        text.replace(/\n/g, '').slice(0, 10)
+                    );
+                }""",
+                message,
+            )
+            if inserted is not True:
+                return {
+                    "status": "failed",
+                    "error_type": "typing_failed",
+                    "message": "写入输入框后未能读到文案（编辑器可能未激活）。",
+                }
         except Exception as exc:
             return {
                 "status": "failed",

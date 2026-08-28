@@ -163,6 +163,39 @@ class CdpTabPool:
         self._active.clear()
         self._wake()
 
+    @property
+    def keeper(self) -> Page | None:
+        """The blank tab keeping the browser alive (may be None)."""
+
+        return self._keeper
+
+    async def prune_blank_tabs(self) -> int:
+        """Close leftover about:blank tabs (warlock victims), keeping one.
+
+        The keeper IS a blank tab by design, so exactly one blank always
+        survives; user tabs (any real URL, incl. the new-tab page) are
+        never touched.
+        """
+
+        blanks = [
+            p
+            for p in cast("list[Page]", self._context.pages)
+            if str(p.url or "") == "about:blank"
+        ]
+        keeper = self._keeper if self._keeper else blanks[0] if blanks else None
+        closed = 0
+        for page in blanks:
+            if keeper is not None and page is keeper:
+                continue
+            try:
+                await page.close()
+                closed += 1
+            except Exception:
+                pass
+        if closed:
+            logger.info("TabPool: pruned %d blank tab(s)", closed)
+        return closed
+
     async def detach(self, page: Page) -> None:
         """Stop tracking a tab: it stays open, outside pool management.
 

@@ -71,6 +71,7 @@ def _reader_with(page: MagicMock) -> BossChatReader:
     pool = MagicMock()
     pool.acquire = AsyncMock(return_value=page)
     pool.detach = AsyncMock()
+    pool.prune_blank_tabs = AsyncMock()
     pool.release = AsyncMock()
     reader._tab_pool = pool
     return reader
@@ -172,6 +173,7 @@ async def test_parked_chat_page_is_reused_without_reload() -> None:
     pool = MagicMock()
     pool.acquire = AsyncMock(return_value=page)
     pool.detach = AsyncMock()
+    pool.prune_blank_tabs = AsyncMock()
     reader = _reader_with_pool(pool)
 
     first = await reader.list_greetings(filter_name="全部")
@@ -226,6 +228,7 @@ async def test_read_conversation_single_evaluate_chain() -> None:
     pool = MagicMock()
     pool.acquire = AsyncMock(return_value=page)
     pool.detach = AsyncMock()
+    pool.prune_blank_tabs = AsyncMock()
     reader = _reader_with_pool(pool)
 
     result = await reader.read_conversation(hr_name="张HR")
@@ -264,6 +267,7 @@ async def test_read_conversation_step_failures_are_typed() -> None:
     pool = MagicMock()
     pool.acquire = AsyncMock(return_value=page)
     pool.detach = AsyncMock()
+    pool.prune_blank_tabs = AsyncMock()
     reader = _reader_with_pool(pool)
 
     r1 = await reader.read_conversation(hr_name="无此人")
@@ -282,7 +286,6 @@ async def test_read_conversation_step_failures_are_typed() -> None:
 async def test_read_conversation_self_heals_on_dead_page() -> None:
     """page_lost on the first evaluate (warlock's delayed kill) gets ONE
     fresh-tab retry - the new page lands inside a fresh fetch budget."""
-    import jobagent.applier.boss_chat as chat_mod
     import jobagent.applier.boss_chat_session as session_mod
 
     session_mod._parked = None
@@ -313,6 +316,7 @@ async def test_read_conversation_self_heals_on_dead_page() -> None:
     pool = MagicMock()
     pool.acquire = AsyncMock(side_effect=pages)
     pool.detach = AsyncMock()
+    pool.prune_blank_tabs = AsyncMock()
     reader = _reader_with_pool(pool)
 
     result = await reader.read_conversation(hr_name="张HR")

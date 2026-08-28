@@ -33,6 +33,7 @@ async def get_chat_page(pool: CdpTabPool) -> tuple[Any, bool]:
     """Return the parked chat tab, acquiring a fresh one only if needed."""
 
     global _parked
+    await pool.prune_blank_tabs()  # warlock victims pile up otherwise
     if _parked is not None and not _parked.is_closed():
         try:
             if urlsplit(str(_parked.url or "")).path == _CHAT_PAGE_PATH:
