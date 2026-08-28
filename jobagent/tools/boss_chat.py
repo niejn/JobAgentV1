@@ -97,9 +97,10 @@ def build_boss_chat_history_tool(settings: Settings) -> StructuredTool:
         coroutine=_run,
         name="read_boss_conversation",
         description=(
-            "读取与指定 HR 的 Boss 聊天记录（REST 接口，只读，不操作页面）。"
-            "hr_name 用 list_boss_greetings 查到的 name。返回按时间排列的消息"
-            "（发送方向/时间/文本）。"
+            "读取与指定 HR 的 Boss 聊天记录（REST，只读）。**直接用 hr_name 调用，"
+            "不要先调 list_boss_greetings**——本工具会在页内自行匹配名单，"
+            "省下的页面预算能显著降低被反爬拦截的概率。"
+            "返回按时间排列的消息（发送方向/时间/文本）。"
         ),
         args_schema=BossChatHistoryRequest,
     )

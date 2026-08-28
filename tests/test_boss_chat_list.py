@@ -276,3 +276,47 @@ async def test_read_conversation_step_failures_are_typed() -> None:
         "api_rejected",
     )
     assert r3["api_step"] == "history"
+
+
+@pytest.mark.asyncio
+async def test_read_conversation_self_heals_on_dead_page() -> None:
+    """page_lost on the first evaluate (warlock's delayed kill) gets ONE
+    fresh-tab retry - the new page lands inside a fresh fetch budget."""
+    import jobagent.applier.boss_chat as chat_mod
+    import jobagent.applier.boss_chat_session as session_mod
+
+    session_mod._parked = None
+    calls = {"n": 0}
+
+    def make_page():
+        page = MagicMock()
+        page.url = "https://www.zhipin.com/web/geek/chat"
+        page.is_closed = lambda: False
+        page.goto = AsyncMock()
+
+        async def evaluate(script: str, payload: dict | None = None):
+            if payload is None:
+                return True
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("Execution context was destroyed")
+            return {
+                "step": "done",
+                "messages": [{"fromId": 1, "toId": 2, "time": 1,
+                              "type": 1, "text": "hi"}],
+            }
+
+        page.evaluate = evaluate
+        return page
+
+    pages = [make_page(), make_page()]
+    pool = MagicMock()
+    pool.acquire = AsyncMock(side_effect=pages)
+    pool.detach = AsyncMock()
+    reader = _reader_with_pool(pool)
+
+    result = await reader.read_conversation(hr_name="张HR")
+
+    assert result["status"] == "ok"
+    assert calls["n"] == 2  # died once, healed once
+    assert pool.acquire.await_count == 2

@@ -267,30 +267,47 @@ class BossChatReader:
         """
 
         assert self._tab_pool is not None
-        try:
-            page_obj, fresh = await _get_parked_page(self._tab_pool)
-            if fresh:
-                prepared = await self._prepare_parked_page(page_obj)
-                if prepared is not None:
-                    return prepared
-            raw = await asyncio.wait_for(
-                page_obj.evaluate(
-                    _FETCH_CONVERSATION_JS, {"hrName": hr_name, "page": page}
-                ),
-                timeout=_LIST_TIMEOUT_S,
-            )
-        except TimeoutError:
-            return {
-                "status": "failed",
-                "error_type": "tab_pool_timeout",
-                "message": "浏览器 tab 池或请求超时。",
-            }
-        except Exception as exc:
-            return {
-                "status": "failed",
-                "error_type": "page_lost",
-                "message": f"页内读取被中断（页面可能被反爬跳转）: {exc}",
-            }
+        for attempt in range(2):
+            # attempt 2 only happens after a page_lost: warlock kills the
+            # parked tab with a delay AFTER the first automated round, so
+            # one fresh-tab retry usually lands inside the new budget.
+            try:
+                page_obj, fresh = await _get_parked_page(self._tab_pool)
+                if fresh:
+                    prepared = await self._prepare_parked_page(page_obj)
+                    if prepared is not None:
+                        return prepared
+                raw = await asyncio.wait_for(
+                    page_obj.evaluate(
+                        _FETCH_CONVERSATION_JS,
+                        {"hrName": hr_name, "page": page},
+                    ),
+                    timeout=_LIST_TIMEOUT_S,
+                )
+                break
+            except TimeoutError:
+                return {
+                    "status": "failed",
+                    "error_type": "tab_pool_timeout",
+                    "message": "浏览器 tab 池或请求超时。",
+                }
+            except Exception as exc:
+                if attempt == 0:
+                    logger.info(
+                        "Boss chat read: page died mid-evaluate, retrying "
+                        "on a fresh tab",
+                        exc_info=True,
+                    )
+                    # drop the dead parked page so the next loop gets a new tab
+                    import jobagent.applier.boss_chat_session as session_mod
+
+                    session_mod._parked = None
+                    continue
+                return {
+                    "status": "failed",
+                    "error_type": "page_lost",
+                    "message": f"页内读取被中断（页面可能被反爬跳转）: {exc}",
+                }
         if not isinstance(raw, dict):
             return {
                 "status": "failed",
