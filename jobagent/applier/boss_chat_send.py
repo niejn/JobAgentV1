@@ -36,9 +36,9 @@ _STEP_TIMEOUT_S = 20.0
 _MAX_MESSAGE_CHARS = 500
 
 _SEARCH_INPUT_ANCHORS = [
+    ".boss-search-input",  # live-verified class (2026-08-28 DOM probe)
     "input[placeholder*='联系人']",
     "input[placeholder*='搜索']",
-    ".boss-search-input",
 ]
 _INPUT_AREA_ANCHORS = [
     "textarea[placeholder*='输入']",
@@ -151,15 +151,37 @@ class BossChatSender:
                     "error_type": "chat_page_blocked",
                     "message": "聊天页被反爬拦截（跳转空白页）。建议暂停并稍后再试。",
                 }
+            # SPA mount: readyState completes before Vue mounts the chat
+            # UI - the original bug probed the search box once, instantly,
+            # and missed it (live failure 2026-08-28: search_box_not_found
+            # on a healthy page).
+            settle_deadline = asyncio.get_event_loop().time() + 15.0
+            while asyncio.get_event_loop().time() < settle_deadline:
+                try:
+                    if await page.evaluate("document.readyState === 'complete'"):
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
         # Parked page: drive the conversation without reloading.
 
         # 1) Find the search box and narrow the list to the target HR.
-        search = await self._first_visible(page, _SEARCH_INPUT_ANCHORS)
+        # Retry: the chat SPA mounts asynchronously (this miss was the
+        # live bug - probing once right after nav found nothing).
+        search = None
+        search_deadline = asyncio.get_event_loop().time() + 15.0
+        while asyncio.get_event_loop().time() < search_deadline:
+            search = await self._first_visible(page, _SEARCH_INPUT_ANCHORS)
+            if search is not None:
+                break
+            await asyncio.sleep(0.5)
         if search is None:
+            diag = await self._page_diag(page)
             return {
                 "status": "failed",
                 "error_type": "search_box_not_found",
                 "message": "未找到会话搜索框（聊天页结构可能已变化）。",
+                "page_diag": diag,
             }
         try:
             await search.fill(hr_name)
@@ -170,16 +192,24 @@ class BossChatSender:
                 "message": f"搜索会话失败: {exc}",
             }
         # 2) Click the conversation row containing the HR name.
+        # Live DOM (user-provided 2026-08-28, chat-new v5535): rows are
+        # DIVs, not <li>; the HR name sits in <span class="name-text">.
         row = None
         row_deadline = asyncio.get_event_loop().time() + 10.0
         while asyncio.get_event_loop().time() < row_deadline:
-            row = page.locator(f".user-list li:has-text('{hr_name}')").first
-            try:
-                if await row.is_visible():
-                    break
-            except Exception:
-                pass
-            row = None
+            for sel in (
+                f".user-list .name-text:text-is('{hr_name}')",
+                f".user-list :text('{hr_name}')",
+            ):
+                candidate = page.locator(sel).first
+                try:
+                    if await candidate.is_visible():
+                        row = candidate
+                        break
+                except Exception:
+                    continue
+            if row is not None:
+                break
             await asyncio.sleep(0.5)
         if row is None:
             return {
@@ -248,6 +278,18 @@ class BossChatSender:
             }
         logger.info("Boss chat reply sent to %s (%d chars)", hr_name, len(message))
         return {"status": "ok", "to": hr_name, "chars": len(message)}
+
+    async def _page_diag(self, page: Any) -> dict[str, Any]:
+        """Snapshot page health for structured failures (blank vs restyle)."""
+
+        try:
+            return {
+                "url": str(page.url or "")[:80],
+                "title": await page.title(),
+                "body_chars": await page.evaluate("document.body.innerText.length"),
+            }
+        except Exception as exc:
+            return {"url": str(page.url or "")[:80], "error": str(exc)[:120]}
 
     async def _first_visible(self, page: Any, selectors: list[str]) -> Any:
         for selector in selectors:

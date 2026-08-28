@@ -176,3 +176,49 @@ async def test_tool_confirmed_sends(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     assert result["status"] == "ok"
     assert sent[0]["message"] == "你好"
+
+
+@pytest.mark.asyncio
+async def test_search_box_slow_mount_is_retried(tmp_path: Path) -> None:
+    """Regression (live failure 2026-08-28): the chat SPA mounts after
+    readyState; probing the search box once right after nav missed it.
+    The sender must retry until it appears (or time out with diagnostics)."""
+    import jobagent.applier.boss_chat_session as session
+
+    session._parked = None
+    page = MagicMock()
+    page.url = "https://www.zhipin.com/web/geek/chat"
+    page.is_closed = lambda: False
+    page.goto = AsyncMock()
+    page.title = AsyncMock(return_value="聊天")
+
+    ready_states = ["loading", "loading", "complete"]
+
+    async def evaluate(script: str, payload: dict | None = None):
+        if "readyState" in script and payload is None:
+            return ready_states.pop(0) == "complete" if ready_states else True
+        return 100
+
+    page.evaluate = evaluate
+
+    visibility = [False, False, True]  # search box appears on 3rd probe
+    search = _loc()
+
+    def locator(selector: str):
+        holder = MagicMock()
+        if "boss-search" in selector or "placeholder" in selector:
+            search.is_visible = AsyncMock(
+                side_effect=lambda: visibility.pop(0) if visibility else True
+            )
+            holder.first = search
+        else:
+            holder.first = _loc(visible=False)
+        return holder
+
+    page.locator = locator
+    sender = _sender_with(page)
+
+    result = await sender.send_reply(hr_name="张HR", message="您好，感谢关注！")
+
+    # search eventually visible -> flow proceeds to row click (not found here)
+    assert result["error_type"] != "search_box_not_found"
