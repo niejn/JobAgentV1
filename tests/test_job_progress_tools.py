@@ -165,3 +165,29 @@ class TestProgressTools:
 
         assert result["count"] == 1
         assert result["records"][0]["job_id"] == "boss:a"
+
+
+@pytest.mark.asyncio
+async def test_same_state_note_only_update_persists(tmp_path) -> None:
+    """Regression (live false-ok 2026-08-28): correcting a wrong remark must
+    work without a state change. The old same-state branch returned the
+    record untouched - tools reported success, the note never changed."""
+    from jobagent.journey.job_registry import JobProgressStatus, SQLiteJobRegistry
+
+    with SQLiteJobRegistry(tmp_path / "jobs.db") as registry:
+        registry.upsert_discovered(
+            job_id="job-1", source="boss", company="梭翱", title="爬虫工程师"
+        )
+        registry.mark("job-1", JobProgressStatus.GREETED, note="2026-08-28 已回复")
+        # same-state correction: only the note changes
+        fixed = registry.mark(
+            "job-1", JobProgressStatus.GREETED, note="更正：回复未送达，等待人工跟进"
+        )
+        assert fixed.note == "更正：回复未送达，等待人工跟进"
+        reread = registry.get("job-1")
+        assert reread is not None
+        assert reread.note == "更正：回复未送达，等待人工跟进"
+        assert reread.status is JobProgressStatus.GREETED
+        # idempotent no-note re-mark stays a no-op
+        again = registry.mark("job-1", JobProgressStatus.GREETED)
+        assert again.note == "更正：回复未送达，等待人工跟进"

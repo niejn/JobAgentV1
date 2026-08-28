@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -231,15 +231,28 @@ class SQLiteJobRegistry:
     ) -> JobRecord:
         """Move one job to ``status``, validating the transition.
 
-        Marking ``greeted`` stamps ``greeted_at``; re-marking the current
-        status is a no-op so greeting tools stay idempotent.
+        Marking ``greeted`` stamps ``greeted_at``. Re-marking the current
+        status stays idempotent for the status itself, but a supplied
+        ``note`` is still persisted - note-only corrections (e.g. fixing a
+        wrong remark) are a legitimate same-state update. The old no-op
+        branch silently dropped the note and returned success, which
+        produced a live false-ok (2026-08-28: wrong remark could not be
+        corrected through the agent).
         """
 
         record = self.get(job_id)
         if record is None:
             raise KeyError(f"job not found in registry: {job_id}")
         if record.status is status:
-            return record
+            if not note or note == record.note:
+                return record
+            now = self._clock()
+            self._connection.execute(
+                "UPDATE job_records SET note = ?, last_seen_at = ? WHERE job_id = ?",
+                (note, now.isoformat(), job_id),
+            )
+            self._connection.commit()
+            return replace(record, note=note, last_seen_at=now)
         allowed = _ALLOWED_TRANSITIONS.get(record.status, frozenset())
         if status not in allowed:
             raise JobTransitionError(

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from langchain_core.tools import BaseTool, StructuredTool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from jobagent.artifacts import (
     ApplicationState,
@@ -27,6 +27,12 @@ class JobAnalysisArtifactInput(BaseModel):
 
 
 class ApplicationStateUpdateInput(BaseModel):
+    """Extra fields are FORBIDDEN: the agent once passed ``remark`` here,
+    pydantic silently dropped it, and the tool reported success while the
+    remark was never stored (live false-ok, 2026-08-28)."""
+
+    model_config = ConfigDict(extra="forbid")
+
     opportunity_id: str = Field(min_length=1)
     application_state: ApplicationState
 
