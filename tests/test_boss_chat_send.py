@@ -276,3 +276,36 @@ async def test_multiline_message_uses_ctrl_enter_not_enter(tmp_path: Path) -> No
     assert typed == ["第一行", "第二行", "第三行"]  # no \n ever typed
     # exactly: newline,newline (between 3 segments) + ONE Enter to send
     assert keys == ["Control+Enter", "Control+Enter", "Enter"]
+
+
+@pytest.mark.asyncio
+async def test_send_unverified_when_editor_clears_but_echo_fails() -> None:
+    """Live case #2 (2026-08-28): the send WORKED (message later showed
+    [送达]) but the panel-echo check errored -> the tool reported a hard
+    failure, inviting a duplicate resend. Editor-cleared + echo-unavailable
+    must be UNVERIFIED (probably sent, human confirms), not failed."""
+    page = _happy_page()
+
+    def locator(selector: str):
+        holder = MagicMock()
+        loc = _loc()
+        if "textarea" in selector or "contenteditable" in selector:
+            loc.inner_text = AsyncMock(return_value="")  # editor cleared
+        holder.first = loc
+        return holder
+
+    page.locator = locator
+
+    async def evaluate(script: str, payload: dict | None = None):
+        if payload is None:
+            return True
+        raise RuntimeError("execution context destroyed")  # echo check dies
+
+    page.evaluate = evaluate
+    sender = _sender_with(page)
+
+    result = await sender.send_reply(hr_name="张HR", message="你好")
+
+    assert result["status"] == "unverified"
+    assert result["editor_residual"] is False
+    assert "避免重复" in result["message"]

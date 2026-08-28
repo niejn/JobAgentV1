@@ -41,6 +41,8 @@ _SEARCH_INPUT_ANCHORS = [
     "input[placeholder*='搜索']",
 ]
 _INPUT_AREA_ANCHORS = [
+    "#chat-input",  # live DOM (user-supplied, chat-new v5535):
+    # <div contenteditable="true" id="chat-input" class="chat-input">
     "textarea[placeholder*='输入']",
     "textarea",
     "[contenteditable='true']",
@@ -272,42 +274,64 @@ class BossChatSender:
                 ),
                 "page_diag": await self._page_diag(page),
             }
-        # 5) STRONG verification (live lie, 2026-08-28: "input cleared"
-        # misread a contenteditable editor - input_value() THROWS on
-        # contenteditable, the except-branch read empty text and reported
-        # success while nothing was sent). Sent only if the message tail
-        # renders in the conversation panel AND the editor no longer
-        # holds it.
+        # 5) Verification with honest ambiguity handling.
+        # - live lie #1 (2026-08-28): "input cleared" misread a
+        #   contenteditable editor -> false success. Hence panel echo.
+        # - live lie #2 (same day): the send WORKED (message showed
+        #   [送达] in the list) but the panel check itself failed ->
+        #   false failure, which invites a duplicate resend. An editor
+        #   that no longer holds the text IS evidence of sending; a
+        #   missing panel echo with an empty editor is UNVERIFIED, not
+        #   failed.
         tail = message.strip().replace("\n", "")[-24:]
         await asyncio.sleep(1.5)
         try:
             editor_text = (await input_area.inner_text()) or ""
         except Exception:
             editor_text = ""
-        try:
-            panel_has_it = bool(
-                await page.evaluate(
-                    "t => document.body.innerText.replace(/\\s+/g, '').includes(t)",
-                    tail,
-                )
-            )
-        except Exception:
-            panel_has_it = False
         editor_holds_it = tail in editor_text.replace("\n", "")
-        if editor_holds_it or not panel_has_it:
+
+        async def _panel_echo() -> bool | None:
+            """True/False when the check runs; None when it cannot."""
+            try:
+                return bool(
+                    await page.evaluate(
+                        "t => document.body.innerText"
+                        ".replace(/\\s+/g, '').includes(t)",
+                        tail,
+                    )
+                )
+            except Exception:
+                return None
+
+        panel_has_it = await _panel_echo()
+        if panel_has_it is None:
+            await asyncio.sleep(1.5)  # render grace, then one retry
+            panel_has_it = await _panel_echo()
+
+        if editor_holds_it:
             return {
                 "status": "failed",
                 "error_type": "send_unconfirmed",
-                "message": (
-                    "消息未确认发出：输入框残留="
-                    f"{editor_holds_it}，聊天面板出现文案={panel_has_it}。"
-                    "若文案仍在输入框，人工按回车即可发出。"
-                ),
-                "editor_residual": editor_holds_it,
+                "message": "文案仍在输入框，未发出。人工按回车即可发出。",
+                "editor_residual": True,
                 "panel_echo": panel_has_it,
             }
-        logger.info("Boss chat reply verified in panel: %s", hr_name)
-        return {"status": "ok", "to": hr_name, "chars": len(message)}
+        if panel_has_it is True:
+            logger.info("Boss chat reply verified in panel: %s", hr_name)
+            return {"status": "ok", "to": hr_name, "chars": len(message)}
+        # editor cleared + echo unavailable: probably sent, cannot prove
+        return {
+            "status": "unverified",
+            "to": hr_name,
+            "chars": len(message),
+            "message": (
+                "消息很可能已发出（输入框已清空），但面板确认失败。"
+                "请人工查看会话列表最后一条消息后再决定是否重发，避免重复。"
+            ),
+            "editor_residual": False,
+            "panel_echo": panel_has_it,
+        }
 
     async def _page_diag(self, page: Any) -> dict[str, Any]:
         """Snapshot page health for structured failures (blank vs restyle)."""
