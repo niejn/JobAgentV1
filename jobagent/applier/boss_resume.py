@@ -74,6 +74,8 @@ async (payload) => {
   // (code 121 "请求不合法"). The __zp_stoken__ proof rides in cookies,
   // which credentials:"include" already forwards.
   const pageToken = ((window._PAGE || {}).token || "").split("|")[0];
+  const bstMatch = document.cookie.match(/(?:^|;\s*)bst=([^;]+)/);
+  const zpToken = bstMatch ? decodeURIComponent(bstMatch[1]) : "";
   const base = {
     "X-Requested-With": "XMLHttpRequest",
     "Content-Type": "application/x-www-form-urlencoded",
@@ -81,6 +83,7 @@ async (payload) => {
       + Date.now().toString(36),
   };
   if (pageToken) base.token = pageToken;
+  if (zpToken) base["zp_token"] = zpToken;
   // Boss's axios request interceptor stamps every call with a cache-buster
   // query param (Object.assign(params, {_: Date.now()})) - the zpgeek
   // gateway rejects saves without it (121 请求不合法, seen live even with

@@ -136,6 +136,13 @@ JD + Candidate Background
   CDP 监听（Runtime.enable）都会触发页面跳 about:blank。因此：
   (1) 禁止 attach 用户正在浏览的页面；(2) 自动化只用自建 tab（discover 模式）；
   (3) 情报采集用 chrome://net-export（进程外文件日志，页面不可见）而非 F12/CDP。
+- **接口头矩阵（net03 成功请求逐个比对，2026-08-28 定稿）**：
+  `zp_token` 头的值 = cookie `bst`（chat-core CookieUtil.get("bst") 实锤）。
+  各接口组合不同——filterByLabel: zp_token；getGeekFriendList: zp_token +
+  form-urlencoded body（无 token/XRW）；historyMsg: zp_token + XRW；
+  save.json: zp_token + token(短串=_PAGE.token 首段) + XRW + JSON。
+  全部已在 fetch 直传实现中对齐（上传 save.json 上次 121 的最后一块拼图
+  很可能就是缺 zp_token）。
 - **请求签名真实形态（net03 抓包，2026-08-28）**：Boss axios 拦截器附加的头
   `zp_token: V2RdMjFuz...~~|RdMjFuz...~~`（即 window._PAGE.token，fetch 直传
   路线已从 _PAGE 读取 ✅）+ `traceId: F-7700e62qTzWf2aDY`（F- 前缀 + 19 位

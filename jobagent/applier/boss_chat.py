@@ -52,14 +52,14 @@ _MAX_FRIENDS = 100
 
 _FETCH_LIST_JS = """
 async (payload) => {
-  const pageToken = ((window._PAGE || {}).token || "").split("|")[0];
+  const bstMatch = document.cookie.match(/(?:^|;\s*)bst=([^;]+)/);
+  const zpToken = bstMatch ? decodeURIComponent(bstMatch[1]) : "";
   const base = {
     "X-Requested-With": "XMLHttpRequest",
-    "Content-Type": "application/x-www-form-urlencoded",
     "traceId": "F-" + Math.random().toString(36).slice(2, 8)
       + Date.now().toString(36),
   };
-  if (pageToken) base.token = pageToken;
+  if (zpToken) base["zp_token"] = zpToken;
   const qs = "labelId=" + payload.labelId + "&_=" + Date.now();
   const res = await fetch(
     "/wapi/zprelation/friend/geekFilterByLabel?" + qs,
@@ -106,20 +106,23 @@ async (payload) => {
 # page load; the previous 3-stage Python flow burned them all at once.)
 _FETCH_CONVERSATION_JS = """
 async (payload) => {
-  const pageToken = ((window._PAGE || {}).token || "").split("|")[0];
-  const base = {
-    "X-Requested-With": "XMLHttpRequest",
-    "Content-Type": "application/json;charset=UTF-8",
-    "traceId": "F-" + Math.random().toString(36).slice(2, 8)
-      + Date.now().toString(36),
-  };
-  if (pageToken) base.token = pageToken;
+  // Header matrix verified against net03 captures of SUCCESSFUL calls:
+  //   filterByLabel/historyMsg: zp_token (+XRW for history)
+  //   getGeekFriendList: zp_token + form-urlencoded body, NO token/XRW
+  // zp_token's value IS cookie "bst" (chat-core reads it via CookieUtil).
+  const bstMatch = document.cookie.match(/(?:^|;\s*)bst=([^;]+)/);
+  const zpToken = bstMatch ? decodeURIComponent(bstMatch[1]) : "";
+  const traceId = "F-" + Math.random().toString(36).slice(2, 8)
+    + Date.now().toString(36);
   const jq = (p) => "&_=" + Date.now();
+  const base = {"traceId": traceId};
+  if (zpToken) base["zp_token"] = zpToken;
 
   // 1) label list -> find the friend by name
+  const listHeaders = {...base, "X-Requested-With": "XMLHttpRequest"};
   const list = await fetch(
     "/wapi/zprelation/friend/geekFilterByLabel?labelId=0" + jq(),
-    {method: "GET", credentials: "include", headers: base},
+    {method: "GET", credentials: "include", headers: listHeaders},
   ).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
   if (list.code !== 0) return {step: "list", code: list.code, message: list.message};
   const friends = ((list.zpData || {}).friendList) || [];
@@ -131,13 +134,16 @@ async (payload) => {
   let securityId = target.securityId || "";
   let bossId = target.encryptBossId || target.encryptFriendId || "";
   if (!securityId) {
-    const body = String(target.friendSource) === "1"
-      ? {dzFriendIds: String(target.friendId)}
-      : {friendIds: String(target.friendId)};
+    const formBody = String(target.friendSource) === "1"
+      ? "dzFriendIds=" + encodeURIComponent(target.friendId)
+      : "friendIds=" + encodeURIComponent(target.friendId);
+    const credsHeaders = {
+      ...base, "Content-Type": "application/x-www-form-urlencoded",
+    };
     const creds = await fetch(
-      "/wapi/zprelation/friend/getGeekFriendList.json" + jq(),
-      {method: "POST", credentials: "include", headers: base,
-       body: JSON.stringify(body)},
+      "/wapi/zprelation/friend/getGeekFriendList.json?" + jq().slice(1),
+      {method: "POST", credentials: "include", headers: credsHeaders,
+       body: formBody},
     ).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
     if (creds.code !== 0) {
       return {step: "creds", code: creds.code, message: creds.message};
@@ -153,11 +159,12 @@ async (payload) => {
   if (!bossId) return {step: "creds", code: 0, message: "no encryptBossId"};
 
   // 3) history
+  const histHeaders = {...base, "X-Requested-With": "XMLHttpRequest"};
   const hist = await fetch(
     "/wapi/zpchat/geek/historyMsg?bossId=" + encodeURIComponent(bossId)
       + "&maxMsgId=0&c=20&page=" + payload.page + "&src=0"
       + "&securityId=" + encodeURIComponent(securityId) + jq(),
-    {method: "GET", credentials: "include", headers: base},
+    {method: "GET", credentials: "include", headers: histHeaders},
   ).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
   if (hist.code !== 0) return {step: "history", code: hist.code, message: hist.message};
   const msgs = ((hist.zpData || {}).messages) || [];
