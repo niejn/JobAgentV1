@@ -256,6 +256,9 @@ async def test_multiline_message_uses_ctrl_enter_not_enter(tmp_path: Path) -> No
         if "chat-input" in selector or "textarea" in selector or "contenteditable" in selector:
             area = _loc()
             area.type = AsyncMock(side_effect=lambda text, **k: typed.append(text))
+            area.press = AsyncMock(
+                side_effect=lambda key, **k: keys.append(key)
+            )  # element-bound Enter send path
             holder.first = area
         elif "boss-search" in selector or "placeholder" in selector:
             holder.first = search

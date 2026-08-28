@@ -260,20 +260,27 @@ class BossChatSender:
                 "message": f"输入回复失败: {exc}",
             }
         # 4) Send: keyboard-only (no button exists - see input hint).
-        # Page-level keypress: focus is on the input right after typing,
-        # and page.keyboard skips the element actionability checks that
-        # stalled element.press for 30s in the live failure.
-        try:
-            await page.keyboard.press(_ENTER_SEND)
-        except Exception as exc:
-            return {
-                "status": "failed",
-                "error_type": "send_failed",
-                "message": (
-                    f"回车发送失败（内容仍在输入框，可人工按回车发出）: {exc}"
-                ),
-                "page_diag": await self._page_diag(page),
-            }
+        # Element press FIRST (focuses the editor, key lands on it for
+        # sure); page-level keyboard as fallback. Live finding: a bare
+        # page.keyboard Enter sometimes missed the editor when focus
+        # drifted after typing (message typed, never sent).
+        for send_attempt in range(2):
+            try:
+                if send_attempt == 0:
+                    await input_area.press(_ENTER_SEND, timeout=3_000)
+                else:
+                    await page.keyboard.press(_ENTER_SEND)
+                break
+            except Exception as exc:
+                if send_attempt == 1:
+                    return {
+                        "status": "failed",
+                        "error_type": "send_failed",
+                        "message": (
+                            f"回车发送失败（内容仍在输入框，可人工按回车发出）: {exc}"
+                        ),
+                        "page_diag": await self._page_diag(page),
+                    }
         # 5) Verification with honest ambiguity handling.
         # - live lie #1 (2026-08-28): "input cleared" misread a
         #   contenteditable editor -> false success. Hence panel echo.
@@ -309,6 +316,17 @@ class BossChatSender:
             await asyncio.sleep(1.5)  # render grace, then one retry
             panel_has_it = await _panel_echo()
 
+        if editor_holds_it:
+            # One self-heal Enter: the first keypress can miss the editor
+            # when focus drifted (live case 2026-08-28: text typed, Enter
+            # consumed, message stuck in the editor).
+            try:
+                await input_area.press(_ENTER_SEND, timeout=3_000)
+                await asyncio.sleep(1.0)
+                editor_text = (await input_area.inner_text()) or ""
+                editor_holds_it = tail in editor_text.replace("\n", "")
+            except Exception:
+                pass
         if editor_holds_it:
             return {
                 "status": "failed",
