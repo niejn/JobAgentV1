@@ -136,6 +136,14 @@ JD + Candidate Background
   CDP 监听（Runtime.enable）都会触发页面跳 about:blank。因此：
   (1) 禁止 attach 用户正在浏览的页面；(2) 自动化只用自建 tab（discover 模式）；
   (3) 情报采集用 chrome://net-export（进程外文件日志，页面不可见）而非 F12/CDP。
+- **请求签名真实形态（net03 抓包，2026-08-28）**：Boss axios 拦截器附加的头
+  `zp_token: V2RdMjFuz...~~|RdMjFuz...~~`（即 window._PAGE.token，fetch 直传
+  路线已从 _PAGE 读取 ✅）+ `traceId: F-7700e62qTzWf2aDY`（F- 前缀 + 19 位
+  混合串，已对齐格式）。`geekFilterByLabel?labelId=-1` 会在页面初始化时被
+  前端自己调用（内部过滤视图）。
+- **net03 新端点**：`/wapi/zpchat/exchange/test`（换电话前置校验，配合聊天
+  工具栏「换电话」按钮）、`/wapi/zpgeek/resume/attachment/checkbox.json`
+  （附件简历勾选状态，上传流程的一部分）。
 - **附件简历平台约束**：最多 3 个并存，上传 API =
   `/wapi/zpupload/resume/uploadFile.json`（multipart）+
   `/wapi/zpgeek/resume/attachment/save.json`（落库，code=0 即成功）；

@@ -77,7 +77,8 @@ async (payload) => {
   const base = {
     "X-Requested-With": "XMLHttpRequest",
     "Content-Type": "application/x-www-form-urlencoded",
-    "traceId": String(Date.now()) + Math.random().toString(16).slice(2, 10),
+    "traceId": "F-" + Math.random().toString(36).slice(2, 8)
+      + Date.now().toString(36),
   };
   if (pageToken) base.token = pageToken;
   // Boss's axios request interceptor stamps every call with a cache-buster
