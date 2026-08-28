@@ -207,6 +207,19 @@ async def test_read_conversation_chains_list_then_history() -> None:
     async def evaluate(script: str, payload: dict | None = None):
         if payload is None:
             return True
+        if "getGeekFriendList" in script:
+            # stage 2: securityId comes from the POST, not the label GET
+            return {
+                "code": 0,
+                "creds": [
+                    {
+                        "friendId": 20001,
+                        "friendSource": 1,
+                        "encryptBossId": "enc-boss-1",
+                        "securityId": "sec-token-1",
+                    }
+                ],
+            }
         if "geekFilterByLabel" in script:
             return {
                 "code": 0,
@@ -215,8 +228,7 @@ async def test_read_conversation_chains_list_then_history() -> None:
                         "friendId": 20001,
                         "friendSource": 1,
                         "name": "张HR",
-                        "encryptBossId": "enc-boss-1",
-                        "securityId": "sec-token-1",
+                        # securityId absent: forces the two-stage fetch
                         "lastMessage": None,
                     }
                 ],
@@ -266,9 +278,11 @@ async def test_read_conversation_without_security_id_fails_loudly() -> None:
         if "geekFilterByLabel" in script:
             return {
                 "code": 0,
-                "friends": [{"friendId": 9, "name": "旧会话",
+                "friends": [{"friendId": 91001, "friendSource": 0, "name": "旧会话",
                              "securityId": "", "lastMessage": None}],
             }
+        if "getGeekFriendList" in script:
+            return {"code": 0, "creds": []}  # stage 2 finds nothing
         return True
 
     page.evaluate = evaluate
@@ -280,4 +294,4 @@ async def test_read_conversation_without_security_id_fails_loudly() -> None:
     result = await reader.read_conversation(hr_name="旧会话")
 
     assert result["status"] == "failed"
-    assert result["error_type"] == "conversation_not_found"
+    assert result["error_type"] == "security_id_unavailable"

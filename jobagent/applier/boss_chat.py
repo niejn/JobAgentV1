@@ -100,12 +100,46 @@ async (payload) => {
 """
 
 
+_FETCH_FRIEND_CREDS_JS = """
+async (payload) => {
+  const pageToken = ((window._PAGE || {}).token || "").split("|")[0];
+  const base = {
+    "X-Requested-With": "XMLHttpRequest",
+    "Content-Type": "application/json;charset=UTF-8",
+    "traceId": "F-" + Math.random().toString(36).slice(2, 8)
+      + Date.now().toString(36),
+  };
+  if (pageToken) base.token = pageToken;
+  // Live-verified (chat-core fetchFriendList): friendIds/dzFriendIds are
+  // comma-joined id lists split by friendSource (0=boss, 1=dz).
+  const body = {};
+  if (payload.bossIds) body.friendIds = payload.bossIds;
+  if (payload.dzIds) body.dzFriendIds = payload.dzIds;
+  const res = await fetch(
+    "/wapi/zprelation/friend/getGeekFriendList.json?_=" + Date.now(),
+    {method: "POST", credentials: "include",
+     headers: base, body: JSON.stringify(body)},
+  ).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
+  if (res.code !== 0) return {code: res.code, message: res.message};
+  const list = (res.zpData && res.zpData.result) || [];
+  return {
+    code: 0,
+    creds: list.map((f) => ({
+      friendId: f.friendId || f.uid,
+      friendSource: f.friendSource,
+      encryptBossId: f.encryptBossId || "",
+      securityId: f.securityId || "",
+    })).filter((f) => f.securityId),
+  };
+}
+"""
+
 _FETCH_HISTORY_JS = """
 async (payload) => {
   const pageToken = ((window._PAGE || {}).token || "").split("|")[0];
   const base = {
     "X-Requested-With": "XMLHttpRequest",
-    "Content-Type": "application/x-www-form-urlencoded",
+    "Content-Type": "application/json;charset=UTF-8",
     "traceId": "F-" + Math.random().toString(36).slice(2, 8)
       + Date.now().toString(36),
   };
@@ -227,18 +261,39 @@ class BossChatReader:
         if listing.get("status") != "ok":
             return listing
         match = next(
-            (
-                f
-                for f in listing["greetings"]
-                if f.get("name") == hr_name and f.get("securityId")
-            ),
-            None,
+            (f for f in listing["greetings"] if f.get("name") == hr_name), None
         )
         if match is None:
             return {
                 "status": "failed",
                 "error_type": "conversation_not_found",
-                "message": f"会话列表中没有找到带 securityId 的「{hr_name}」。",
+                "message": f"会话列表中没有找到「{hr_name}」。",
+            }
+        if not match.get("securityId"):
+            # geekFilterByLabel's response carries no securityId (live
+            # 2026-08-28); chat-core itself re-fetches creds via POST
+            # getGeekFriendList - mirror that second stage.
+            creds = await self._fetch_friend_creds(
+                [str(match.get("friendId"))], str(match.get("friendSource"))
+            )
+            if creds is None or not creds.get("securityId"):
+                return {
+                    "status": "failed",
+                    "error_type": "security_id_unavailable",
+                    "message": (
+                        f"无法为「{hr_name}」获取会话凭据"
+                        f"（getGeekFriendList 未返回 securityId）。"
+                    ),
+                }
+            match["securityId"] = creds["securityId"]
+            match["encryptBossId"] = (
+                creds.get("encryptBossId") or match.get("encryptBossId")
+            )
+        if not match.get("encryptBossId"):
+            return {
+                "status": "failed",
+                "error_type": "boss_id_missing",
+                "message": f"「{hr_name}」缺少 encryptBossId，无法查询历史。",
             }
         try:
             page_obj, fresh = await _get_parked_page(self._tab_pool)
@@ -282,6 +337,35 @@ class BossChatReader:
             "count": len(messages),
             "messages": messages,
         }
+
+    async def _fetch_friend_creds(
+        self, friend_ids: list[str], friend_source: str
+    ) -> dict[str, Any] | None:
+        """POST getGeekFriendList for securityId/encryptBossId (stage 2)."""
+
+        assert self._tab_pool is not None
+        try:
+            page, fresh = await _get_parked_page(self._tab_pool)
+            if fresh:
+                prepared = await self._prepare_parked_page(page)
+                if prepared is not None:
+                    return None
+            payload: dict[str, Any] = {}
+            if friend_source == "1":
+                payload["dzIds"] = ",".join(friend_ids)
+            else:
+                payload["bossIds"] = ",".join(friend_ids)
+            raw = await asyncio.wait_for(
+                page.evaluate(_FETCH_FRIEND_CREDS_JS, payload),
+                timeout=_LIST_TIMEOUT_S,
+            )
+        except TimeoutError:
+            return None
+        if not isinstance(raw, dict) or raw.get("code") != 0:
+            logger.warning("Boss chat creds fetch rejected: %s", raw)
+            return None
+        creds = list(raw.get("creds", []))
+        return creds[0] if creds else None
 
     async def _prepare_parked_page(self, page: Any) -> dict[str, Any] | None:
         """Navigate+settle a fresh parked page; failure dict or None."""
