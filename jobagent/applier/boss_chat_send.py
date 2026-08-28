@@ -45,10 +45,15 @@ _INPUT_AREA_ANCHORS = [
     "textarea",
     "[contenteditable='true']",
 ]
+# CAUTION: never add a bare "[class*='send']" - the chat toolbar has
+# btn-sendimg (发送图片) which would open a file chooser, warlock's
+# verified tripwire. Anchors must name the send action specifically.
 _SEND_BUTTON_ANCHORS = [
     "button:has-text('发送')",
-    "[class*='send']:has-text('发送')",
     "a:has-text('发送')",
+    ".btn-send",
+    "[class*='send-btn']",
+    "[class*='sendBtn']",
 ]
 
 
@@ -248,19 +253,36 @@ class BossChatSender:
                 "error_type": "typing_failed",
                 "message": f"输入回复失败: {exc}",
             }
-        # 4) Send: prefer the 发送 button; fall back to Enter.
+        # 4) Send: prefer the 发送 button; fall back to a short Enter
+        # (long presses stall on actionability checks against
+        # contenteditable divs - live failure burned 30s there).
         send_btn = await self._first_visible(page, _SEND_BUTTON_ANCHORS)
-        try:
-            if send_btn is not None:
+        if send_btn is not None:
+            try:
                 await send_btn.click(timeout=5_000)
-            else:
-                await input_area.press("Enter")
-        except Exception as exc:
-            return {
-                "status": "failed",
-                "error_type": "send_failed",
-                "message": f"发送失败（内容仍在输入框，未发出）: {exc}",
-            }
+            except Exception as exc:
+                return {
+                    "status": "failed",
+                    "error_type": "send_failed",
+                    "message": f"发送按钮点击失败（内容仍在输入框，未发出）: {exc}",
+                }
+        else:
+            # Page-level keyboard: focus is already on the input after
+            # typing, and page.keyboard skips the element actionability
+            # checks that stalled element.press for 30s (live failure).
+            # This is byte-for-byte what a human does - type, hit Enter.
+            try:
+                await page.keyboard.press("Enter")
+            except Exception as exc:
+                return {
+                    "status": "failed",
+                    "error_type": "send_control_not_found",
+                    "message": (
+                        "未找到发送按钮，回车兜底也失败"
+                        f"（内容仍在输入框，可人工按回车发出）: {exc}"
+                    ),
+                    "page_diag": await self._page_diag(page),
+                }
         # 5) Verify the input area cleared = message accepted by the page.
         await asyncio.sleep(1.5)
         try:
