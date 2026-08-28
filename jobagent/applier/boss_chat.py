@@ -150,50 +150,57 @@ class BossChatReader:
             label_id = _LABEL_IDS[filter_name]
         assert self._tab_pool is not None
         try:
-            page = await self._tab_pool.acquire()
-        except TimeoutError as exc:
+            return await self._list_on_page(
+                self._tab_pool, label_id=label_id, limit=limit
+            )
+        except TimeoutError:
             return {
                 "status": "failed",
                 "error_type": "tab_pool_timeout",
-                "message": f"浏览器 tab 池超时: {exc}",
+                "message": "浏览器 tab 池超时。",
             }
-        try:
-            return await self._list_on_page(page, label_id=label_id, limit=limit)
-        finally:
-            await self._tab_pool.release(page)
 
     async def _list_on_page(
-        self, page: Any, *, label_id: int, limit: int
+        self, pool: Any, *, label_id: int, limit: int
     ) -> dict[str, Any]:
-        try:
-            await page.goto(
-                f"https://www.zhipin.com{_CHAT_PAGE_PATH}",
-                wait_until="domcontentloaded",
-                timeout=_NAV_TIMEOUT_MS,
-            )
-        except Exception:
-            logger.info("Boss chat: chat page nav interrupted", exc_info=True)
-        # Wait for the page to settle (a live, logged-in page is all the
-        # fetch transport needs; the chat UI itself is never driven).
-        deadline = asyncio.get_event_loop().time() + 30.0
-        while asyncio.get_event_loop().time() < deadline:
-            if urlsplit(str(page.url or "")).path == _CHAT_PAGE_PATH:
-                try:
-                    settled = await page.evaluate("document.readyState === 'complete'")
-                except Exception:
-                    settled = False
-                if settled:
-                    break
-            await asyncio.sleep(0.5)
-        else:
-            return {
-                "status": "failed",
-                "error_type": "chat_page_blocked",
-                "message": (
-                    "聊天页未能稳定加载（页面可能被反爬跳转到空白页）。"
-                    "建议稍后重试。"
-                ),
-            }
+        from jobagent.applier.boss_chat_session import (
+            chat_page_url_path,
+            get_chat_page,
+        )
+
+        page, fresh = await get_chat_page(pool)
+        if fresh:
+            # First use this process: load the chat page once and park it.
+            try:
+                await page.goto(
+                    f"https://www.zhipin.com{chat_page_url_path()}",
+                    wait_until="domcontentloaded",
+                    timeout=_NAV_TIMEOUT_MS,
+                )
+            except Exception:
+                logger.info("Boss chat: chat page nav interrupted", exc_info=True)
+            deadline = asyncio.get_event_loop().time() + 30.0
+            while asyncio.get_event_loop().time() < deadline:
+                if urlsplit(str(page.url or "")).path == _CHAT_PAGE_PATH:
+                    try:
+                        settled = await page.evaluate(
+                            "document.readyState === 'complete'"
+                        )
+                    except Exception:
+                        settled = False
+                    if settled:
+                        break
+                await asyncio.sleep(0.5)
+            else:
+                return {
+                    "status": "failed",
+                    "error_type": "chat_page_blocked",
+                    "message": (
+                        "聊天页未能稳定加载（页面可能被反爬跳转到空白页）。"
+                        "建议稍后重试。"
+                    ),
+                }
+        # Parked page: list refresh is a pure wapi fetch - no reload, ever.
 
         try:
             raw = await asyncio.wait_for(

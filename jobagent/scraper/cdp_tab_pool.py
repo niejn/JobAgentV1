@@ -163,6 +163,18 @@ class CdpTabPool:
         self._active.clear()
         self._wake()
 
+    async def detach(self, page: Page) -> None:
+        """Stop tracking a tab: it stays open, outside pool management.
+
+        Used for long-lived workhorse tabs (e.g. the persistent Boss chat
+        page) that must survive pool.close() and be reused across tool
+        calls - loading that page repeatedly is what warlock flags.
+        """
+
+        self._active.pop(id(page), None)
+        self._idle.pop(id(page), None)
+        self._wake()
+
     # -- helpers -----------------------------------------------------------------
 
     def _wake(self) -> None:

@@ -24,6 +24,7 @@ def _settings(tmp_path: Path) -> Settings:
 def _chat_page() -> MagicMock:
     page = MagicMock()
     page.url = "https://www.zhipin.com/web/geek/chat"
+    page.is_closed = lambda: False
     page.goto = AsyncMock()
 
     async def evaluate(script: str, payload: dict | None = None):
@@ -69,9 +70,17 @@ def _reader_with(page: MagicMock) -> BossChatReader:
     reader._context = MagicMock()
     pool = MagicMock()
     pool.acquire = AsyncMock(return_value=page)
+    pool.detach = AsyncMock()
     pool.release = AsyncMock()
     reader._tab_pool = pool
     return reader
+
+
+@pytest.fixture(autouse=True)
+def _reset_parked_chat_page() -> None:
+    import jobagent.applier.boss_chat_session as session
+
+    session._parked = None
 
 
 @pytest.mark.asyncio
@@ -143,3 +152,40 @@ async def test_tool_runs_read_only(tmp_path: Path) -> None:
         result = await tool.coroutine(filter_name="全部")
 
     assert result["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_parked_chat_page_is_reused_without_reload() -> None:
+    """Regression (2026-08-28 live lesson): rapid chat-page loads trip
+    warlock. The second list call in one process must NOT navigate again -
+    it reuses the parked tab and only runs the fetch."""
+    import jobagent.applier.boss_chat_session as session
+
+    session._parked = None
+    page = _chat_page()
+    nav_calls: list[str] = []
+
+    async def goto(url: str, **kwargs: object) -> None:
+        nav_calls.append(url)
+
+    page.goto = goto
+    pool = MagicMock()
+    pool.acquire = AsyncMock(return_value=page)
+    pool.detach = AsyncMock()
+    reader = _reader_with_pool(pool)
+
+    first = await reader.list_greetings(filter_name="全部")
+    second = await reader.list_greetings(filter_name="全部")
+
+    assert first["status"] == "ok" and second["status"] == "ok"
+    assert len(nav_calls) == 1  # parked: loaded once, never reloaded
+    assert pool.acquire.await_count == 1  # single tab for both calls
+
+
+def _reader_with_pool(pool: MagicMock) -> BossChatReader:
+    reader = BossChatReader.__new__(BossChatReader)
+    reader._settings = _settings(Path("."))
+    reader._playwright = MagicMock()
+    reader._context = MagicMock()
+    reader._tab_pool = pool
+    return reader

@@ -36,6 +36,7 @@ def _loc(visible: bool = True) -> MagicMock:
 def _happy_page() -> MagicMock:
     page = MagicMock()
     page.url = "https://www.zhipin.com/web/geek/chat"
+    page.is_closed = lambda: False
     page.goto = AsyncMock()
 
     async def evaluate(script: str):
@@ -65,16 +66,28 @@ def _happy_page() -> MagicMock:
     return page
 
 
+def _pool_with(page: MagicMock) -> MagicMock:
+    pool = MagicMock()
+    pool.acquire = AsyncMock(return_value=page)
+    pool.detach = AsyncMock()
+    pool.release = AsyncMock()
+    return pool
+
+
 def _sender_with(page: MagicMock) -> BossChatSender:
     sender = BossChatSender.__new__(BossChatSender)
     sender._settings = _settings(Path("."))
     sender._playwright = MagicMock()
     sender._context = MagicMock()
-    pool = MagicMock()
-    pool.acquire = AsyncMock(return_value=page)
-    pool.release = AsyncMock()
-    sender._tab_pool = pool
+    sender._tab_pool = _pool_with(page)
     return sender
+
+
+@pytest.fixture(autouse=True)
+def _reset_parked_chat_page() -> None:
+    import jobagent.applier.boss_chat_session as session
+
+    session._parked = None
 
 
 @pytest.mark.asyncio

@@ -109,42 +109,49 @@ class BossChatSender:
             }
         assert self._tab_pool is not None
         try:
-            page = await self._tab_pool.acquire()
-        except TimeoutError as exc:
+            return await self._send_on_page(
+                self._tab_pool, hr_name=hr_name, message=message
+            )
+        except TimeoutError:
             return {
                 "status": "failed",
                 "error_type": "tab_pool_timeout",
-                "message": f"浏览器 tab 池超时: {exc}",
+                "message": "浏览器 tab 池超时。",
             }
-        try:
-            return await self._send_on_page(page, hr_name=hr_name, message=message)
-        finally:
-            await self._tab_pool.release(page)
 
     # -- page flow --------------------------------------------------------------
 
     async def _send_on_page(
-        self, page: Any, *, hr_name: str, message: str
+        self, pool: Any, *, hr_name: str, message: str
     ) -> dict[str, Any]:
-        try:
-            await page.goto(
-                f"https://www.zhipin.com{_CHAT_PAGE_PATH}",
-                wait_until="domcontentloaded",
-                timeout=_NAV_TIMEOUT_MS,
-            )
-        except Exception:
-            logger.info("Boss chat reply: nav interrupted", exc_info=True)
-        deadline = asyncio.get_event_loop().time() + 20.0
-        while asyncio.get_event_loop().time() < deadline:
-            if urlsplit(str(page.url or "")).path == _CHAT_PAGE_PATH:
-                break
-            await asyncio.sleep(0.5)
-        else:
-            return {
-                "status": "failed",
-                "error_type": "chat_page_blocked",
-                "message": "聊天页被反爬拦截（跳转空白页）。建议暂停并稍后再试。",
-            }
+        from jobagent.applier.boss_chat_session import (
+            chat_page_url_path,
+            get_chat_page,
+        )
+
+        page, fresh = await get_chat_page(pool)
+        if fresh:
+            # First use this process: load and park the chat page once.
+            try:
+                await page.goto(
+                    f"https://www.zhipin.com{chat_page_url_path()}",
+                    wait_until="domcontentloaded",
+                    timeout=_NAV_TIMEOUT_MS,
+                )
+            except Exception:
+                logger.info("Boss chat reply: nav interrupted", exc_info=True)
+            deadline = asyncio.get_event_loop().time() + 20.0
+            while asyncio.get_event_loop().time() < deadline:
+                if urlsplit(str(page.url or "")).path == _CHAT_PAGE_PATH:
+                    break
+                await asyncio.sleep(0.5)
+            else:
+                return {
+                    "status": "failed",
+                    "error_type": "chat_page_blocked",
+                    "message": "聊天页被反爬拦截（跳转空白页）。建议暂停并稍后再试。",
+                }
+        # Parked page: drive the conversation without reloading.
 
         # 1) Find the search box and narrow the list to the target HR.
         search = await self._first_visible(page, _SEARCH_INPUT_ANCHORS)
