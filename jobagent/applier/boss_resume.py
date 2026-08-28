@@ -76,9 +76,15 @@ async (payload) => {
   const pageToken = ((window._PAGE || {}).token || "").split("|")[0];
   const base = {
     "X-Requested-With": "XMLHttpRequest",
+    "Content-Type": "application/x-www-form-urlencoded",
     "traceId": String(Date.now()) + Math.random().toString(16).slice(2, 10),
   };
   if (pageToken) base.token = pageToken;
+  // Boss's axios request interceptor stamps every call with a cache-buster
+  // query param (Object.assign(params, {_: Date.now()})) - the zpgeek
+  // gateway rejects saves without it (121 请求不合法, seen live even with
+  // token+traceId headers present).
+  const bust = "_=" + Date.now();
   const up = await fetch("/wapi/zpupload/resume/uploadFile.json", {
     method: "POST", body: fd, credentials: "include", headers: base,
   }).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
@@ -87,10 +93,13 @@ async (payload) => {
   if (!previewUrl) return {step: "upload", code: up.code, message: "no previewUrl"};
   const save = await fetch(
     "/wapi/zpgeek/resume/attachment/save.json?previewUrl="
-      + encodeURIComponent(previewUrl) + "&annexType=0&from=8",
+      + encodeURIComponent(previewUrl) + "&annexType=0&from=8&" + bust,
     {method: "POST", credentials: "include", headers: base},
   ).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
-  if (save.code !== 0) return {step: "save", code: save.code, message: save.message};
+  if (save.code !== 0) return {
+    step: "save", code: save.code, message: save.message,
+    stokenPresent: document.cookie.indexOf("__zp_stoken__") !== -1,
+  };
   return {step: "done",
           resumeId: save.zpData && save.zpData.resumeId,
           previewUrl};

@@ -311,15 +311,27 @@ async def _watch(channels: tuple[str, ...]) -> None:
 )
 @click.option("--session-id", default=None, help="Existing session ID; omitted creates one.")
 @click.option("--sessions", "list_sessions", is_flag=True, help="List saved sessions and exit.")
+@click.option(
+    "-c",
+    "--command",
+    "one_shot",
+    default=None,
+    help="Send one message, print the reply, and exit (non-interactive; handy for scripting).",
+)
 def chat_command(
-    startup_config: Path | None, session_id: str | None, list_sessions: bool
+    startup_config: Path | None,
+    session_id: str | None,
+    list_sessions: bool,
+    one_shot: str | None,
 ) -> None:
     """Start a conversational JobAgent session."""
 
     if list_sessions:
         asyncio.run(_list_sessions_only())
         return
-    asyncio.run(_chat(startup_config=startup_config, session_id=session_id))
+    asyncio.run(
+        _chat(startup_config=startup_config, session_id=session_id, one_shot=one_shot)
+    )
 
 
 async def _list_sessions_only() -> None:
@@ -346,7 +358,9 @@ async def _list_sessions_only() -> None:
     click.echo("\n用 `jobagent chat --session-id <会话 ID>` 恢复某个会话。")
 
 
-async def _chat(startup_config: Path | None, session_id: str | None) -> None:
+async def _chat(
+    startup_config: Path | None, session_id: str | None, one_shot: str | None = None
+) -> None:
     """Run an interactive terminal conversation; Tools perform the workflows."""
 
     from jobagent.agent import build_job_agent
@@ -358,6 +372,10 @@ async def _chat(startup_config: Path | None, session_id: str | None) -> None:
     agent = build_job_agent(settings, candidate_context=context, platform_hint="cli")
     active_session_id = session_id or _new_session_id()
     try:
+        if one_shot is not None:
+            # Non-interactive mode (pi-style -c): one message, one reply, exit.
+            await _render_streaming_reply(agent, one_shot, active_session_id)
+            return
         click.echo(
             "JobAgent ready. Describe a target job or ask for help. "
             "Type /sessions to switch conversations, /status for job progress, "
