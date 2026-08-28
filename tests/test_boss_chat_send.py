@@ -42,14 +42,8 @@ def _happy_page() -> MagicMock:
     keyboard.press = AsyncMock()
     page.keyboard = keyboard
 
-    async def evaluate(script: str):
-        return True  # settle probes
-
     async def evaluate(script: str, payload: dict | None = None):
-        if payload is None:
-            return True  # settle probe
-        if isinstance(payload, str):  # strong verify: panel echo check
-            return True
+        # settle probes AND strong-verify panel echo checks
         return True
 
     page.evaluate = evaluate
