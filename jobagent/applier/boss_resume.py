@@ -68,9 +68,19 @@ async (payload) => {
   const fd = new FormData();
   fd.append("file", file);
   fd.append("fileType", "1");
+  // Mirror Boss's axios request interceptor (app bundle): every wapi call
+  // carries X-Requested-With, a traceId, and the logged-in page token
+  // (window._PAGE.token) - the zpgeek gateway rejects saves without it
+  // (code 121 "请求不合法"). The __zp_stoken__ proof rides in cookies,
+  // which credentials:"include" already forwards.
+  const pageToken = ((window._PAGE || {}).token || "").split("|")[0];
+  const base = {
+    "X-Requested-With": "XMLHttpRequest",
+    "traceId": String(Date.now()) + Math.random().toString(16).slice(2, 10),
+  };
+  if (pageToken) base.token = pageToken;
   const up = await fetch("/wapi/zpupload/resume/uploadFile.json", {
-    method: "POST", body: fd, credentials: "include",
-    headers: {"X-Requested-With": "XMLHttpRequest"},
+    method: "POST", body: fd, credentials: "include", headers: base,
   }).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
   if (up.code !== 0) return {step: "upload", code: up.code, message: up.message};
   const previewUrl = up.zpData && up.zpData.previewUrl;
@@ -78,8 +88,7 @@ async (payload) => {
   const save = await fetch(
     "/wapi/zpgeek/resume/attachment/save.json?previewUrl="
       + encodeURIComponent(previewUrl) + "&annexType=0&from=8",
-    {method: "POST", credentials: "include",
-     headers: {"X-Requested-With": "XMLHttpRequest"}},
+    {method: "POST", credentials: "include", headers: base},
   ).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
   if (save.code !== 0) return {step: "save", code: save.code, message: save.message};
   return {step: "done",
