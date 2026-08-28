@@ -7,9 +7,10 @@ Design constraints, all from real-machine Boss behavior (2026-08-27):
    Chrome process exits (verified: 29 processes gone). The pool therefore
    keeps one ``about:blank`` tab of its own that never navigates anywhere.
 
-2. GLOBAL CAP — ``context.pages`` on a ``connect_over_cdp`` connection
-   reports the Chrome-wide tab list, so every pool attached to this Chrome
-   counts the same truth. The cap includes the keeper.
+2. POOL-OWNED CAP — the cap counts only tabs this pool opened (idle +
+   active + keeper). Chrome-wide ``context.pages`` includes the user's own
+   tabs; gating on those deadlocks serial callers (verified: first upload
+   test hung with 3 restored user tabs + keeper already at the cap).
 
 3. RETIREMENT — Boss flags pages that get re-navigated repeatedly
    (boss-zhipin-scraper's "reused pages" observation), so a tab is retired
@@ -28,6 +29,7 @@ from playwright.async_api import Page
 logger = logging.getLogger(__name__)
 
 _KEEPER_URL = "about:blank"
+_ACQUIRE_TIMEOUT_S = 30.0
 
 
 class CdpTabPool:
@@ -109,21 +111,32 @@ class CdpTabPool:
                 await self._quiet_close(page)
             if reused is not None:
                 return reused
-            # 2) Room for a fresh tab? (context.pages = Chrome-wide truth:
-            #    includes the keeper and tabs opened by any other pool.)
-            pages = self._context.pages
-            if len(pages) < self._max_tabs:
+            # 2) Room for a fresh tab? Count ONLY pool-owned tabs (idle +
+            #    active + keeper). Chrome-wide pages include the user's own
+            #    tabs, and waiting on those deadlocks a serial caller: the
+            #    user's tabs are never released (verified hang during the
+            #    first upload test with 3 restored tabs + keeper).
+            owned = len(self._idle) + len(self._active) + (1 if self._keeper else 0)
+            if owned < self._max_tabs:
                 page = cast("Page", await self._context.new_page())
                 self._active[id(page)] = 1
                 return page
-            # 3) Cap reached: wait for a release/close event, then retry.
+            # 3) Cap reached: a concurrent holder must release. Bound the
+            #    wait so a serial caller fails loudly instead of hanging.
             logger.info(
-                "TabPool: cap %d reached (%d live), waiting for a release",
+                "TabPool: cap %d reached (%d pool-owned), waiting for a release",
                 self._max_tabs,
-                len(pages),
+                owned,
             )
             self._released.clear()
-            await self._released.wait()
+            try:
+                await asyncio.wait_for(self._released.wait(), timeout=_ACQUIRE_TIMEOUT_S)
+            except TimeoutError as exc:
+                raise TimeoutError(
+                    f"CdpTabPool: no tab became available within "
+                    f"{_ACQUIRE_TIMEOUT_S}s (cap {self._max_tabs}). "
+                    "Close leftover tabs this pool opened and retry."
+                ) from exc
 
     async def release(self, page: Page) -> None:
         """Return a tab: park it as idle, or retire it past the reuse cap."""

@@ -149,3 +149,18 @@ async def test_close_closes_work_tabs_but_keeps_keeper() -> None:
     assert not keeper.closed, "keeper survives to keep Chrome alive"
     with pytest.raises(RuntimeError):
         await pool.acquire()
+
+
+
+@pytest.mark.asyncio
+async def test_user_tabs_do_not_deadlock_the_pool() -> None:
+    """Regression (first live upload test hung on this): Chrome-wide tabs
+    include the USER's own tabs; the cap must count only pool-owned ones,
+    and a serial acquire with the cap seemingly reached must not wait."""
+    # 5 pre-existing user tabs, pool cap 4 - chrome-wide already over cap
+    pool, ctx = _make(existing=5, max_tabs=4)
+    work = await pool.acquire()          # must NOT hang: keeper + 1 owned = 2
+    assert len(ctx.pages) == 7           # 5 user + keeper + work
+    await pool.release(work)
+    work2 = await pool.acquire()         # idle reuse, still no hang
+    assert work2 is work

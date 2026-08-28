@@ -155,7 +155,14 @@ class BossResumeUploader:
             self._tab_pool = CdpTabPool(self._context)
         if self._crawl_gate is not None:
             await self._crawl_gate.acquire("boss-cdp")
-        page = await self._tab_pool.acquire()
+        try:
+            page = await self._tab_pool.acquire()
+        except TimeoutError as exc:
+            return {
+                "status": "failed",
+                "error_type": "tab_pool_timeout",
+                "message": f"浏览器 tab 池超时: {exc}",
+            }
         try:
             result = await self._upload_on_page(page, path)
             if (
