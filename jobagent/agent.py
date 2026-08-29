@@ -43,6 +43,7 @@ from jobagent.crawl import (
     SyncChannelLimiter,
     build_crawl_gate,
 )
+from jobagent.memory.conversation_log import ConversationLog
 from jobagent.models.llm_client import build_agent_model
 from jobagent.observability import (
     NodeTraceMiddleware,
@@ -78,6 +79,8 @@ from jobagent.tools import (
     build_save_candidate_background_tool,
     build_save_job_analysis_tool,
     build_save_job_search_profile_tool,
+    build_save_user_fact_tool,
+    build_search_history_tool,
     build_shared_url_extract_tool,
     build_shared_url_save_tool,
     build_update_application_state_tool,
@@ -172,6 +175,7 @@ class JobAgent:
         tools: Sequence[BaseTool],
         system_prompt: str,
         checkpoint_db: Path,
+        conversation_log: ConversationLog | None = None,
         # 每次调用的最大超步数；不传时回退 LangGraph 默认 25（仅约 6-12 轮工具循环）。
         # 超限时不裸抛 GraphRecursionError，而是无工具再调一次模型做总结收尾
         # （见 _graceful_budget_exhaustion，对应 Hermes _budget_grace_call）。
@@ -184,6 +188,7 @@ class JobAgent:
         self._tools = tuple(tools)
         self._system_prompt = system_prompt
         self._checkpoint_db = checkpoint_db
+        self._conversation_log = conversation_log
         self._deep_agent: Any | None = None
         self._connection: aiosqlite.Connection | None = None
         self._init_lock = asyncio.Lock()
@@ -212,8 +217,20 @@ class JobAgent:
         session_id: str = "default",
     ) -> AsyncIterator[AgentStreamEvent]:
         trace_token = begin_trace()
+        # Episodic conversation log (JSONL): user turn now, collected
+        # assistant tokens + tool calls on the way out. Failures never
+        # block replies (degrade, don't eat turns).
+        log = self._conversation_log
+        if log is not None:
+            log.append(session=session_id, role="user", text=message)
+        collected: list[str] = []
         try:
             async for event in self._stream_reply_events(message, session_id=session_id):
+                if log is not None:
+                    if event.kind == "token" and event.text:
+                        collected.append(event.text)
+                    elif event.kind == "tool" and event.text:
+                        log.append(session=session_id, role="tool", text=event.text)
                 yield event
         except GraphRecursionError:
             # 运行预算耗尽（recursion_limit 超步，见 settings 注释）：不裸抛异常，
@@ -231,6 +248,10 @@ class JobAgent:
             yield AgentStreamEvent("done", "")
         finally:
             reset_trace(trace_token)
+            if log is not None and collected:
+                log.append(
+                    session=session_id, role="assistant", text="".join(collected)
+                )
 
     async def _stream_reply_events(
         self,
@@ -989,6 +1010,8 @@ def build_job_agent(
                 lambda: build_boss_resume_upload_tool(settings, crawl_gate=crawl_gate),
             ),
             ("list_boss_greetings", lambda: build_boss_chat_list_tool(settings)),
+            ("save_user_fact", lambda: build_save_user_fact_tool(settings)),
+            ("search_history", lambda: build_search_history_tool(settings)),
             (
                 "read_boss_conversation",
                 lambda: build_boss_chat_history_tool(settings),
@@ -1060,17 +1083,30 @@ def build_job_agent(
     # PS-1 分层组装：条件注入（段/段落跟随 registered_tools）+ 元数据层
     # （日期冻结于构造时刻）+ candidate_context 不可信块。单一组装点在
     # prompts/builder.py，本处只传事实源。
+    conversation_log = ConversationLog(state_db.parent / "conversations")
+    memory_dir = state_db.parent / "memory"
+    memory_markdown = ""
+    try:
+        from jobagent.memory.store import CandidateMemoryStore
+
+        memory_markdown = CandidateMemoryStore(
+            memory_dir / "candidate_memory.md"
+        ).as_markdown()
+    except Exception:
+        logger.warning("candidate memory load failed", exc_info=True)
     system_prompt = build_system_prompt(
         registered_tools={tool.name for tool in registered_tools},
         candidate_context=effective_context,
         platform_hint=platform_hint,
         model_name=_model_display_name(effective_model),
+        memory_markdown=memory_markdown,
     )
     return JobAgent(
         model=effective_model,
         tools=registered_tools,
         system_prompt=system_prompt,
         checkpoint_db=settings.jobagent_checkpoint_db,
+        conversation_log=conversation_log,
         recursion_limit=settings.jobagent_recursion_limit,
         opportunity_artifacts=LocalOpportunityArtifacts(
             settings.jobagent_opportunity_dir

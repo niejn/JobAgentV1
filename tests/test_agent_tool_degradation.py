@@ -29,6 +29,8 @@ DEFAULT_TOOL_NAMES = {
     "list_boss_greetings",
     "read_boss_conversation",
     "reply_boss_greeting",
+    "save_user_fact",
+    "search_history",
     "update_job_progress",
     "get_job_progress",
     "list_job_records",

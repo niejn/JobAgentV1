@@ -847,6 +847,21 @@ F8 PS-1/PS-2（prompt 组装 + 注入检测，纯本地零风险，用户定高�
 
 ---
 
+## Agent 记忆层
+
+- ✅ 已交付（2026-08-29，feat/agent-memory）：
+  - **Curated 层** `data/memory/candidate_memory.md`（OpenClaw/Hermes 的
+    MEMORY.md+USER.md 同构设计）：分节（经历事实/偏好/最近状态/已过期）+ 日期
+    元数据 + supersede 保留历史；`save_user_fact` 工具（kind/content/supersedes）；
+    启动全量注入 system prompt；用户可手动编辑。
+  - **Episodic 层** `data/conversations/YYYY-MM-DD.jsonl`（对话真相源：user/
+    assistant/tool 三类行）；`search_history` 工具（关键词 OR + 前后 2 行上下文
+    + 按天过滤）；挂在 stream_reply 上自动记录。
+  - Live 验证：跨会话记忆召回 ✅、历史检索 ✅。
+- 📋 Future work：**dreaming 式后台蒸馏**（OpenClaw 模式）——定期从 episodic
+  日记中提炼持久事实进 curated 层（带确定性门 + provenance：owner/agent/
+  untrusted 分级，防噪音与投毒）。触发条件：记忆条目过千或注入超预算时启动。
+  参考 openclaw/docs/concepts/memory-architecture.md。
 ## 代码审查跟进（2026-08-27）
 
 ### RV-1：CLI 接入 Boss 爬取 🟢 低优先级，方案已定：接上

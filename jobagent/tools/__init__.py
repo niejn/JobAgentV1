@@ -38,6 +38,10 @@ from jobagent.tools.job_progress import (
     build_list_job_records_tool,
     build_update_job_progress_tool,
 )
+from jobagent.tools.memory import (
+    build_save_user_fact_tool,
+    build_search_history_tool,
+)
 from jobagent.tools.opportunity_artifacts import (
     ApplicationStateUpdateInput,
     JobAnalysisArtifactInput,
@@ -61,6 +65,8 @@ __all__ = [
     "build_boss_greet_jobs_tool",
     "build_boss_resume_upload_tool",
     "build_boss_chat_history_tool",
+    "build_save_user_fact_tool",
+    "build_search_history_tool",
     "build_boss_chat_list_tool",
     "build_boss_chat_reply_tool",
     "CandidateProfileManager",

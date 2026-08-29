@@ -194,6 +194,7 @@ def build_system_prompt(
     platform_hint: str = "",
     model_name: str = "",
     now: datetime | None = None,
+    memory_markdown: str = "",
 ) -> str:
     """Assemble the full JobAgent system prompt.
 
@@ -216,6 +217,8 @@ def build_system_prompt(
         )
     moment = now or datetime.now().astimezone()
     sections = _assemble_policy_sections(registered_tools)
+    if memory_markdown.strip():
+        sections.append(memory_markdown.rstrip())
     if candidate_context is not None:
         sections.append(_candidate_context_block(candidate_context))
     sections.append(_build_metadata_section(platform_hint, model_name, moment))
