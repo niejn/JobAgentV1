@@ -136,7 +136,7 @@ class TestDiscoverRespectsCooldown:
         assert exc_info.value.code == "boss_risk_control"
         allowed, remaining_min, _ = get_boss_cooldown().check()
         assert allowed is False
-        assert remaining_min == 60
+        assert 59 <= remaining_min <= 60  # 60min crosses a second boundary
 
 
 class TestToolPassthrough:
