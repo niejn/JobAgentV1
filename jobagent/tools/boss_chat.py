@@ -6,12 +6,15 @@ separate, HITL-gated tool.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from jobagent.config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class BossChatListRequest(BaseModel):
@@ -87,10 +90,23 @@ def build_boss_chat_history_tool(settings: Settings) -> StructuredTool:
         if (refusal := circuit.check()) is not None:
             return refusal
         from jobagent.applier.boss_chat import BossChatReader
+        from jobagent.journey.chat_archive import BossChatArchive
 
         async with BossChatReader(settings) as reader:
             result = await reader.read_conversation(hr_name=hr_name, page=page)
         circuit.record(result)
+        if result.get("status") == "ok" and result.get("messages"):
+            # Dual-write: every history pull archives idempotently
+            # (msg_id dedupe) - funnel analytics ground truth.
+            try:
+                with BossChatArchive(settings.jobagent_state_db) as archive:
+                    archive.upsert_history(
+                        friend_id=int(result.get("friend_id") or 0),
+                        friend_name=hr_name,
+                        messages=result["messages"],
+                    )
+            except Exception:
+                logger.warning("chat archive write failed", exc_info=True)
         return result
 
     return StructuredTool.from_function(

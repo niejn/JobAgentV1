@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from jobagent.config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class BossChatReplyRequest(BaseModel):
@@ -45,6 +48,19 @@ def build_boss_chat_reply_tool(settings: Settings) -> StructuredTool:
         async with BossChatSender(settings) as sender:
             result = await sender.send_reply(hr_name=hr_name, message=message)
         circuit.record(result)
+        if result.get("status") == "ok":
+            try:
+                from jobagent.journey.chat_archive import BossChatArchive
+
+                with BossChatArchive(settings.jobagent_state_db) as archive:
+                    archive.append_sent(
+                        friend_id=0,  # UI path has no friend id handy
+                        friend_name=hr_name,
+                        text=message,
+                        source="ui_sent",
+                    )
+            except Exception:
+                logger.warning("chat archive write failed", exc_info=True)
         return result
 
     return StructuredTool.from_function(

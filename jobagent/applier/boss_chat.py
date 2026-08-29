@@ -170,10 +170,15 @@ async (payload) => {
   const msgs = ((hist.zpData || {}).messages) || [];
   return {
     step: "done",
+    friendId: target.friendId,
     messages: msgs.map((m) => {
       const b = m.body || {};
+      const fromUid = m.fromId || (m.from && m.from.uid) || 0;
       return {
-        fromId: m.fromId || (m.from && m.from.uid) || 0,
+        mid: m.mid || m.msgId || m.cmid || 0,
+        direction: String(fromUid) === String(((window._PAGE || {}).uid))
+          ? "geek" : "boss",
+        fromId: fromUid,
         toId: m.toId || (m.to && m.to.uid) || 0,
         time: m.time || m.createTime || 0,
         type: m.type != null ? m.type : m.messageType,
@@ -325,6 +330,7 @@ class BossChatReader:
                 "hr_name": hr_name,
                 "page": page,
                 "count": len(messages),
+                "friend_id": raw.get("friendId"),
                 "messages": messages,
             }
         if step == "match":

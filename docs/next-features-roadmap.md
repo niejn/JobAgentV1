@@ -862,6 +862,16 @@ F8 PS-1/PS-2（prompt 组装 + 注入检测，纯本地零风险，用户定高�
   日记中提炼持久事实进 curated 层（带确定性门 + provenance：owner/agent/
   untrusted 分级，防噪音与投毒）。触发条件：记忆条目过千或注入超预算时启动。
   参考 openclaw/docs/concepts/memory-architecture.md。
+## Boss 对话存档与漏斗分析
+
+- ✅ 已交付（2026-08-29，feat/boss-chat-archive）：`boss_chat_messages` 表
+  （jobagent.db）——行式存储 + `msg_id`（Boss 的 mid）幂等去重 +
+  `INSERT OR IGNORE`；双写点：`read_boss_conversation` 每次拉取（history_pull）
+  与发送成功（ui_sent/ws_sent）；`raw_json` 保留完整消息体（简历请求卡片等
+  未来功能的数据源）；read 提取新增 `mid` + `direction`（页内按 _PAGE.uid
+  判向）。`latest_per_friend()` 提供跟进信号（谁最后发言）。
+- 📋 漏斗分析工具（②）：数据积累后开发——回复率/响应时长/该跟进谁
+  （`jobagent funnel` CLI 或 Agent 工具）。前提：read 调用持续产生数据。
 ## 代码审查跟进（2026-08-27）
 
 ### RV-1：CLI 接入 Boss 爬取 🟢 低优先级，方案已定：接上
