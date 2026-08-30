@@ -59,6 +59,10 @@ from jobagent.tools.xhs_author import (
     XhsAuthorPostsRequest,
     build_xhs_author_posts_tool,
 )
+from jobagent.tools.xhs_search import (
+    XhsNoteSearcher,
+    build_xhs_note_search_tool,
+)
 
 __all__ = [
     "BossGreetingsManager",
@@ -101,4 +105,6 @@ __all__ = [
     "XhsAuthorPostsBrowser",
     "XhsAuthorPostsRequest",
     "build_xhs_author_posts_tool",
+    "XhsNoteSearcher",
+    "build_xhs_note_search_tool",
 ]

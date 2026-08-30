@@ -43,6 +43,7 @@ DEFAULT_TOOL_NAMES = {
     "save_shared_url",
     "extract_shared_url",
     "browse_xhs_author_posts",
+    "search_xhs_notes",
     "read_job_description",
     "read_user_document",
 }

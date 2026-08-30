@@ -87,8 +87,10 @@ from jobagent.tools import (
     build_update_job_progress_tool,
     build_user_document_tool,
     build_xhs_author_posts_tool,
+    build_xhs_note_search_tool,
 )
 from jobagent.tools.xhs_note import XhsNoteSaver
+from jobagent.tools.xhs_search import XhsNoteSearcher
 
 # Backward-compatible import for callers that referenced the old constant.
 SYSTEM_PROMPT = MAIN_AGENT_SYSTEM_PROMPT
@@ -847,6 +849,8 @@ def _tool_start_status(tool_name: str) -> str:
         return "正在读取并保存分享链接中的资料…"
     if tool_name == "extract_shared_url":
         return "正在读取已保存内容并执行图片 OCR…"
+    if tool_name == "search_xhs_notes":
+        return "正在按关键词搜索小红书笔记…"
     if tool_name == "browse_xhs_author_posts":
         return "正在浏览作者公开帖子并筛选候选内容…"
     if tool_name == "discover_boss_jobs":
@@ -1059,6 +1063,12 @@ def build_job_agent(
                 "browse_xhs_author_posts",
                 lambda: build_xhs_author_posts_tool(
                     XhsAuthorPostsBrowser(settings, backend_factory=backend_factory)
+                ),
+            ),
+            (
+                "search_xhs_notes",
+                lambda: build_xhs_note_search_tool(
+                    XhsNoteSearcher(settings, backend_factory=backend_factory)
                 ),
             ),
             (
