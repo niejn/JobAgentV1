@@ -9,7 +9,6 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from jobagent.config import Settings
-from jobagent.memory.conversation_log import ConversationLog
 from jobagent.memory.store import CandidateMemoryStore
 
 
@@ -86,22 +85,27 @@ class SearchHistoryRequest(BaseModel):
 
 
 def build_search_history_tool(settings: Settings) -> StructuredTool:
-    """Expose ConversationLog.search as a tool."""
+    """Expose the FTS5 conversation index as a tool (BM25-ranked search)."""
 
-    log = ConversationLog(
-        settings.jobagent_state_db.parent / "conversations"
-    )
+    memory_dir = settings.jobagent_state_db.parent / "memory"
+    conv_dir = settings.jobagent_state_db.parent / "conversations"
 
     async def _run(query: str, day: str | None = None, limit: int = 15) -> dict[str, Any]:
-        return log.search(query, day=day, limit=limit)
+        from jobagent.memory.conversation_index import ConversationIndex
+
+        index = ConversationIndex(memory_dir / "conv_index.db", conv_dir)
+        try:
+            return index.search(query, day=day, limit=limit)
+        finally:
+            index.close()
 
     return StructuredTool.from_function(
         coroutine=_run,
         name="search_history",
         description=(
-            "检索历史对话存档（按天 JSONL，只读）。用户问「之前说过/推荐过/提到过什么」"
-            "时先用这个工具查原文，不要凭记忆猜。命中行带前后各 2 行上下文"
-            "（提问和回答通常相邻）。"
+            "检索历史对话存档（按天 JSONL，FTS5 全文索引，BM25 排序，只读）。"
+            "用户问「之前说过/推荐过/提到过什么」时先用这个工具查原文，不要凭记忆猜。"
+            "支持中文子串匹配；命中行带前后各 2 行上下文。"
         ),
         args_schema=SearchHistoryRequest,
     )
