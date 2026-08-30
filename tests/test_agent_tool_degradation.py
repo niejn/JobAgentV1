@@ -34,6 +34,8 @@ DEFAULT_TOOL_NAMES = {
     "update_job_progress",
     "get_job_progress",
     "list_job_records",
+    "find_job_merge_candidates",
+    "merge_job_identities",
     "import_candidate_resume",
     "save_candidate_background",
     "save_job_search_profile",

@@ -71,11 +71,13 @@ from jobagent.tools import (
     build_boss_greet_jobs_tool,
     build_boss_job_discovery_tool,
     build_boss_resume_upload_tool,
+    build_find_merge_candidates_tool,
     build_get_job_progress_tool,
     build_import_candidate_resume_tool,
     build_interview_evidence_tool,
     build_job_description_tool,
     build_list_job_records_tool,
+    build_merge_job_identities_tool,
     build_save_candidate_background_tool,
     build_save_job_analysis_tool,
     build_save_job_search_profile_tool,
@@ -1024,6 +1026,14 @@ def build_job_agent(
             ("update_job_progress", lambda: build_update_job_progress_tool(state_db)),
             ("get_job_progress", lambda: build_get_job_progress_tool(state_db)),
             ("list_job_records", lambda: build_list_job_records_tool(state_db)),
+            (
+                "find_job_merge_candidates",
+                lambda: build_find_merge_candidates_tool(state_db),
+            ),
+            (
+                "merge_job_identities",
+                lambda: build_merge_job_identities_tool(state_db),
+            ),
             (
                 "import_candidate_resume",
                 lambda: build_import_candidate_resume_tool(profile_manager),

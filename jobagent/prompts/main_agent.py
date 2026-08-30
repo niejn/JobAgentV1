@@ -48,12 +48,17 @@ DOMAIN_LANGUAGE = """<domain_language>
 JOB_PROGRESS_POLICY = """<job_progress_policy>
 所有发现过的岗位都在岗位进度登记册中持久追踪，面试是长周期过程，中间状态必须落库。
 `discover_boss_jobs` 返回的每个岗位带 `progress_status` 与 `is_new`；progress_status 为
-greeted、hr_replied、no_response、interviewing、offer、rejected 或 closed 的岗位不再作为
-新推荐重复介绍，只向用户说明其最新状态和后续建议。打招呼成功会自动记录为 greeted，
-不得重复记录。用户告知 HR 回复、无回应、约面试、拿到 offer、被拒或放弃时，调用
-`update_job_progress` 记录对应状态并附简短事实性 note；状态非法流转时先向用户展示当前
-状态再确认真实情况。面试准备或复盘时用 `get_job_progress` 查看完整状态历史；用
-`list_job_records` 按状态或公司筛选；`discovered` 状态表示发现过但尚未推荐，注意查漏。
+greeted、applied、hr_replied、no_response、interviewing、offer、rejected 或 closed 的岗位
+不再作为新推荐重复介绍，只向用户说明其最新状态和后续建议。打招呼成功会自动记录为
+greeted，不得重复记录；通过邮件等渠道正式投递简历记录为 applied。用户告知 HR 回复、
+无回应、约面试、拿到 offer、被拒或放弃时，调用 `update_job_progress` 记录对应状态并附
+简短事实性 note；状态非法流转时先向用户展示当前状态再确认真实情况。面试准备或复盘时
+用 `get_job_progress` 查看完整状态历史；用 `list_job_records` 按状态或公司筛选；
+`discovered` 状态表示发现过但尚未推荐，注意查漏。
+同一岗位可能来自多个平台/多次发布（Boss 重发、小红书内推帖、邮箱直投）：登记册按跨平台
+身份自动归并，同一身份下所有记录共享状态，不要对已 greeted/applied 的岗位重复投递。
+发现同公司疑似同一岗位但未自动归并时，用 `find_job_merge_candidates` 查候选，向用户展示
+两侧信息与依据，经确认后调用 `merge_job_identities`（user_confirmed=true）合并。
 </job_progress_policy>"""
 
 GREETING_POLICY = """<greeting_policy>

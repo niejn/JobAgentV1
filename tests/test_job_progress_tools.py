@@ -154,9 +154,9 @@ class TestProgressTools:
     async def test_list_filters_by_status(self, tmp_path: Path) -> None:
         db = tmp_path / "registry.db"
         with SQLiteJobRegistry(db) as registry:
-            for job_id in ("boss:a", "boss:b"):
+            for job_id, title in (("boss:a", "后端"), ("boss:b", "前端")):
                 registry.upsert_discovered(
-                    job_id=job_id, source="boss", company="某公司", title="后端"
+                    job_id=job_id, source="boss", company="某公司", title=title
                 )
             registry.mark("boss:a", JobProgressStatus.GREETED)
         tool = build_list_job_records_tool(db)

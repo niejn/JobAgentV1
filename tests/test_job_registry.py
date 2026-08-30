@@ -21,12 +21,17 @@ def registry(tmp_path: Path) -> SQLiteJobRegistry:
     store.close()
 
 
-def _discover(store: SQLiteJobRegistry, job_id: str = "boss:abc123") -> None:
+def _discover(
+    store: SQLiteJobRegistry,
+    job_id: str = "boss:abc123",
+    *,
+    title: str = "AI Agent 工程师",
+) -> None:
     store.upsert_discovered(
         job_id=job_id,
         source="boss",
         company="小而美科技",
-        title="AI Agent 工程师",
+        title=title,
         location="上海·杨浦区",
         url="https://www.zhipin.com/job_detail/abc123.html",
     )
@@ -105,6 +110,19 @@ class TestJourneyTransitions:
         record = registry.mark("boss:abc123", JobProgressStatus.OFFER)
         assert record.status is JobProgressStatus.OFFER
 
+    def test_applied_path_email_channel(self, registry: SQLiteJobRegistry) -> None:
+        _discover(registry)
+        applied = registry.mark("boss:abc123", JobProgressStatus.APPLIED, note="邮件投递")
+        assert applied.status is JobProgressStatus.APPLIED
+        # A resume submission can go straight to an interview invitation.
+        record = registry.mark("boss:abc123", JobProgressStatus.INTERVIEWING)
+        assert record.status is JobProgressStatus.INTERVIEWING
+
+    def test_discovered_straight_to_applied(self, registry: SQLiteJobRegistry) -> None:
+        _discover(registry)
+        record = registry.mark("boss:abc123", JobProgressStatus.APPLIED)
+        assert record.status is JobProgressStatus.APPLIED
+
     def test_no_response_then_late_reply(self, registry: SQLiteJobRegistry) -> None:
         _discover(registry)
         registry.mark("boss:abc123", JobProgressStatus.GREETED)
@@ -153,7 +171,7 @@ class TestHistoryAndListing:
         self, registry: SQLiteJobRegistry
     ) -> None:
         _discover(registry, "boss:one")
-        _discover(registry, "boss:two")
+        _discover(registry, "boss:two", title="爬虫工程师")
         registry.upsert_discovered(
             job_id="boss:three",
             source="boss",
@@ -183,3 +201,126 @@ class TestPersistence:
             assert record.status is JobProgressStatus.GREETED
             assert record.greeted_at is not None
             assert len(store.history("boss:abc123")) == 2
+
+
+class TestCrossPlatformIdentity:
+    """F1-R4: same job across platforms/re-posts shares one journey."""
+
+    def test_repost_new_platform_id_merges_automatically(
+        self, registry: SQLiteJobRegistry
+    ) -> None:
+        """Boss re-post (fresh encryptJobId, same company+title) lands on the
+        existing identity and inherits its journey status (JI-4)."""
+
+        _discover(registry, "boss:old-id")
+        registry.mark("boss:old-id", JobProgressStatus.GREETED)
+
+        # Same job re-posted: new platform id, slightly different writing.
+        repost = registry.upsert_discovered(
+            job_id="boss:new-id",
+            source="boss",
+            company="小而美科技有限公司",  # suffix variant
+            title="资深 AI Agent 工程师",  # seniority variant
+        )
+        assert repost is not None  # a genuinely new posting
+        assert repost.status is JobProgressStatus.GREETED  # inherited
+
+    def test_xhs_posting_joins_boss_identity(
+        self, registry: SQLiteJobRegistry
+    ) -> None:
+        """The same job seen on XHS joins the Boss identity's journey."""
+
+        _discover(registry, "boss:xyz")
+        registry.mark("boss:xyz", JobProgressStatus.APPLIED, note="邮件投递")
+
+        xhs = registry.upsert_discovered(
+            job_id="xhs:note-999",
+            source="xhs",
+            company="小而美科技",
+            title="AI Agent 工程师",
+        )
+        assert xhs is not None
+        assert xhs.status is JobProgressStatus.APPLIED  # shared journey
+
+    def test_mark_syncs_all_postings_under_identity(
+        self, registry: SQLiteJobRegistry
+    ) -> None:
+        """mark() on one posting moves every posting under the identity."""
+
+        _discover(registry, "boss:one")
+        _discover(registry, "boss:repost", title="AI Agent 工程师")
+        registry.mark("boss:one", JobProgressStatus.GREETED)
+        registry.mark("boss:one", JobProgressStatus.HR_REPLIED, note="HR 回复了")
+
+        other = registry.get("boss:repost")
+        assert other is not None
+        assert other.status is JobProgressStatus.HR_REPLIED
+
+    def test_distinct_jobs_stay_separate(
+        self, registry: SQLiteJobRegistry
+    ) -> None:
+        _discover(registry, "boss:agent")
+        _discover(registry, "boss:crawler", title="爬虫工程师")
+
+        registry.mark("boss:agent", JobProgressStatus.GREETED)
+        crawler = registry.get("boss:crawler")
+        assert crawler is not None
+        assert crawler.status is JobProgressStatus.DISCOVERED  # untouched
+
+
+class TestLegacyMigration:
+    """Old registries gain identity rows without losing journey state."""
+
+    def test_legacy_rows_backfilled_with_identity(
+        self, tmp_path: Path
+    ) -> None:
+        import sqlite3
+
+        db = tmp_path / "legacy.db"
+        # Build a pre-F1-R4 database (no identity_key column).
+        conn = sqlite3.connect(db)
+        conn.executescript(
+            """
+            CREATE TABLE job_records (
+                job_id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                company TEXT NOT NULL,
+                title TEXT NOT NULL,
+                location TEXT NOT NULL DEFAULT '',
+                url TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                greeted_at TEXT,
+                note TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE job_status_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL REFERENCES job_records(job_id),
+                status TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO job_records VALUES (
+                'boss:legacy1', 'boss', '老公司', 'AI 工程师', '上海', '',
+                'greeted', '2026-01-01T00:00:00+08:00',
+                '2026-01-02T00:00:00+08:00', NULL, '');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        with SQLiteJobRegistry(db) as store:
+            record = store.get("boss:legacy1")
+            assert record is not None
+            assert record.status is JobProgressStatus.GREETED
+
+            # A same-job new posting must now join the legacy journey.
+            repost = store.upsert_discovered(
+                job_id="boss:legacy2",
+                source="boss",
+                company="老公司",
+                title="AI 工程师",
+            )
+            assert repost is not None
+            assert repost.status is JobProgressStatus.GREETED

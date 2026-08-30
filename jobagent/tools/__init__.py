@@ -33,6 +33,10 @@ from jobagent.tools.job_description import (
     build_user_document_tool,
 )
 from jobagent.tools.job_discovery import BossJobDiscovery, build_boss_job_discovery_tool
+from jobagent.tools.job_identity_merge import (
+    build_find_merge_candidates_tool,
+    build_merge_job_identities_tool,
+)
 from jobagent.tools.job_progress import (
     build_get_job_progress_tool,
     build_list_job_records_tool,
@@ -83,11 +87,14 @@ __all__ = [
     "build_save_job_search_profile_tool",
     "InterviewEvidenceDiscovery",
     "InterviewEvidenceTarget",
-    "build_interview_evidence_tool",
-    "build_boss_job_discovery_tool",
+    "build_update_job_progress_tool",
+    "build_find_merge_candidates_tool",
+    "build_merge_job_identities_tool",
     "build_get_job_progress_tool",
     "build_list_job_records_tool",
-    "build_update_job_progress_tool",
+    "build_interview_evidence_tool",
+    "BossJobDiscovery",
+    "build_boss_job_discovery_tool",
     "JobDescriptionFile",
     "JobDescriptionReader",
     "build_job_description_tool",
