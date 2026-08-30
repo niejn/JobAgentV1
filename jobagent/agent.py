@@ -77,7 +77,9 @@ from jobagent.tools import (
     build_interview_evidence_tool,
     build_job_description_tool,
     build_list_job_records_tool,
+    build_list_recent_emails_tool,
     build_merge_job_identities_tool,
+    build_read_email_tool,
     build_save_candidate_background_tool,
     build_save_job_analysis_tool,
     build_save_job_search_profile_tool,
@@ -254,9 +256,7 @@ class JobAgent:
         finally:
             reset_trace(trace_token)
             if log is not None and collected:
-                log.append(
-                    session=session_id, role="assistant", text="".join(collected)
-                )
+                log.append(session=session_id, role="assistant", text="".join(collected))
 
     async def _stream_reply_events(
         self,
@@ -326,9 +326,7 @@ class JobAgent:
                         for updated_message in update.get("messages", []):
                             if not isinstance(updated_message, AIMessage):
                                 continue
-                            finish_reason = updated_message.response_metadata.get(
-                                "finish_reason"
-                            )
+                            finish_reason = updated_message.response_metadata.get("finish_reason")
                             last_finish_reason = (
                                 str(finish_reason) if finish_reason is not None else None
                             )
@@ -464,9 +462,7 @@ class JobAgent:
                     "has_deterministic_result": bool(deterministic_tool_answer),
                 },
                 outcome=(
-                    "deterministic_tool_result"
-                    if deterministic_tool_answer
-                    else "model_recovery"
+                    "deterministic_tool_result" if deterministic_tool_answer else "model_recovery"
                 ),
             )
             status = (
@@ -566,14 +562,10 @@ class JobAgent:
         """
 
         deep_agent = await self._ensure_deep_agent()
-        snapshot = await deep_agent.aget_state(
-            {"configurable": {"thread_id": session_id}}
-        )
+        snapshot = await deep_agent.aget_state({"configurable": {"thread_id": session_id}})
         messages = tuple(snapshot.values.get("messages", ()))
         recent = tuple(
-            entry
-            for message in messages
-            if (entry := _conversation_entry(message)) is not None
+            entry for message in messages if (entry := _conversation_entry(message)) is not None
         )
         return ConversationHistory(summary=None, recent=recent, compacted=False)
 
@@ -673,9 +665,7 @@ class JobAgent:
                 from deepagents.backends.local_shell import LocalShellBackend
 
                 shell_env = {
-                    name: os.environ[name]
-                    for name in _SHELL_ENV_ALLOWLIST
-                    if name in os.environ
+                    name: os.environ[name] for name in _SHELL_ENV_ALLOWLIST if name in os.environ
                 }
                 shell_backend = LocalShellBackend(
                     root_dir=self._filesystem_root,
@@ -820,7 +810,6 @@ def _tool_result_summary(update: Any) -> str:
     return "; ".join(summaries)[:1_200]
 
 
-
 def _conversation_entry(message: BaseMessage) -> ConversationEntry | None:
     text = _visible_text(message).strip()
     if not text:
@@ -830,7 +819,6 @@ def _conversation_entry(message: BaseMessage) -> ConversationEntry | None:
     if isinstance(message, AIMessage) and not message.tool_calls:
         return ConversationEntry("assistant", text)
     return None
-
 
 
 def _merge_streamed_text(accumulated: str, chunk: str) -> tuple[str, str]:
@@ -1027,6 +1015,8 @@ def build_job_agent(
             ("update_job_progress", lambda: build_update_job_progress_tool(state_db)),
             ("list_job_records", lambda: build_list_job_records_tool(state_db)),
             ("send_application_email", lambda: build_send_application_email_tool(settings)),
+            ("list_recent_emails", lambda: build_list_recent_emails_tool(settings)),
+            ("read_email", lambda: build_read_email_tool(settings)),
             ("get_job_progress", lambda: build_get_job_progress_tool(state_db)),
             (
                 "find_job_merge_candidates",
@@ -1111,9 +1101,7 @@ def build_job_agent(
     try:
         from jobagent.memory.store import CandidateMemoryStore
 
-        memory_markdown = CandidateMemoryStore(
-            memory_dir / "candidate_memory.md"
-        ).as_markdown()
+        memory_markdown = CandidateMemoryStore(memory_dir / "candidate_memory.md").as_markdown()
     except Exception:
         logger.warning("candidate memory load failed", exc_info=True)
     system_prompt = build_system_prompt(
@@ -1130,9 +1118,7 @@ def build_job_agent(
         checkpoint_db=settings.jobagent_checkpoint_db,
         conversation_log=conversation_log,
         recursion_limit=settings.jobagent_recursion_limit,
-        opportunity_artifacts=LocalOpportunityArtifacts(
-            settings.jobagent_opportunity_dir
-        ),
+        opportunity_artifacts=LocalOpportunityArtifacts(settings.jobagent_opportunity_dir),
         filesystem_root=settings.jobagent_artifact_dir,
         debug_trace=settings.jobagent_debug_trace,
     )

@@ -23,6 +23,10 @@ from jobagent.tools.email_apply import (
     SendApplicationEmailRequest,
     build_send_application_email_tool,
 )
+from jobagent.tools.email_inbox import (
+    build_list_recent_emails_tool,
+    build_read_email_tool,
+)
 from jobagent.tools.interview_evidence import (
     InterviewEvidenceDiscovery,
     InterviewEvidenceTarget,
@@ -92,6 +96,9 @@ __all__ = [
     "InterviewEvidenceDiscovery",
     "InterviewEvidenceTarget",
     "build_update_job_progress_tool",
+    "build_send_application_email_tool",
+    "build_list_recent_emails_tool",
+    "build_read_email_tool",
     "build_interview_evidence_tool",
     "SendApplicationEmailRequest",
     "build_send_application_email_tool",
