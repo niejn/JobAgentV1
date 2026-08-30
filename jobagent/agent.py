@@ -83,6 +83,7 @@ from jobagent.tools import (
     build_save_job_search_profile_tool,
     build_save_user_fact_tool,
     build_search_history_tool,
+    build_send_application_email_tool,
     build_shared_url_extract_tool,
     build_shared_url_save_tool,
     build_update_application_state_tool,
@@ -1024,8 +1025,9 @@ def build_job_agent(
             ),
             ("reply_boss_greeting", lambda: build_boss_chat_reply_tool(settings)),
             ("update_job_progress", lambda: build_update_job_progress_tool(state_db)),
-            ("get_job_progress", lambda: build_get_job_progress_tool(state_db)),
             ("list_job_records", lambda: build_list_job_records_tool(state_db)),
+            ("send_application_email", lambda: build_send_application_email_tool(settings)),
+            ("get_job_progress", lambda: build_get_job_progress_tool(state_db)),
             (
                 "find_job_merge_candidates",
                 lambda: build_find_merge_candidates_tool(state_db),

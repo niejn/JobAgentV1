@@ -19,6 +19,10 @@ from jobagent.tools.candidate_profile import (
     build_save_candidate_background_tool,
     build_save_job_search_profile_tool,
 )
+from jobagent.tools.email_apply import (
+    SendApplicationEmailRequest,
+    build_send_application_email_tool,
+)
 from jobagent.tools.interview_evidence import (
     InterviewEvidenceDiscovery,
     InterviewEvidenceTarget,
@@ -88,6 +92,9 @@ __all__ = [
     "InterviewEvidenceDiscovery",
     "InterviewEvidenceTarget",
     "build_update_job_progress_tool",
+    "build_interview_evidence_tool",
+    "SendApplicationEmailRequest",
+    "build_send_application_email_tool",
     "build_find_merge_candidates_tool",
     "build_merge_job_identities_tool",
     "build_get_job_progress_tool",

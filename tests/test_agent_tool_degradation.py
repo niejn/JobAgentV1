@@ -36,6 +36,7 @@ DEFAULT_TOOL_NAMES = {
     "list_job_records",
     "find_job_merge_candidates",
     "merge_job_identities",
+    "send_application_email",
     "import_candidate_resume",
     "save_candidate_background",
     "save_job_search_profile",

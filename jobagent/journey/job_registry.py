@@ -293,6 +293,7 @@ class SQLiteJobRegistry:
         corrected through the agent).
         """
 
+        job_id = job_id.strip()
         record = self.get(job_id)
         if record is None:
             raise KeyError(f"job not found in registry: {job_id}")

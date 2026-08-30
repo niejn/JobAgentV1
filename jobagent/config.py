@@ -96,6 +96,26 @@ class Settings(BaseSettings):
     )
     linkedin_cookie: str | None = None
 
+    # Email application channel (XHS referral posts with an HR mailbox).
+    # QQ/Foxmail defaults: only the authorization code is required.
+    jobagent_email_smtp_host: str = Field(
+        default="smtp.qq.com",
+        description="SMTP host for application emails (QQ/Foxmail default).",
+    )
+    jobagent_email_smtp_port: int = Field(default=465, ge=1, le=65535)
+    jobagent_email_smtp_user: str = Field(
+        default="niejn@foxmail.com",
+        description="SMTP login (the sending mailbox).",
+    )
+    jobagent_email_smtp_password: str = Field(
+        default="",
+        description="16-char SMTP authorization code (NOT the account password).",
+    )
+    jobagent_email_sender_name: str = Field(default="聂俊能")
+    jobagent_email_default_resume: Path = Field(
+        default=Path("data/journeys/resume/resume.pdf"),
+        description="Resume PDF attached to application emails by default.",
+    )
     # Xiaohongshu referral channel (see docs/referral-design.md)
     xhs_cookie: str | None = None
     xhs_cookie_header: str | None = Field(
