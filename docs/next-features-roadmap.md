@@ -928,3 +928,31 @@ INTENT / SUMMARY / ARTIFACTS / NEXT STEPS 四段），没有点名求职关键�
   重写。
 - 摘要 model 即传入 `create_deep_agent` 的主 model（当前为
   `FallbackChatModel`）——摘要调用天然走 LLM fallback 链，无需额外配置。
+
+---
+
+## F6. JobClaw UI 仪表盘 📋（高优先级 future work，2026-08-30 定）
+
+**用户痛点**：当前所有状态（岗位进度、沟通漏斗、对话存档）只能在 `jobagent chat`
+里用命令/对话查；缺一个常驻可视化面板一眼看全局（沟通漏斗、沉默天数、最近对话）。
+
+**定位**：本地 Web 仪表盘，**只读**聚合现有 SQLite / JSONL 数据，不做任何平台写
+操作，无 HITL 顾虑。视觉参考 CareerDesk 桌面工作台（非自动化、非浏览器集成）。
+
+**已 parked 脚手架**（分支 `feat/boss-web-ui` @29bfce7，未合 main）：
+- `jobagent/journey/chat_archive.py`：`funnel_stats()`（per-direction MIN 修复；
+  返回 total_friends / replied_friends / reply_rate / total_messages /
+  geek_messages / boss_messages / latency_p50 / latency_p90 / attention[]）
+- `jobagent/ui/server.py`：FastAPI `/api/funnel` `/api/conversations` + StaticFiles
+- `jobagent/ui/static/index.html` + `app.js`：Tailwind CDN，无构建（方案 B 路径）
+- `jobagent/cli.py`：`ui` 命令
+- `tests/test_boss_web_ui.py`：3 个冒烟测试通过
+
+**技术选型待定（A vs B）**：
+| 方案 | 栈 | 取舍 |
+|---|---|---|
+| A | 忠实镜像 React 19 + Vite + Tailwind（CareerDesk 同款） | 视觉最贴近，引入 node 工具链维护成本 |
+| B | FastAPI + Tailwind CDN + 原生 JS（现有脚手架） | 零 node、零构建，视觉接近但非组件化 |
+
+**切片**：① 定 A/B → ② 接 funnel / conversations 真实数据渲染 →
+③ 加岗位进度（F1 registry）视图 → ④ 真机起服务验证
