@@ -17,21 +17,27 @@ def _settings(tmp_path: Path) -> Settings:
     return Settings(_env_file=None, jobagent_state_db=tmp_path / "state.db")
 
 
-# -- tool-level HITL gate ------------------------------------------------------
+# -- tool-level approval (HITL middleware) -------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_tool_refuses_without_user_confirmation(tmp_path: Path) -> None:
+def test_tool_is_covered_by_hitl_middleware() -> None:
+    """upload_boss_resume_pdf is an external platform write: the agent's
+    HumanInTheLoopMiddleware must interrupt it before the body runs."""
+    from jobagent.agent import _HITL_TOOLS
+
+    assert "upload_boss_resume_pdf" in _HITL_TOOLS
+
+
+def test_tool_schema_has_no_user_confirmed_field(tmp_path: Path) -> None:
+    """The old weak parameter gate is gone - approval is physical, not a flag
+    the model can set itself."""
     tool = build_boss_resume_upload_tool(_settings(tmp_path))
-    result = await tool.ainvoke(
-        {"pdf_path": "resume.pdf", "user_confirmed": False}
-    )
-    assert result["status"] == "waiting_user_confirmation"
-    # nothing was sent: no uploader was even constructed
+    assert "user_confirmed" not in tool.args_schema.model_fields
 
 
 @pytest.mark.asyncio
-async def test_tool_passes_confirmation_and_delete_flag(tmp_path: Path) -> None:
+async def test_tool_runs_after_middleware_approval(tmp_path: Path) -> None:
+    """Post-interrupt path: approved resume reaches the uploader as-is."""
     tool = build_boss_resume_upload_tool(_settings(tmp_path))
     calls: dict[str, Any] = {}
 
@@ -53,7 +59,6 @@ async def test_tool_passes_confirmation_and_delete_flag(tmp_path: Path) -> None:
         result = await tool.ainvoke(
             {
                 "pdf_path": "resume.pdf",
-                "user_confirmed": True,
                 "allow_delete": True,
             }
         )

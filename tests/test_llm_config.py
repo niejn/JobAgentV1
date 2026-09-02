@@ -20,7 +20,6 @@ def test_openai_compatible_configuration_is_resolved() -> None:
         jobagent_llm_context_window=1_024_000,
         jobagent_llm_max_tokens=128_000,
         jobagent_llm_reasoning=True,
-        jobagent_llm_input_modalities="text",
         jobagent_llm_supports_developer_role=False,
         jobagent_llm_thinking_format="deepseek",
     )
@@ -33,7 +32,6 @@ def test_openai_compatible_configuration_is_resolved() -> None:
     assert runtime.context_window == 1_024_000
     assert runtime.max_tokens == 128_000
     assert runtime.reasoning is True
-    assert runtime.input_modalities == ("text",)
     assert runtime.supports_developer_role is False
     assert runtime.thinking_format == "deepseek"
 

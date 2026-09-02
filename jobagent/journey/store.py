@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -11,6 +12,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import cast
 from uuid import uuid4
+
+from jobagent.journey.identity import identity_key
 
 
 def _enable_wal(connection: sqlite3.Connection) -> None:
@@ -62,6 +65,19 @@ class OpportunityJourney:
     version: int
     created_at: datetime
     updated_at: datetime
+    department: str = ""
+    recruiting_cycle: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class JourneyJobDescriptionVersion:
+    """One distinct JD snapshot attached to an opportunity journey."""
+
+    id: str
+    journey_id: str
+    content: str
+    content_hash: str
+    created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,25 +144,55 @@ class SQLiteJourneyStore:
         company: str,
         role: str,
         job_description: str,
+        department: str = "",
+        recruiting_cycle: str = "",
     ) -> OpportunityJourney:
+        company = company.strip()
+        role = role.strip()
+        job_description = job_description.strip()
+        department = department.strip()
+        recruiting_cycle = recruiting_cycle.strip()
+        if not company or not role:
+            raise ValueError("company and role are required")
+        canonical_identity = (
+            identity_key(company, role, department=department, recruiting_cycle=recruiting_cycle)
+            if department and recruiting_cycle else ""
+        )
+        existing = (
+            self._connection.execute(
+                "SELECT id FROM journeys WHERE identity_key = ? LIMIT 1",
+                (canonical_identity,),
+            ).fetchone()
+            if canonical_identity else None
+        )
+        if existing is not None:
+            journey = self.get_journey(str(existing["id"]))
+            self._record_job_description_version(journey.id, job_description)
+            now = _now()
+            with self._connection:
+                self._connection.execute(
+                    "UPDATE journeys SET version = version + 1, updated_at = ? WHERE id = ?",
+                    (_format_time(now), journey.id),
+                )
+            return self.get_journey(journey.id)
+
         now = _now()
         journey = OpportunityJourney(
             id=str(uuid4()),
-            company=company.strip(),
-            role=role.strip(),
-            job_description=job_description.strip(),
+            company=company,
+            role=role,
+            job_description=job_description,
             stage="targeted",
             version=1,
             created_at=now,
             updated_at=now,
         )
-        if not journey.company or not journey.role:
-            raise ValueError("company and role are required")
         with self._connection:
             self._connection.execute(
                 """INSERT INTO journeys
-                (id, company, role, job_description, stage, version, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (id, company, role, job_description, stage, version, identity_key,
+                 department, recruiting_cycle, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     journey.id,
                     journey.company,
@@ -154,15 +200,73 @@ class SQLiteJourneyStore:
                     journey.job_description,
                     journey.stage,
                     journey.version,
+                    canonical_identity,
+                    department,
+                    recruiting_cycle,
                     _format_time(now),
                     _format_time(now),
                 ),
             )
+            self._record_job_description_version(journey.id, job_description)
         return journey
 
     def get_journey(self, journey_id: str) -> OpportunityJourney:
         row = self._one("SELECT * FROM journeys WHERE id = ?", (journey_id,))
         return _journey_from_row(row)
+
+    def list_journeys(self, *, limit: int = 100) -> tuple[OpportunityJourney, ...]:
+        """Return the most recently updated opportunity journeys."""
+
+        rows = self._connection.execute(
+            "SELECT * FROM journeys ORDER BY updated_at DESC LIMIT ?",
+            (max(1, min(limit, 500)),),
+        ).fetchall()
+        return tuple(_journey_from_row(row) for row in rows)
+
+    def list_tasks(self, journey_id: str, *, limit: int = 100) -> tuple[TaskRun, ...]:
+        """Return task runs belonging to one journey."""
+
+        self.get_journey(journey_id)
+        rows = self._connection.execute(
+            "SELECT * FROM task_runs WHERE journey_id = ? ORDER BY updated_at DESC LIMIT ?",
+            (journey_id, max(1, min(limit, 500))),
+        ).fetchall()
+        return tuple(_task_from_row(row) for row in rows)
+
+    def list_artifacts(self, journey_id: str, *, limit: int = 100) -> tuple[JourneyArtifact, ...]:
+        """Return artifacts belonging to one journey."""
+
+        self.get_journey(journey_id)
+        rows = self._connection.execute(
+            "SELECT * FROM artifacts WHERE journey_id = ? ORDER BY created_at DESC LIMIT ?",
+            (journey_id, max(1, min(limit, 500))),
+        ).fetchall()
+        return tuple(_artifact_from_row(row) for row in rows)
+
+    def list_job_description_versions(
+        self, journey_id: str, *, limit: int = 100
+    ) -> tuple[JourneyJobDescriptionVersion, ...]:
+        """Return distinct JD snapshots for one Journey, newest first."""
+
+        self.get_journey(journey_id)
+        rows = self._connection.execute(
+            """SELECT * FROM journey_job_description_versions
+            WHERE journey_id = ? ORDER BY created_at DESC LIMIT ?""",
+            (journey_id, max(1, min(limit, 500))),
+        ).fetchall()
+        return tuple(_jd_version_from_row(row) for row in rows)
+
+    def _record_job_description_version(self, journey_id: str, content: str) -> None:
+        if not content:
+            return
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        with self._connection:
+            self._connection.execute(
+                """INSERT OR IGNORE INTO journey_job_description_versions
+                (id, journey_id, content, content_hash, created_at)
+                VALUES (?, ?, ?, ?, ?)""",
+                (str(uuid4()), journey_id, content, content_hash, _format_time(_now())),
+            )
 
     def start_task(
         self,
@@ -326,8 +430,19 @@ class SQLiteJourneyStore:
                     job_description TEXT NOT NULL,
                     stage TEXT NOT NULL,
                     version INTEGER NOT NULL,
+                    identity_key TEXT NOT NULL DEFAULT '',
+                    department TEXT NOT NULL DEFAULT '',
+                    recruiting_cycle TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS journey_job_description_versions (
+                    id TEXT PRIMARY KEY,
+                    journey_id TEXT NOT NULL REFERENCES journeys(id),
+                    content TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(journey_id, content_hash)
                 );
                 CREATE TABLE IF NOT EXISTS task_runs (
                     id TEXT PRIMARY KEY,
@@ -358,6 +473,47 @@ class SQLiteJourneyStore:
                 CREATE INDEX IF NOT EXISTS idx_task_journey ON task_runs(journey_id);
                 CREATE INDEX IF NOT EXISTS idx_artifact_journey ON artifacts(journey_id);
                 """
+            )
+            columns = {
+                row["name"] for row in self._connection.execute("PRAGMA table_info(journeys)")
+            }
+            if "identity_key" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE journeys ADD COLUMN identity_key TEXT NOT NULL DEFAULT ''"
+                )
+            columns = {
+                row["name"] for row in self._connection.execute("PRAGMA table_info(journeys)")
+            }
+            if "department" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE journeys ADD COLUMN department TEXT NOT NULL DEFAULT ''"
+                )
+            if "recruiting_cycle" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE journeys ADD COLUMN recruiting_cycle TEXT NOT NULL DEFAULT ''"
+                )
+            # Existing records were created before Journey identity included
+            # department and recruiting cycle; never let them participate in
+            # the stricter deduplication key implicitly.
+            self._connection.execute(
+                "UPDATE journeys SET identity_key = '' WHERE department = '' OR recruiting_cycle = ''"
+            )
+            rows = self._connection.execute(
+                "SELECT id, company, role, job_description FROM journeys WHERE identity_key = ''"
+            ).fetchall()
+            for row in rows:
+                self._connection.execute(
+                    """INSERT OR IGNORE INTO journey_job_description_versions
+                    (id, journey_id, content, content_hash, created_at)
+                    VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        str(uuid4()), row["id"], row["job_description"],
+                        hashlib.sha256(str(row["job_description"]).encode("utf-8")).hexdigest(),
+                        _format_time(_now()),
+                    ),
+                )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_journey_identity ON journeys(identity_key)"
             )
 
 
@@ -391,6 +547,8 @@ def _journey_from_row(row: sqlite3.Row) -> OpportunityJourney:
         version=row["version"],
         created_at=_parse_time(row["created_at"]),
         updated_at=_parse_time(row["updated_at"]),
+        department=str(row["department"] or ""),
+        recruiting_cycle=str(row["recruiting_cycle"] or ""),
     )
 
 
@@ -422,5 +580,15 @@ def _artifact_from_row(row: sqlite3.Row) -> JourneyArtifact:
         content_hash=row["content_hash"],
         provenance_refs=_tuple_json(row["provenance_refs"]),
         validation_errors=_tuple_json(row["validation_errors"]),
+        created_at=_parse_time(row["created_at"]),
+    )
+
+
+def _jd_version_from_row(row: sqlite3.Row) -> JourneyJobDescriptionVersion:
+    return JourneyJobDescriptionVersion(
+        id=row["id"],
+        journey_id=row["journey_id"],
+        content=row["content"],
+        content_hash=row["content_hash"],
         created_at=_parse_time(row["created_at"]),
     )

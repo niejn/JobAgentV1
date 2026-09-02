@@ -1,7 +1,14 @@
-"""Tests for the boss_greet_jobs hard HITL gate (code review CRITICAL-2)."""
+"""Tests for boss_greet_jobs approval semantics (code review CRITICAL-2).
+
+Approval moved from a per-tool ``user_confirmed`` parameter to the agent's
+``HumanInTheLoopMiddleware``: the tool call is physically interrupted before
+the body runs, so the tool itself must have no confirmation parameter and the
+middleware must cover it.
+"""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -13,7 +20,7 @@ from jobagent.tools.boss_greet import (
 )
 
 
-def _request(user_confirmed: bool) -> BossGreetJobsRequest:
+def _request() -> BossGreetJobsRequest:
     return BossGreetJobsRequest(
         jobs=[
             GreetingTarget(
@@ -23,42 +30,52 @@ def _request(user_confirmed: bool) -> BossGreetJobsRequest:
                 job_id="boss:abc",
             )
         ],
-        user_confirmed=user_confirmed,
         max_greetings=5,
     )
 
 
 @pytest.mark.asyncio
-async def test_greet_refuses_without_user_confirmation() -> None:
-    """No confirmation -> structured refusal; BossApplier must never start."""
-    manager = BossGreetingsManager(_settings_stub())
+async def test_greet_reaches_applier_without_confirmation_parameter(tmp_path) -> None:
+    """No parameter gate: the call flows into BossApplier; the HITL
+    middleware is the approval point (physical interrupt before this body)."""
+    manager = BossGreetingsManager(_settings_stub(tmp_path))
+    profile = SimpleNamespace(name="n", skills=[], years_experience=1, summary="s")
 
-    with patch("jobagent.tools.boss_greet.BossApplier") as applier_cls:
-        applier_cls.return_value.__aenter__ = AsyncMock(return_value=None)
-        result = await manager.greet(_request(user_confirmed=False))
-
-    assert result["status"] == "waiting_user_confirmation"
-    assert applier_cls.call_count == 0, "applier constructed despite no confirmation"
-    assert "未发送任何消息" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_greet_missing_field_is_rejected_by_schema() -> None:
-    """user_confirmed is required: omitting it must fail validation, not default."""
-    with pytest.raises(ValueError, match="user_confirmed"):
-        BossGreetJobsRequest(
-            jobs=[
-                GreetingTarget(
-                    url="https://www.zhipin.com/job_detail/abc.html",
-                    company="示例公司",
-                    title="后端工程师",
-                )
-            ],
-            max_greetings=5,
+    with (
+        patch("jobagent.tools.boss_greet.get_boss_cooldown") as cooldown,
+        patch("jobagent.tools.boss_greet.BossApplier") as applier_cls,
+        patch.object(BossGreetingsManager, "_load_profile", return_value=profile),
+        patch.object(
+            BossGreetingsManager, "_load_interview_preference", return_value=None
+        ),
+    ):
+        cooldown.return_value.check.return_value = (True, 0, None)
+        applier = applier_cls.return_value
+        applier.__aenter__ = AsyncMock(return_value=applier)
+        applier.__aexit__ = AsyncMock(return_value=None)
+        applier.apply = AsyncMock(
+            return_value=SimpleNamespace(
+                status=SimpleNamespace(value="submitted"),
+                extra={"greeting_sent": True, "reason": ""},
+            )
         )
 
+        result = await manager.greet(_request())
 
-def _settings_stub():
+    assert applier_cls.call_count == 1, "applier must run without a parameter gate"
+    applier.apply.assert_awaited_once()
+    assert result["status"] == "completed"
+    assert result["succeeded"] == 1
+
+
+def test_greet_schema_has_no_user_confirmed_field() -> None:
+    """The old weak gate is gone: user_confirmed is not part of the schema,
+    so the model cannot bypass-or-satisfy approval through a flag."""
+    assert "user_confirmed" not in BossGreetJobsRequest.model_fields
+    assert "user_confirmed" not in GreetingTarget.model_fields
+
+
+def _settings_stub(tmp_path) -> object:
     from jobagent.config import Settings
 
-    return Settings(_env_file=None)
+    return Settings(_env_file=None, jobagent_state_db=tmp_path / "state.db")

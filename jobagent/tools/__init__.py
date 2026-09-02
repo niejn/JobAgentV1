@@ -66,6 +66,7 @@ from jobagent.tools.shared_url import (
     build_shared_url_extract_tool,
     build_shared_url_save_tool,
 )
+from jobagent.tools.skills import build_skill_tools
 from jobagent.tools.xhs_author import (
     XhsAuthorPostsBrowser,
     XhsAuthorPostsRequest,
@@ -123,6 +124,7 @@ __all__ = [
     "SharedUrlSaver",
     "build_shared_url_save_tool",
     "build_shared_url_extract_tool",
+    "build_skill_tools",
     "XhsAuthorPostsBrowser",
     "XhsAuthorPostsRequest",
     "build_xhs_author_posts_tool",

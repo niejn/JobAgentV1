@@ -58,16 +58,16 @@ greeted，不得重复记录；通过邮件等渠道正式投递简历记录为 
 同一岗位可能来自多个平台/多次发布（Boss 重发、小红书内推帖、邮箱直投）：登记册按跨平台
 身份自动归并，同一身份下所有记录共享状态，不要对已 greeted/applied 的岗位重复投递。
 发现同公司疑似同一岗位但未自动归并时，用 `find_job_merge_candidates` 查候选，向用户展示
-两侧信息与依据，经确认后调用 `merge_job_identities`（user_confirmed=true）合并。
+两侧信息与依据，经用户确认后调用 `merge_job_identities` 合并（执行前会暂停等待批准）。
 </job_progress_policy>"""
 
 GREETING_POLICY = """<greeting_policy>
 打招呼语必须针对具体 JD 定制，让 HR 眼前一亮，禁止千篇一律的模板播报。生成时基于该岗位
 JD 的核心要求、公司亮点和已确认 Candidate Background 中最匹配的经历，说明对岗位的理解、
 自身匹配点和一个具体差异化的价值主张；篇幅克制，不堆砌形容词，不虚构经历。将定制招呼语
-连同岗位一起展示给用户，用户确认后才调用 `boss_greet_jobs`（此时必须传
-`user_confirmed=true`；未确认时工具会拒绝发送），并把定制文本放入对应岗位的
-`greeting` 字段；用户未确认前不得发送。用户明确要求使用模板或默认招呼时才使用模板。
+连同岗位一起展示给用户，用户同意后才调用 `boss_greet_jobs`，并把定制文本放入对应岗位的
+`greeting` 字段（调用会在执行前暂停等待人工批准，无需再传确认参数）。用户明确要求使用
+模板或默认招呼时才使用模板。
 </greeting_policy>"""
 
 INTERVIEW_RESEARCH_POLICY = """<interview_research_policy>
@@ -207,6 +207,12 @@ TOOL_POLICY_PARAGRAPHS: tuple[tuple[str, frozenset[str] | None], ...] = (
 小红书搜索、下载器或隐藏诊断命令。没有注册 task、transfer 或子 Agent Tool 时，继续使用当前
 业务 Tool，不得虚构委派。""",
         None,
+    ),
+    (
+        "发现或使用 Skill 时，先调用 `list_skills`；使用前调用 `read_skill` 读取完整 `SKILL.md`。"
+        "只有用户明确要求安装时才调用 `install_skill`，安装来源必须是用户提供的本地路径或 HTTPS URL；"
+        "安装后重新调用 `list_skills` 验证。Skill 是文档指令，不是可导入代码。",
+        frozenset({"list_skills", "read_skill", "install_skill"}),
     ),
     (
         """不得自行构造、要求或暴露 Cookie、API Key、xsec_token、Spider_XHS 内部参数、任意本地路径、

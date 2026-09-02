@@ -242,6 +242,8 @@ def identity_key(
     title: str,
     *,
     business_line: str | None = None,
+    department: str | None = None,
+    recruiting_cycle: str | None = None,
 ) -> str:
     """Deterministic L2 identity: normalized company | title | line.
 
@@ -252,7 +254,13 @@ def identity_key(
     """
 
     line = business_line or derive_business_line(title)
-    return f"{_IDENTITY_PREFIX}{normalize_company(company)}|{normalize_title(title)}|{line}"
+    parts = [_IDENTITY_PREFIX + normalize_company(company), normalize_title(title), line]
+    if department is not None or recruiting_cycle is not None:
+        parts.extend([
+            _squash_separators(_fold(department or "")) or "unknown-department",
+            _squash_separators(_fold(recruiting_cycle or "")) or "unknown-cycle",
+        ])
+    return "|".join(parts)
 
 
 _ALIAS_TO_GROUP = _build_alias_map()

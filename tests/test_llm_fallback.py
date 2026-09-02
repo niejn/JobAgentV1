@@ -125,6 +125,19 @@ def test_non_provider_errors_propagate_without_fallback() -> None:
     assert backup.calls == 0
 
 
+def test_bad_request_does_not_fall_back() -> None:
+    """400 parameter errors, including unsupported image input, are not retryable."""
+
+    primary = FlakyModel("primary", [_api_error(openai.BadRequestError, 400)])
+    backup = FlakyModel("backup", ["不应被调用"])
+    chain = FallbackChatModel(primary=primary, fallbacks=(backup,))
+
+    with pytest.raises(openai.BadRequestError, match="provider exploded"):
+        chain.invoke(MESSAGE)
+    assert primary.calls == 1
+    assert backup.calls == 0
+
+
 # ---- 接口保持（deepagents / 优雅收尾路径依赖） ---------------------------------
 
 

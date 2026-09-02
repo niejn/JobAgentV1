@@ -39,7 +39,12 @@ class Settings(BaseSettings):
     )
     jobagent_max_jobs: int = Field(default=30, ge=1, le=500)
     jobagent_request_timeout: int = Field(default=30, ge=5, le=300)
-    jobagent_workspace_root: Path = Field(default=Path("."))
+    jobagent_workspace_root: Path = Field(
+        default=Path("data/share"),
+        description=(
+            "Safe workspace for explicitly named user documents such as resumes and JDs."
+        ),
+    )
 
     openai_api_key: str | None = None
     openai_base_url: str = Field(default="https://api.openai.com/v1")
@@ -73,7 +78,6 @@ class Settings(BaseSettings):
     jobagent_llm_max_tokens: int = Field(default=4_096, ge=1)
     jobagent_llm_timeout: int = Field(default=180, ge=10, le=600)
     jobagent_llm_reasoning: bool = Field(default=False)
-    jobagent_llm_input_modalities: str = Field(default="text")
     jobagent_llm_supports_developer_role: bool = Field(default=False)
     jobagent_llm_thinking_format: str | None = None
     jobagent_llm_thinking_level: str | None = None
@@ -231,6 +235,14 @@ class Settings(BaseSettings):
     jobagent_state_db: Path = Field(default=Path("data/jobagent.db"))
     jobagent_checkpoint_db: Path = Field(default=Path("data/jobagent-checkpoints.db"))
     jobagent_artifact_dir: Path = Field(default=Path("data/journeys"))
+    jobagent_skills_dir: Path = Field(
+        default=Path("data/skills"),
+        description="User-installed documentation Skills directory.",
+    )
+    jobagent_model_capabilities_file: Path = Field(
+        default=Path("data/model_capabilities.json"),
+        description="Local model capability registry learned from provider responses.",
+    )
     jobagent_opportunity_dir: Path = Field(default=Path("data/opportunities"))
     jobagent_ocr_engine: str = Field(default="tesseract")
     tesseract_cmd: Path = Field(default=Path("tesseract"))

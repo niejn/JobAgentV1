@@ -51,6 +51,9 @@ DEFAULT_TOOL_NAMES = {
     "search_xhs_notes",
     "read_job_description",
     "read_user_document",
+    "list_skills",
+    "read_skill",
+    "install_skill",
 }
 
 

@@ -14,8 +14,8 @@ fragile class names). Rationale (2026-08-28 live findings):
   probes several shapes and reports which failed, so live calibration is
   a one-run affair.
 
-HITL: the tool layer refuses to send without user_confirmed=true; the
-message text itself is the confirmed artefact.
+HITL: the agent's HumanInTheLoopMiddleware physically pauses the tool call
+before this sender runs; the message text itself is the approved artefact.
 """
 
 from __future__ import annotations

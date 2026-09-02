@@ -67,6 +67,10 @@ _ROUTE_TOOLS = frozenset({"discover_boss_jobs", "boss_greet_jobs"})
 #: 未知值立即抛错，避免拼错平台名静默丢失提示。
 _PLATFORM_HINTS: dict[str, str] = {
     "cli": "交互平台：本地终端 CLI。回复可使用 Markdown 排版。",
+    "web": (
+        "交互平台：JobAgent 网页工作台。回复应结构清晰、适合网页阅读；"
+        "可以使用 Markdown，但不要依赖终端颜色、表格宽度或命令行交互。"
+    ),
     "wechat": (
         "交互平台：微信。回复将作为微信文本消息发出：保持简短、分段清晰，"
         "避免表格、代码块等微信无法渲染的格式。"
@@ -204,7 +208,7 @@ def build_system_prompt(
     :param registered_tools: 已注册工具名的集合（``{tool.name for tool in tools}``），
         条件注入的唯一事实源：policy 段/段落跟随工具注册状态。
     :param candidate_context: 候选人上下文，以不可信数据块注入（可为 None）。
-    :param platform_hint: ``"cli"`` | ``"wechat"`` | ``""``（不注入平台提示）；
+    :param platform_hint: ``"cli"`` | ``"web"`` | ``"wechat"`` | ``""``（不注入平台提示）；
         未知值抛 ``ValueError``。
     :param model_name: 模型显示名（空串则省略该行）。
     :param now: 会话开始时间；日期冻结于此。

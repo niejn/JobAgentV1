@@ -40,3 +40,15 @@ version: 1.0.0
 | 目录 | 用途 |
 |---|---|
 | `ChromeCDP-setup` | 检测并启动 Chrome 远程调试端口 |
+
+## JobAgent 运行时
+
+JobAgent 会自动发现内置 `skills/` 和 `JOBAGENT_SKILLS_DIR`（默认
+`data/skills/`）中的标准 `SKILL.md`。对话中可使用：
+
+- `list_skills`：列出有效 Skill 的名称和描述
+- `read_skill`：读取 Skill 指令
+- `install_skill`：从用户提供的本地 `SKILL.md` 或 HTTPS URL 安装 Skill
+
+Skill 只能是文档指令，不会被导入或执行 Python 代码。安装操作会经过人工批准，
+并校验 YAML frontmatter、名称格式和 512 KiB 大小上限。

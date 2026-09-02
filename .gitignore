@@ -57,12 +57,22 @@ Thumbs.db
 
 # Local runtime data
 data/
+jobagent/jobagent-journey.sqlite3
+
+# Frontend dependencies and local linked repositories
+jobagent/ui/node_modules/
+alternates/CareerDesk/
 
 # Personal documents
 resume-*.md
 
 # External cloned crawler projects (loaded as libraries, not vendored)
 spiders/
+
+# Locally linked Skills (source lives in OMP/Claude skill directories)
+skills/resume-optimizer/
+skills/kami/
+
 # Personal notes
 .pi-brief-*.txt
 pi代理.md

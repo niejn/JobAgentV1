@@ -3,6 +3,7 @@
 from jobagent.journey.store import (
     ArtifactStatus,
     JourneyArtifact,
+    JourneyJobDescriptionVersion,
     OpportunityJourney,
     SQLiteJourneyStore,
     TaskRun,
@@ -12,6 +13,7 @@ from jobagent.journey.store import (
 __all__ = [
     "ArtifactStatus",
     "JourneyArtifact",
+    "JourneyJobDescriptionVersion",
     "OpportunityJourney",
     "SQLiteJourneyStore",
     "TaskRun",

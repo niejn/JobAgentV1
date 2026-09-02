@@ -34,6 +34,27 @@ FALLBACK_EXCEPTIONS: tuple[type[BaseException], ...] = (
     openai.APIConnectionError,
 )
 
+_FALLBACK_STATUS_CODES = frozenset({401, 403, 429})
+
+
+def _should_fallback(exc: BaseException) -> bool:
+    """Return whether changing provider/model can plausibly fix the error.
+
+    ``APIStatusError`` is intentionally broad because OpenAI exposes provider
+    errors through one hierarchy.  Request errors such as 400 are permanent
+    for the same payload (notably unsupported ``image_url`` input), so they
+    must be surfaced immediately instead of replayed on every candidate.
+    """
+
+    if isinstance(exc, openai.APIConnectionError):
+        return True
+    if isinstance(exc, openai.APIStatusError):
+        status_code = getattr(exc, "status_code", None)
+        return status_code in _FALLBACK_STATUS_CODES or (
+            isinstance(status_code, int) and status_code >= 500
+        )
+    return False
+
 
 def _string_attr(obj: Any, name: str) -> str | None:
     value = getattr(obj, name, None)
@@ -91,6 +112,8 @@ class FallbackChatModel(BaseChatModel):
                     )
                 return self._as_chat_result(result)
             except FALLBACK_EXCEPTIONS as exc:
+                if not _should_fallback(exc):
+                    raise
                 last_error = exc
                 logger.warning(
                     "jobagent.llm_fallback_candidate_failed",
@@ -117,6 +140,8 @@ class FallbackChatModel(BaseChatModel):
                     )
                 return self._as_chat_result(result)
             except FALLBACK_EXCEPTIONS as exc:
+                if not _should_fallback(exc):
+                    raise
                 last_error = exc
                 logger.warning(
                     "jobagent.llm_fallback_candidate_failed",

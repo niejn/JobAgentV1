@@ -44,6 +44,7 @@ from jobagent.crawl import (
     build_crawl_gate,
 )
 from jobagent.memory.conversation_log import ConversationLog
+from jobagent.middleware import MessageCompatibilityMiddleware, ModelCapabilityRegistry
 from jobagent.models.llm_client import build_agent_model
 from jobagent.observability import (
     NodeTraceMiddleware,
@@ -56,6 +57,7 @@ from jobagent.profile import SQLiteCandidateContextProvider, SQLiteCandidateProf
 from jobagent.profile.context import CandidateContext
 from jobagent.prompts import MAIN_AGENT_SYSTEM_PROMPT, build_system_prompt
 from jobagent.scraper.xhs_backend import SpiderXhsBackend
+from jobagent.skills import SkillManager
 from jobagent.tools import (
     BossGreetingsManager,
     BossJobDiscovery,
@@ -88,6 +90,7 @@ from jobagent.tools import (
     build_send_application_email_tool,
     build_shared_url_extract_tool,
     build_shared_url_save_tool,
+    build_skill_tools,
     build_update_application_state_tool,
     build_update_job_progress_tool,
     build_user_document_tool,
@@ -121,12 +124,41 @@ _SHELL_ENV_ALLOWLIST = (
 from jobagent.observability import _SENSITIVE_NAMES as _DEBUG_SENSITIVE_KEYS  # noqa: E402
 from jobagent.observability import _SENSITIVE_QUERY as _DEBUG_SENSITIVE_QUERY  # noqa: E402
 
+#: Tools whose execution is paused for explicit human approval before the
+# call runs (physical interrupt - the model cannot bypass it). This replaces
+# the former per-tool ``user_confirmed`` parameter gates.
+_HITL_TOOLS: dict[str, str] = {
+    "install_skill": "从本地文件或互联网下载并安装一个 Agent Skill",
+    "send_application_email": "发送求职投递邮件（含简历附件）给外部 HR",
+    "boss_greet_jobs": "向 Boss 招聘方批量发送打招呼消息",
+    "upload_boss_resume_pdf": "向 Boss 账户上传/替换附件简历",
+    "reply_boss_greeting": "在 Boss 聊天中向 HR 发送一条消息",
+    "merge_job_identities": "合并两条岗位身份记录（不可自动撤销）",
+}
+
+
+def build_hitl_middleware() -> Any:
+    """Assemble the framework HITL approval gate for external-write tools."""
+
+    from langchain.agents.middleware import HumanInTheLoopMiddleware
+
+    return HumanInTheLoopMiddleware(
+        interrupt_on={
+            name: {
+                "allowed_decisions": ["approve", "reject"],
+                "description": why,
+            }
+            for name, why in _HITL_TOOLS.items()
+        },
+        description_prefix="工具执行需要人工批准",
+    )
+
 
 @dataclass(frozen=True, slots=True)
 class AgentStreamEvent:
     """Stable user-visible projection of internal LangGraph stream events."""
 
-    kind: Literal["status", "token", "thinking", "tool", "done"]
+    kind: Literal["status", "token", "thinking", "tool", "interrupt", "done"]
     text: str
 
 
@@ -190,6 +222,8 @@ class JobAgent:
         opportunity_artifacts: LocalOpportunityArtifacts | None = None,
         filesystem_root: Path | None = None,
         debug_trace: bool = False,
+        model_capability_registry: ModelCapabilityRegistry | None = None,
+        model_capability_key: str = "",
     ) -> None:
         self._model = model
         self._tools = tuple(tools)
@@ -197,12 +231,17 @@ class JobAgent:
         self._checkpoint_db = checkpoint_db
         self._conversation_log = conversation_log
         self._deep_agent: Any | None = None
+        self._pending_hitl: Any | None = None
         self._connection: aiosqlite.Connection | None = None
         self._init_lock = asyncio.Lock()
         self._recursion_limit = recursion_limit
         self._opportunity_artifacts = opportunity_artifacts
         self._filesystem_root = (filesystem_root or Path.cwd()).expanduser().resolve()
         self._debug_trace = debug_trace
+        self._model_capability_registry = model_capability_registry or ModelCapabilityRegistry(
+            Path("data/model_capabilities.json")
+        )
+        self._model_capability_key = model_capability_key or _model_display_name(model)
 
     async def reply(self, message: str, *, session_id: str = "default") -> str:
         """Continue one conversation and collect its visible token stream."""
@@ -223,16 +262,47 @@ class JobAgent:
         *,
         session_id: str = "default",
     ) -> AsyncIterator[AgentStreamEvent]:
+        if self._conversation_log is not None:
+            self._conversation_log.append(session=session_id, role="user", text=message)
+        async for event in self._reply_with_log(
+            self._stream_reply_events(message, session_id=session_id),
+            session_id=session_id,
+        ):
+            yield event
+
+    async def resume_reply(
+        self,
+        approved: bool,
+        *,
+        session_id: str = "default",
+        reject_reason: str = "",
+    ) -> AsyncIterator[AgentStreamEvent]:
+        """Resume after a HITL interrupt with the human's decision."""
+
+        from langgraph.types import Command
+
+        decision: dict[str, Any] = {"type": "approve" if approved else "reject"}
+        if not approved and reject_reason:
+            decision["args"] = reject_reason
+        resume_input: Any = Command(resume={"decisions": [decision]})
+        self._pending_hitl = None
+        async for event in self._reply_with_log(
+            self._stream_reply_events("", session_id=session_id, resume_input=resume_input),
+            session_id=session_id,
+        ):
+            yield event
+
+    async def _reply_with_log(
+        self,
+        events: AsyncIterator[AgentStreamEvent],
+        *,
+        session_id: str,
+    ) -> AsyncIterator[AgentStreamEvent]:
         trace_token = begin_trace()
-        # Episodic conversation log (JSONL): user turn now, collected
-        # assistant tokens + tool calls on the way out. Failures never
-        # block replies (degrade, don't eat turns).
         log = self._conversation_log
-        if log is not None:
-            log.append(session=session_id, role="user", text=message)
         collected: list[str] = []
         try:
-            async for event in self._stream_reply_events(message, session_id=session_id):
+            async for event in events:
                 if log is not None:
                     if event.kind == "token" and event.text:
                         collected.append(event.text)
@@ -263,6 +333,7 @@ class JobAgent:
         message: str,
         *,
         session_id: str,
+        resume_input: Any | None = None,
     ) -> AsyncIterator[AgentStreamEvent]:
         """Stream status/tool progress, thinking deltas, and final-answer tokens."""
 
@@ -296,8 +367,13 @@ class JobAgent:
         first_model_event_reported = False
         first_visible_token_reported = False
         tool_started = time.perf_counter()
+        graph_input: Any = (
+            resume_input
+            if resume_input is not None
+            else {"messages": [{"role": "user", "content": message}]}
+        )
         async for part in deep_agent.astream(
-            {"messages": [{"role": "user", "content": message}]},
+            graph_input,
             config={
                 "configurable": {"thread_id": session_id},
                 # 运行预算：不传则 LangGraph 隐式默认 25 超步（≈6-12 轮工具循环），
@@ -322,6 +398,22 @@ class JobAgent:
                 for node, update in part["data"].items():
                     if self._debug_trace:
                         yield AgentStreamEvent("status", f"[debug] 节点：{node}")
+                    if node == "__interrupt__":
+                        # HITL: the framework paused before tool execution.
+                        # Surface the pending action and stop this turn; the
+                        # caller resumes with resume_reply(approved=...).
+                        import json as _json
+
+                        for interrupt_item in (
+                            update if isinstance(update, tuple) else (update,)
+                        ):
+                            value = getattr(interrupt_item, "value", interrupt_item)
+                            self._pending_hitl = value
+                            yield AgentStreamEvent(
+                                "interrupt",
+                                _json.dumps(value, ensure_ascii=False, default=str),
+                            )
+                        continue
                     if node == "model" and isinstance(update, dict):
                         for updated_message in update.get("messages", []):
                             if not isinstance(updated_message, AIMessage):
@@ -694,7 +786,15 @@ class JobAgent:
                     model=self._model,
                     tools=list(self._tools),
                     system_prompt=self._system_prompt,
-                    middleware=[filesystem_middleware, cast(Any, NodeTraceMiddleware())],
+                    middleware=[
+                        filesystem_middleware,
+                        MessageCompatibilityMiddleware(
+                            self._model_capability_registry,
+                            self._model_capability_key,
+                        ),
+                        build_hitl_middleware(),
+                        cast(Any, NodeTraceMiddleware()),
+                    ],
                     backend=shell_backend,
                     checkpointer=saver,
                     name="jobagent",
@@ -945,10 +1045,12 @@ def build_job_agent(
     tools: Sequence[BaseTool] | None = None,
     candidate_context: CandidateContext | None = None,
     platform_hint: str = "",
+    system_prompt_override: str | None = None,
 ) -> JobAgent:
     """Build a safe Agent with only explicitly registered job-search tools."""
 
     effective_context = candidate_context
+    settings.jobagent_workspace_root.expanduser().resolve().mkdir(parents=True, exist_ok=True)
     state_db = settings.jobagent_state_db.expanduser().resolve()
     if effective_context is not None:
         with SQLiteCandidateProfileStore(state_db) as profile_store:
@@ -977,6 +1079,7 @@ def build_job_agent(
             database=settings.jobagent_state_db,
         )
         artifacts_store = LocalOpportunityArtifacts(settings.jobagent_opportunity_dir)
+        skill_manager = SkillManager(settings.jobagent_skills_dir)
         # 声明式能力表：下面 (名字 -> 构造器) 对就是 agent 的能力集。
         # 统一经 _build_optional_tool 装配（Hermes 优雅降级模式：可选依赖
         # 缺失只降级该工具并记 warning，不炸整体构建；见其 docstring）。
@@ -1091,6 +1194,7 @@ def build_job_agent(
             for name, build in tool_builders
             if (tool := _build_optional_tool(name, build)) is not None
         ]
+        registered_tools.extend(build_skill_tools(skill_manager))
     effective_model = model or build_agent_model(settings)
     # PS-1 分层组装：条件注入（段/段落跟随 registered_tools）+ 元数据层
     # （日期冻结于构造时刻）+ candidate_context 不可信块。单一组装点在
@@ -1104,7 +1208,7 @@ def build_job_agent(
         memory_markdown = CandidateMemoryStore(memory_dir / "candidate_memory.md").as_markdown()
     except Exception:
         logger.warning("candidate memory load failed", exc_info=True)
-    system_prompt = build_system_prompt(
+    system_prompt = system_prompt_override or build_system_prompt(
         registered_tools={tool.name for tool in registered_tools},
         candidate_context=effective_context,
         platform_hint=platform_hint,
@@ -1121,4 +1225,10 @@ def build_job_agent(
         opportunity_artifacts=LocalOpportunityArtifacts(settings.jobagent_opportunity_dir),
         filesystem_root=settings.jobagent_artifact_dir,
         debug_trace=settings.jobagent_debug_trace,
+        model_capability_registry=ModelCapabilityRegistry(
+            settings.jobagent_model_capabilities_file
+        ),
+        model_capability_key=(
+            f"{settings.jobagent_llm_model.strip()}@{settings.openai_base_url.rstrip('/')}"
+        ),
     )

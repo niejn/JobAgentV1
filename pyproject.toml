@@ -43,6 +43,9 @@ dependencies = [
   "langchain-openai>=1.6.0,<2.0.0",
   "langgraph-checkpoint-sqlite>=3.1.1,<4.0.0",
   "qrcode>=8.2",
+  "uvicorn>=0.52.4",
+  "fastapi>=0.141.1",
+  "python-multipart>=0.0.20",
 ]
 
 [dependency-groups]
@@ -88,3 +91,8 @@ warn_return_any = true
 disallow_untyped_defs = true
 disallow_any_generics = false
 check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# qrcode ships no type stubs (types-qrcode covers only the abandoned 6.x line).
+module = "qrcode"
+ignore_missing_imports = true

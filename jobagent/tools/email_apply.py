@@ -1,11 +1,9 @@
 """Business Tool for sending application emails (XHS referral channel).
 
-HITL: the tool layer refuses to send without user_confirmed=true; the full
-email (recipient, subject, body, attachment path) is the confirmed artefact.
-
-On a successful send the job is registered in the journey registry under
-its cross-platform identity (F1-R4) and marked ``applied``, so Boss
-re-posts and follow-ups share one journey.
+Approval lives in the agent's HumanInTheLoopMiddleware: the tool call is
+physically paused before this body runs; only an approved resume reaches it.
+On a successful send the job is registered under its cross-platform identity
+(F1-R4) and marked ``applied``.
 """
 
 from __future__ import annotations
@@ -40,10 +38,6 @@ class SendApplicationEmailRequest(BaseModel):
     record_id: str = Field(
         default="",
         description="登记册记录 ID；空则按 company+title 生成（xhs/email 前缀）",
-    )
-    user_confirmed: bool = Field(
-        default=False,
-        description="用户已确认发送此邮件全文。未确认时不发送，返回待确认信息。",
     )
 
     @field_validator("to")
@@ -84,7 +78,6 @@ def build_send_application_email_tool(settings: Settings) -> BaseTool:
         title: str = "",
         source_url: str = "",
         record_id: str = "",
-        user_confirmed: bool = False,
     ) -> dict[str, Any]:
         request = SendApplicationEmailRequest(
             to=to,
@@ -96,17 +89,9 @@ def build_send_application_email_tool(settings: Settings) -> BaseTool:
             title=title,
             source_url=source_url,
             record_id=record_id,
-            user_confirmed=user_confirmed,
         )
-        if not user_confirmed:
-            return {
-                "status": "waiting_user_confirmation",
-                "to": request.to,
-                "subject": request.subject,
-                "body_preview": request.body_html[:400],
-                "attachment": request.attachment_path or "(默认简历)",
-                "hint": "向用户展示邮件全文与附件，确认后携带 user_confirmed=true 重试。",
-            }
+        # Approval moved to HumanInTheLoopMiddleware: this tool body runs
+        # only after the user approved the interrupt (or in direct tests).
 
         attachment: Path | None = None
         if request.attachment_path.strip().lower() not in {"", "none"}:
@@ -186,10 +171,10 @@ def build_send_application_email_tool(settings: Settings) -> BaseTool:
         coroutine=_run,
         name="send_application_email",
         description=(
-            "发送求职投递邮件（HTML 正文 + 简历 PDF 附件）到 HR 邮箱。"
+            "发送求职投递邮件（HTML 正文 + 简历 PDF 附件）到 HR 邮箱。执行前会暂停等待人工批准。"
             "发送成功后自动在岗位登记册入册并标记 applied（跨平台身份归并）。"
             "HITL：必须先向用户展示完整邮件（收件人/主题/正文/附件）并确认，"
-            "user_confirmed=true 才真正发送。"
+            ""
         ),
         args_schema=SendApplicationEmailRequest,
     )

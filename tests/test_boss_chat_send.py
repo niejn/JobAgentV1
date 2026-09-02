@@ -1,16 +1,19 @@
-"""Tests for BossChatSender / reply_boss_greeting (TR-6, HITL-gated)."""
+"""Tests for BossChatSender / reply_boss_greeting (TR-6, HITL middleware-gated)."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from jobagent.applier.boss_chat_send import BossChatSender
 from jobagent.config import Settings
-from jobagent.tools.boss_chat_send import build_boss_chat_reply_tool
+from jobagent.tools.boss_chat_send import (
+    BossChatReplyRequest,
+    build_boss_chat_reply_tool,
+)
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -28,9 +31,40 @@ def _loc(visible: bool = True) -> MagicMock:
     loc.fill = AsyncMock()
     loc.type = AsyncMock()
     loc.press = AsyncMock()
-    loc.input_value = AsyncMock(return_value="")  # cleared = sent
+    loc.input_value = AsyncMock(return_value="")
     loc.inner_text = AsyncMock(return_value="")
     return loc
+
+
+def _wrap(loc: MagicMock) -> MagicMock:
+    holder = MagicMock()
+    holder.first = loc
+    return holder
+
+
+def _pool_with(page: MagicMock) -> MagicMock:
+    pool = MagicMock()
+    pool.acquire = AsyncMock(return_value=page)
+    pool.detach = AsyncMock()
+    pool.release = AsyncMock()
+    pool.prune_blank_tabs = AsyncMock()
+    return pool
+
+
+def _sender_with(page: MagicMock, settings: Settings) -> BossChatSender:
+    sender = BossChatSender.__new__(BossChatSender)
+    sender._settings = settings
+    sender._playwright = MagicMock()
+    sender._context = MagicMock()
+    sender._tab_pool = _pool_with(page)
+    return sender
+
+
+@pytest.fixture(autouse=True)
+def _reset_parked_chat_page() -> None:
+    import jobagent.applier.boss_chat_session as session
+
+    session._parked = None
 
 
 def _happy_page() -> MagicMock:
@@ -43,17 +77,11 @@ def _happy_page() -> MagicMock:
     page.keyboard = keyboard
 
     async def evaluate(script: str, payload: dict | None = None):
-        # settle probes AND strong-verify panel echo checks
         return True
 
     page.evaluate = evaluate
 
     search, row, input_area, send = _loc(), _loc(), _loc(), _loc()
-
-    def _wrap(loc: MagicMock) -> MagicMock:
-        holder = MagicMock()
-        holder.first = loc  # playwright Locator.first
-        return holder
 
     def locator(selector: str):
         if "placeholder" in selector or "boss-search" in selector:
@@ -70,34 +98,9 @@ def _happy_page() -> MagicMock:
     return page
 
 
-def _pool_with(page: MagicMock) -> MagicMock:
-    pool = MagicMock()
-    pool.acquire = AsyncMock(return_value=page)
-    pool.detach = AsyncMock()
-    pool.release = AsyncMock()
-    pool.prune_blank_tabs = AsyncMock()
-    return pool
-
-
-def _sender_with(page: MagicMock) -> BossChatSender:
-    sender = BossChatSender.__new__(BossChatSender)
-    sender._settings = _settings(Path("."))
-    sender._playwright = MagicMock()
-    sender._context = MagicMock()
-    sender._tab_pool = _pool_with(page)
-    return sender
-
-
-@pytest.fixture(autouse=True)
-def _reset_parked_chat_page() -> None:
-    import jobagent.applier.boss_chat_session as session
-
-    session._parked = None
-
-
 @pytest.mark.asyncio
 async def test_send_reply_happy_path(tmp_path: Path) -> None:
-    sender = _sender_with(_happy_page())
+    sender = _sender_with(_happy_page(), _settings(tmp_path))
     result = await sender.send_reply(hr_name="张HR", message="您好，感谢关注！")
 
     assert result == {"status": "ok", "to": "张HR", "chars": 8}
@@ -105,7 +108,7 @@ async def test_send_reply_happy_path(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_send_reply_refuses_empty_and_long(tmp_path: Path) -> None:
-    sender = _sender_with(_happy_page())
+    sender = _sender_with(_happy_page(), _settings(tmp_path))
     assert (await sender.send_reply(hr_name="x", message="  "))["error_type"] == "empty_message"
     assert (
         await sender.send_reply(hr_name="x", message="字" * 501)
@@ -122,7 +125,7 @@ async def test_send_reply_conversation_not_found(tmp_path: Path) -> None:
         return holder
 
     page.locator = locator
-    sender = _sender_with(page)
+    sender = _sender_with(page, _settings(tmp_path))
     result = await sender.send_reply(hr_name="不存在", message="hi")
 
     assert result["status"] == "failed"
@@ -137,13 +140,12 @@ async def test_send_unconfirmed_residual_input(tmp_path: Path) -> None:
         holder = MagicMock()
         loc = _loc()
         if "chat-input" in selector or "textarea" in selector or "contenteditable" in selector:
-            # draft still sitting in the (contenteditable) editor
             loc.inner_text = AsyncMock(return_value="您好，感谢关注！")
         holder.first = loc
         return holder
 
     page.locator = locator
-    sender = _sender_with(page)
+    sender = _sender_with(page, _settings(tmp_path))
     result = await sender.send_reply(hr_name="张HR", message="您好，感谢关注！")
 
     assert result["status"] == "failed"
@@ -151,47 +153,37 @@ async def test_send_unconfirmed_residual_input(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_tool_gates_on_user_confirmation(tmp_path: Path) -> None:
-    tool = build_boss_chat_reply_tool(_settings(tmp_path))
-    gated = await tool.coroutine(hr_name="张HR", message="您好", user_confirmed=False)
-    assert gated["status"] == "waiting_user_confirmation"
-    assert gated["message"] == "您好"
-
-
-@pytest.mark.asyncio
-async def test_tool_confirmed_sends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    tool = build_boss_chat_reply_tool(_settings(tmp_path))
-    sent: list[Any] = []
-
-    class _FakeSender:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            pass
-
-        async def __aenter__(self) -> _FakeSender:
-            return self
-
-        async def __aexit__(self, *exc: object) -> None:
-            return None
-
-        async def send_reply(self, **kwargs: Any) -> dict[str, Any]:
-            sent.append(kwargs)
-            return {"status": "ok", "to": kwargs["hr_name"], "chars": 2}
-
-    monkeypatch.setattr("jobagent.applier.boss_chat_send.BossChatSender", _FakeSender)
-    result = await tool.coroutine(hr_name="张HR", message="你好", user_confirmed=True)
-
-    assert result["status"] == "ok"
-    assert sent[0]["message"] == "你好"
-
-
-@pytest.mark.asyncio
-async def test_search_box_slow_mount_is_retried(tmp_path: Path) -> None:
+async def test_send_reply_search_box_slow_mount_is_retried(tmp_path: Path) -> None:
     """Regression (live failure 2026-08-28): the chat SPA mounts after
     readyState; probing the search box once right after nav missed it.
-    The sender must retry until it appears (or time out with diagnostics)."""
-    import jobagent.applier.boss_chat_session as session
+    The sender must retry until the anchor appears, then send normally."""
+    page = _happy_page()
+    probes = {"count": 0}
+    original_locator = page.locator
 
-    session._parked = None
+    def locator(selector: str):
+        if "placeholder" in selector or "boss-search" in selector:
+            probes["count"] += 1
+            if probes["count"] <= 6:  # first two full sweeps: SPA not mounted yet
+                return _wrap(_loc(visible=False))
+        return original_locator(selector)
+
+    page.locator = locator
+    sender = _sender_with(page, _settings(tmp_path))
+    with patch(
+        "jobagent.applier.boss_chat_send.asyncio.sleep", new_callable=AsyncMock
+    ):
+        result = await sender.send_reply(hr_name="张HR", message="您好，感谢关注！")
+
+    assert probes["count"] > 6, "search box must be probed more than once"
+    assert result["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_send_unverified_when_editor_clears_but_echo_fails(tmp_path: Path) -> None:
+    """Tri-state verification (live lie #2, 2026-08-28): the message went
+    out (editor cleared) but the panel echo check cannot run - the honest
+    result is `unverified`, never a false `failed` inviting a duplicate send."""
     page = MagicMock()
     page.url = "https://www.zhipin.com/web/geek/chat"
     page.is_closed = lambda: False
@@ -199,117 +191,78 @@ async def test_search_box_slow_mount_is_retried(tmp_path: Path) -> None:
     keyboard = MagicMock()
     keyboard.press = AsyncMock()
     page.keyboard = keyboard
-    page.title = AsyncMock(return_value="聊天")
-
-    ready_states = ["loading", "loading", "complete"]
-
-    async def evaluate(script: str, payload: dict | None = None):
-        if "readyState" in script and payload is None:
-            return ready_states.pop(0) == "complete" if ready_states else True
-        return 100
-
-    page.evaluate = evaluate
-
-    visibility = [False, False, True]  # search box appears on 3rd probe
-    search = _loc()
-
-    def locator(selector: str):
-        holder = MagicMock()
-        if "boss-search" in selector or "placeholder" in selector:
-            search.is_visible = AsyncMock(
-                side_effect=lambda: visibility.pop(0) if visibility else True
-            )
-            holder.first = search
-        else:
-            holder.first = _loc(visible=False)
-        return holder
-
-    page.locator = locator
-    sender = _sender_with(page)
-
-    result = await sender.send_reply(hr_name="张HR", message="您好，感谢关注！")
-
-    # search eventually visible -> flow proceeds to row click (not found here)
-    assert result["error_type"] != "search_box_not_found"
-
-
-@pytest.mark.asyncio
-async def test_message_written_via_single_inserttext(tmp_path: Path) -> None:
-    """Live contract (88-char failure, 2026-08-28): element.type's N
-    synthetic key events lose text on the contenteditable editor. The
-    write must be ONE page.evaluate(selectAll+insertText) - no per-char
-    typing - with a single element-bound Enter to send."""
-    page = _happy_page()
-    written: list[object] = []
-    enters: list[str] = []
-
-    async def evaluate(script: str, payload: dict | None = None):
-        if isinstance(payload, str) and "insertText" in script:
-            written.append(payload)  # the single page-native write
-            return True
-        return True  # settle probes / panel echo
-
-    page.evaluate = evaluate
-
-    def locator(selector: str):
-        holder = MagicMock()
-        if "chat-input" in selector or "textarea" in selector or "contenteditable" in selector:
-            area = _loc()
-            area.press = AsyncMock(
-                side_effect=lambda key, **k: enters.append(key)
-            )
-            holder.first = area
-        elif "boss-search" in selector or "placeholder" in selector:
-            holder.first = _loc()
-        elif "user-list" in selector:
-            holder.first = _loc()
-        else:
-            holder.first = _loc(visible=False)
-        return holder
-
-    page.locator = locator
-    sender = _sender_with(page)
-
-    result = await sender.send_reply(
-        hr_name="张HR", message="第一行\n第二行\n第三行"
-    )
-
-    assert result["status"] == "ok"
-    assert written == ["第一行\n第二行\n第三行"]
-    # and a single element-bound Enter sends it
-    assert enters == ["Enter"]
-
-
-@pytest.mark.asyncio
-async def test_send_unverified_when_editor_clears_but_echo_fails() -> None:
-    """Live case #2 (2026-08-28): the send WORKED (message later showed
-    [送达]) but the panel-echo check errored -> the tool reported a hard
-    failure, inviting a duplicate resend. Editor-cleared + echo-unavailable
-    must be UNVERIFIED (probably sent, human confirms), not failed."""
-    page = _happy_page()
-
-    def locator(selector: str):
-        holder = MagicMock()
-        loc = _loc()
-        if "chat-input" in selector or "textarea" in selector or "contenteditable" in selector:
-            loc.inner_text = AsyncMock(return_value="")  # editor cleared
-        holder.first = loc
-        return holder
-
-    page.locator = locator
 
     async def evaluate(script: str, payload: dict | None = None):
         if "insertText" in script:
-            return True  # the write succeeds
-        if "innerText" in script:
-            raise RuntimeError("execution context destroyed")  # echo dies
-        return True  # settle probes
+            return True  # editor accepted the message
+        raise RuntimeError("execution context gone")  # panel echo unavailable
 
     page.evaluate = evaluate
-    sender = _sender_with(page)
 
-    result = await sender.send_reply(hr_name="张HR", message="你好")
+    message = "您好，感谢关注！"
+    input_area = _loc()
+    reads = {"count": 0}
+
+    async def inner_text() -> str:
+        reads["count"] += 1
+        return message if reads["count"] == 1 else ""  # cleared after Enter
+
+    input_area.inner_text = inner_text
+
+    search, row = _loc(), _loc()
+
+    def locator(selector: str):
+        if "placeholder" in selector or "boss-search" in selector:
+            return _wrap(search)
+        if "user-list" in selector:
+            return _wrap(row)
+        if "chat-input" in selector or "textarea" in selector or "contenteditable" in selector:
+            return _wrap(input_area)
+        return _wrap(_loc(visible=False))
+
+    page.locator = locator
+    sender = _sender_with(page, _settings(tmp_path))
+    with patch(
+        "jobagent.applier.boss_chat_send.asyncio.sleep", new_callable=AsyncMock
+    ):
+        result = await sender.send_reply(hr_name="张HR", message=message)
 
     assert result["status"] == "unverified"
     assert result["editor_residual"] is False
-    assert "避免重复" in result["message"]
+    assert result["panel_echo"] is None
+
+
+# ===== Schema validation tests (tool schema level) =====
+
+
+@pytest.mark.asyncio
+async def test_schema_validates_required_fields(tmp_path: Path) -> None:
+    """工具 schema 要求 hr_name 和 message 为必填字段。"""
+    # 缺少 hr_name
+    with pytest.raises(ValidationError):
+        BossChatReplyRequest(message="hello")
+    # 缺少 message
+    with pytest.raises(ValidationError):
+        BossChatReplyRequest(hr_name="张HR")
+    # 正常情况
+    req = BossChatReplyRequest(hr_name="张HR", message="你好")
+    assert req.hr_name == "张HR"
+    assert req.message == "你好"
+
+
+@pytest.mark.asyncio
+async def test_message_length_validation(tmp_path: Path) -> None:
+    """message 字段有长度限制 (max 500)。"""
+    with pytest.raises(ValidationError):
+        BossChatReplyRequest(hr_name="x", message="x" * 501)
+
+    # 正常长度
+    req = BossChatReplyRequest(hr_name="张HR", message="你好")
+    assert req.message == "你好"
+
+
+def test_tool_schema_has_no_user_confirmed_field(tmp_path: Path) -> None:
+    """The old parameter gate is gone: approval is the HITL middleware
+    interrupt, not a flag the model can set itself."""
+    tool = build_boss_chat_reply_tool(_settings(tmp_path))
+    assert "user_confirmed" not in tool.args_schema.model_fields

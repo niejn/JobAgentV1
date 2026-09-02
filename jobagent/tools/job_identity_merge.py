@@ -30,10 +30,9 @@ class MergeIdentitiesRequest(BaseModel):
         max_length=500,
         description="合并依据（同一岗位的证据：JD 相同/同一招聘方/同一业务线等）",
     )
-    user_confirmed: bool = Field(
-        default=False,
-        description="用户已确认合并。未确认时只返回待确认信息，不执行合并。",
-    )
+
+
+
 
 
 def build_find_merge_candidates_tool(state_db: Path) -> BaseTool:
@@ -73,7 +72,6 @@ def build_merge_job_identities_tool(state_db: Path) -> BaseTool:
         source_key: str,
         target_key: str,
         rationale: str = "",
-        user_confirmed: bool = False,
     ) -> dict[str, Any]:
         from jobagent.journey.job_registry import SQLiteJobRegistry
 
@@ -82,7 +80,7 @@ def build_merge_job_identities_tool(state_db: Path) -> BaseTool:
                 registry.merge_identities(
                     source_key,
                     target_key,
-                    user_confirmed=user_confirmed,
+                    user_confirmed=True,  # middleware approved before this runs
                     rationale=rationale,
                 )
             )
@@ -93,8 +91,7 @@ def build_merge_job_identities_tool(state_db: Path) -> BaseTool:
         description=(
             "合并两个岗位身份（L3 人工确认）：同一岗位在不同平台/不同写法被拆成"
             "两条记录时使用。合并后状态取更深一侧，所有 postings 挂到保留身份下。"
-            "HITL：必须先向用户展示两侧岗位与合并依据，user_confirmed=true 才执行。"
-            "先用 find_job_merge_candidates 找候选。"
+            "执行前暂停等待人工批准。先用 find_job_merge_candidates 找候选。"
         ),
         args_schema=MergeIdentitiesRequest,
     )

@@ -43,19 +43,38 @@ async def test_find_candidates_same_company(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_merge_requires_confirmation(tmp_path: Path) -> None:
+async def test_registry_merge_refuses_without_confirmation(tmp_path: Path) -> None:
+    """Library guard: SQLiteJobRegistry.merge_identities still refuses
+    without user_confirmed - the HITL middleware approves the tool call,
+    then the tool passes user_confirmed=True on its behalf."""
+    db = tmp_path / "registry.db"
+    _setup(db)
+    with SQLiteJobRegistry(db) as registry:
+        result = registry.merge_identities(
+            "idn:小而美|后端工程师|agent",
+            "idn:小而美|aiagent工程师|agent",
+            rationale="同岗位：同一招聘帖的两个平台来源",
+        )
+
+    assert result["status"] == "waiting_user_confirmation"
+    assert "hint" in result
+
+
+@pytest.mark.asyncio
+async def test_merge_tool_runs_without_confirmation_parameter(tmp_path: Path) -> None:
+    """The tool schema has no user_confirmed flag; middleware approval is
+    the gate and the tool self-attests user_confirmed=True to the registry."""
     db = tmp_path / "registry.db"
     _setup(db)
     tool = build_merge_job_identities_tool(db)
+
     result = await tool.ainvoke({
         "source_key": "idn:小而美|后端工程师|agent",
         "target_key": "idn:小而美|aiagent工程师|agent",
         "rationale": "同岗位：同一招聘帖的两个平台来源",
-        "user_confirmed": False,
     })
 
-    assert result["status"] == "waiting_user_confirmation"
-    assert "hint" in result
+    assert result["status"] == "ok"
 
 
 @pytest.mark.asyncio
@@ -68,7 +87,6 @@ async def test_merge_confirmed_inherits_deeper_status(tmp_path: Path) -> None:
         "source_key": "idn:小而美|后端工程师|agent",
         "target_key": "idn:小而美|aiagent工程师|agent",
         "rationale": "同岗位",
-        "user_confirmed": True,
     })
 
     assert result["status"] == "ok"

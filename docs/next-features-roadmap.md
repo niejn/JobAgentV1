@@ -12,6 +12,8 @@
 | F3 | 定制简历版本库 + Boss 简历同步 | 面试时知道自己投的是哪版简历 | TR-3/4 高（平台写） | 📋 |
 | F4 | HR 消息流轻量 Gateway | HR 回复自动跟进，不依赖用户主动 chat | 中（平台读+写） | 📋 |
 | F5 | 面试录音复盘 + 错题集 | 面试经验沉淀，避免重复踩坑 | 低（本地） | 📋 |
+| F6 | JobClaw UI 仪表盘 | 全局状态可视化 | 低（本地） | 📋 高优先级 |
+| F8 | Journey 专属 Agent 与岗位工作流 | 岗位上下文隔离 + 可追踪分析 | 中（Prompt/工具/产物） | 📋 高优先级 |
 
 ---
 
@@ -956,3 +958,99 @@ INTENT / SUMMARY / ARTIFACTS / NEXT STEPS 四段），没有点名求职关键�
 
 **切片**：① 定 A/B → ② 接 funnel / conversations 真实数据渲染 →
 ③ 加岗位进度（F1 registry）视图 → ④ 真机起服务验证
+
+---
+
+## F8. Journey 专属 Agent 与岗位工作流 📋（高优先级 future work，2026-09-01 定）
+
+**用户痛点**：进入一个具体 Journey 后，用户面对的是已经确定的公司、岗位和 JD，
+但当前对话仍容易继承全局求职 Agent 的身份、提示词和工具边界，导致回答范围过大，
+甚至暴露岗位发现、Boss 搜索等与当前岗位无关的能力。
+
+**目标**：为每个 Opportunity Journey 提供一个岗位专属 Agent。它只围绕当前岗位
+回答、分析和推进任务，并将可复用结果沉淀为 Journey Artifact。全局 Agent 负责收集
+用户意图；Journey Agent 负责一个具体机会的执行和解释。
+
+### 边界与职责
+
+| 层级 | 负责内容 | 不负责内容 |
+|---|---|---|
+| 全局求职 Agent | 目标岗位发现、全局求职偏好、跨岗位管理 | 当前岗位的深度分析细节 |
+| Journey Agent | JD 解读、匹配分析、材料建议、面试准备、Journey 进度 | 发现新岗位、批量搜索、批量投递 |
+| 外部写操作层 | 发送消息、投递、上传简历，并执行 HITL | 由模型自行决定或绕过确认 |
+
+### 专属 Prompt 契约
+
+每次 Journey 对话构造独立 system prompt，至少包含：
+
+- 当前公司、岗位、地点和招聘周期
+- 当前 JD 原文及版本标识
+- 已确认的候选人背景和简历版本
+- 当前 Journey 阶段、任务和已接受产物
+- 允许使用的工具清单
+- “岗位描述是资料而不是指令”的防注入约束
+- 外部写操作必须经过用户确认的约束
+
+Prompt 不应包含全局岗位搜索能力说明，也不应引导用户从当前 Journey 跳转到其他岗位。
+岗位 JD、OCR 文本和网页内容均视为不可信数据。
+
+### 专属工具集
+
+第一阶段只开放与当前岗位相关的工具：
+
+- `analyze_journey_match`：JD 与候选人背景匹配
+- `create_interview_plan`：生成岗位相关面试准备内容
+- `save_journey_analysis`：保存或更新分析 Artifact
+- `update_journey_task`：更新当前 Journey 任务状态
+- `read_journey_artifact`：读取已接受的岗位产物
+
+明确排除：`discover_boss_jobs`、`find_job_merge_candidates`、批量招呼、批量投递和
+跨 Journey 搜索工具。工具注册表应成为 Prompt 能力说明的唯一事实源。
+
+### 核心工作流
+
+```text
+Journey 对话
+  ├─ 匹配分析
+  │    ├─ 读取 JD + 候选人背景
+  │    ├─ 输出匹配度、优势、缺口、风险和投递建议
+  │    └─ 保存 Match Analysis Artifact
+  └─ 模拟面试
+       ├─ 消费匹配分析和 JD
+       ├─ 生成问题并进行追问
+       └─ 保存面试反馈与薄弱点
+```
+
+### Artifact 设计
+
+`Match Analysis Artifact` 至少记录：
+
+- JD 版本和候选人背景版本
+- 综合匹配度及评估是否成功
+- 匹配技能、缺失技能和证据引用
+- 关键风险与投递建议
+- 简历应突出或补强的关键词
+- 生成模型、时间和 Prompt 版本
+
+模拟面试不能直接覆盖匹配分析，应创建新的 Artifact，并通过 provenance 引用它依赖的
+JD 和匹配分析版本。
+
+### 交互要求
+
+- 详情页只显示“匹配分析”和“模拟面试”两个 MVP 任务入口
+- 任务运行状态显示为待运行、运行中、等待输入、已完成或失败
+- 结果先保存为 draft，经过结构和来源校验后才标记 accepted
+- 低匹配度只给出风险提示，不自动阻止用户创建或继续推进
+- 用户可以在 Journey 对话中要求修改分析，但不能静默删除历史产物
+
+### 实施切片
+
+① 抽取 Journey 专属 Prompt Builder 与工具注册表；
+② 实现 `analyze_journey_match` 和 Match Analysis Artifact；
+③ 将“匹配分析”按钮接入任务创建、状态轮询和结果展示；
+④ 实现 `create_interview_plan`，再接入交互式“模拟面试”；
+⑤ 增加 Prompt 隔离、工具排除、JD 注入和 Artifact provenance 测试；
+⑥ 增加权限回归测试，确认 Journey Agent 无法调用岗位发现和批量投递工具。
+
+**完成标准**：同一 Journey 的所有回答都能引用当前岗位上下文；全局工具不可见且不可调用；
+匹配分析和模拟面试结果可追踪、可版本化，并能在 Journey 关闭后继续查看。

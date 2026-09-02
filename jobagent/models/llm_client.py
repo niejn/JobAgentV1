@@ -45,7 +45,6 @@ class LLMRuntimeConfig:
     context_window: int
     max_tokens: int
     reasoning: bool
-    input_modalities: tuple[str, ...]
     supports_developer_role: bool
     thinking_format: str | None
     thinking_level: str | None
@@ -103,13 +102,6 @@ def resolve_llm_config(settings: Settings) -> LLMRuntimeConfig:
         raise ValueError(
             "JOBAGENT_LLM_MAX_TOKENS cannot exceed JOBAGENT_LLM_CONTEXT_WINDOW"
         )
-    input_modalities = tuple(
-        item.strip().lower()
-        for item in settings.jobagent_llm_input_modalities.split(",")
-        if item.strip()
-    )
-    if not input_modalities:
-        raise ValueError("JOBAGENT_LLM_INPUT_MODALITIES must not be empty")
     return LLMRuntimeConfig(
         provider=provider,
         model=settings.jobagent_llm_model.strip(),
@@ -118,7 +110,6 @@ def resolve_llm_config(settings: Settings) -> LLMRuntimeConfig:
         context_window=settings.jobagent_llm_context_window,
         max_tokens=settings.jobagent_llm_max_tokens,
         reasoning=settings.jobagent_llm_reasoning,
-        input_modalities=input_modalities,
         supports_developer_role=settings.jobagent_llm_supports_developer_role,
         thinking_format=_optional_text(settings.jobagent_llm_thinking_format),
         thinking_level=_optional_text(settings.jobagent_llm_thinking_level),

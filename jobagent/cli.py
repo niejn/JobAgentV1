@@ -54,6 +54,14 @@ class StreamingJobAgent(Protocol):
         session_id: str,
     ) -> AsyncIterator[object]: ...
 
+    def resume_reply(
+        self,
+        approved: bool,
+        *,
+        session_id: str,
+        reject_reason: str = "",
+    ) -> AsyncIterator[object]: ...
+
     async def close(self) -> None: ...
 
 
@@ -367,14 +375,17 @@ async def _chat(
     from jobagent.profile import SQLiteCandidateContextProvider, load_candidate_context
 
     settings = get_settings()
-    setup_logging()
+
     context = load_candidate_context(startup_config) if startup_config else None
     agent = build_job_agent(settings, candidate_context=context, platform_hint="cli")
     active_session_id = session_id or _new_session_id()
     try:
         if one_shot is not None:
             # Non-interactive mode (pi-style -c): one message, one reply, exit.
-            await _render_streaming_reply(agent, one_shot, active_session_id)
+            # External writes pause for approval - reject them safely here.
+            await _render_streaming_reply(
+                agent, one_shot, active_session_id, interactive=False
+            )
             return
         click.echo(
             "JobAgent ready. Describe a target job or ask for help. "
@@ -596,12 +607,16 @@ async def _render_streaming_reply(
     agent: StreamingJobAgent,
     message: str,
     session_id: str,
+    *,
+    interactive: bool = True,
 ) -> None:
     """Render thinking and tool progress transiently, then the final answer.
 
     Reasoning deltas and tool summaries stream into a transient typewriter
     region (erased once the formal answer begins, like pi/Claude Code);
     answer tokens keep printing durably so the transcript stays intact.
+    HITL interrupts pause for an explicit approve/reject prompt
+    (non-interactive one-shot mode rejects safely).
     """
 
     transcript = TypewriterTranscript(stream=click.get_text_stream("stdout"))
@@ -611,6 +626,10 @@ async def _render_streaming_reply(
         async for event in agent.stream_reply(message, session_id=session_id):
             kind = getattr(event, "kind", "")
             text = str(getattr(event, "text", ""))
+            if kind == "interrupt" and text:
+                transcript.close()
+                await _handle_hitl_interrupt(agent, text, session_id, interactive=interactive)
+                return
             if kind == "status" and text:
                 if answer_line_open:
                     click.echo()
@@ -638,6 +657,68 @@ async def _render_streaming_reply(
             "JobAgent> 工具已完成，但模型没有生成最终回答；"
             "本轮没有丢失资料，请重试或继续追问。"
         )
+
+
+async def _handle_hitl_interrupt(
+    agent: StreamingJobAgent,
+    payload_json: str,
+    session_id: str,
+    *,
+    interactive: bool,
+) -> None:
+    """Show the paused tool call and resume with the human's decision."""
+
+    import json
+
+    try:
+        request = json.loads(payload_json)
+    except json.JSONDecodeError:
+        request = {"actions": [{"name": "unknown", "args": {}}]}
+    actions = request.get("actions") or []
+    click.echo()
+    click.echo(click.style("⏸ 需要人工批准的外部操作：", fg="yellow", bold=True))
+    for action in actions:
+        click.echo(
+            click.style(f"  工具: {action.get('name', '?')}", fg="yellow")
+        )
+        args = action.get("args", {})
+        click.echo(
+            "  参数: "
+            + json.dumps(args, ensure_ascii=False, indent=2)[:1500]
+        )
+    if not interactive:
+        click.echo(
+            click.style(
+                "非交互模式：已安全拒绝该操作。请在交互模式（jobagent chat）中执行。",
+                fg="red",
+            )
+        )
+        async for event in agent.resume_reply(
+            False,
+            session_id=session_id,
+            reject_reason="非交互模式自动拒绝：请用户在交互会话中确认。",
+        ):
+            text = str(getattr(event, "text", ""))
+            if getattr(event, "kind", "") == "token" and text:
+                click.echo(text, nl=False)
+        click.echo()
+        return
+    try:
+        approved = click.confirm(
+            click.style("批准执行以上操作？", fg="yellow"), default=False
+        )
+    except (EOFError, KeyboardInterrupt):
+        approved = False
+    async for event in agent.resume_reply(approved, session_id=session_id):
+        kind = getattr(event, "kind", "")
+        text = str(getattr(event, "text", ""))
+        if kind == "token" and text:
+            click.echo("JobAgent> ", nl=False)
+            click.echo(text, nl=False)
+        elif kind == "interrupt" and text:
+            await _handle_hitl_interrupt(agent, text, session_id, interactive=interactive)
+            return
+    click.echo()
 
 
 @main.command("xhs-download", hidden=True)
