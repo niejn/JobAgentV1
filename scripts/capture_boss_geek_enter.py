@@ -24,7 +24,13 @@ _BUTTON_SELECTORS = (
 )
 
 
-async def capture(job_url: str, output: Path) -> None:
+async def capture(
+    job_url: str,
+    output: Path,
+    *,
+    company: str | None = None,
+    title: str | None = None,
+) -> None:
     async with async_playwright() as playwright:
         browser = await playwright.chromium.connect_over_cdp(
             "http://127.0.0.1:9222", timeout=10_000
@@ -44,6 +50,16 @@ async def capture(job_url: str, output: Path) -> None:
                     timeout=30_000,
                 ) as response_info:
                     await page.goto(job_url, wait_until="domcontentloaded", timeout=30_000)
+                    if company or title:
+                        if not company or not title:
+                            raise RuntimeError("列表页模式必须同时提供 --company 和 --title")
+                        card = page.locator(
+                            "li, article, .job-card, .job-card-wrap, .job-list-item"
+                        ).filter(has_text=company).filter(has_text=title).first
+                        if not await card.is_visible():
+                            raise RuntimeError(f"列表中未找到职位卡片：{company} / {title}")
+                        await card.click()
+                        await page.wait_for_timeout(1_000)
                     button = None
                     for selector in _BUTTON_SELECTORS:
                         candidate = page.locator(selector).first
@@ -85,7 +101,12 @@ async def capture(job_url: str, output: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("job_url", help="未联系过的 Boss 职位详情 URL")
+    parser.add_argument(
+        "job_url",
+        help="Boss 职位详情 URL，或岗位列表页 URL（列表页需同时提供 --company/--title）",
+    )
+    parser.add_argument("--company", help="列表页中目标公司的精确名称")
+    parser.add_argument("--title", help="列表页中目标职位名称")
     parser.add_argument(
         "--output",
         type=Path,
@@ -93,7 +114,9 @@ def main() -> None:
         help="本地输出文件（默认 .ua/geek_enter_capture.json）",
     )
     args = parser.parse_args()
-    asyncio.run(capture(args.job_url, args.output))
+    asyncio.run(
+        capture(args.job_url, args.output, company=args.company, title=args.title)
+    )
 
 
 if __name__ == "__main__":
