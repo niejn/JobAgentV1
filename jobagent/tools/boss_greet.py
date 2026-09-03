@@ -117,11 +117,39 @@ class BossGreetingsManager:
             if self._registry_path is not None
             else None
         )
+        from jobagent.journey.boss_contact import BossContactRegistry
+
+        contact_registry = (
+            BossContactRegistry(self._registry_path)
+            if self._registry_path is not None
+            else None
+        )
 
         async with BossApplier(
             self._settings, crawl_gate=self._crawl_gate
         ) as applier:
             for target in targets:
+                attempt = (
+                    contact_registry.begin_attempt(
+                        job_id=target.job_id or target.url,
+                        action="greeting",
+                        requested_text=target.greeting,
+                    )
+                    if contact_registry is not None
+                    else None
+                )
+                if attempt is not None and attempt.status in {"confirmed", "submitted"}:
+                    results.append(
+                        {
+                            "job_id": target.job_id or target.url,
+                            "company": target.company,
+                            "title": target.title,
+                            "status": "submitted",
+                            "reason": "already_contacted",
+                            "greeting_sent": attempt.result.get("greeting_sent"),
+                        }
+                    )
+                    continue
                 job = Job(
                     id=target.job_id or target.url,
                     source=JobSource.BOSS,
@@ -142,6 +170,21 @@ class BossGreetingsManager:
                     "reason": extra.get("reason", ""),
                     "greeting_sent": extra.get("greeting_sent"),
                 }
+                if contact_registry is not None and attempt is not None:
+                    conversation = extra.get("conversation")
+                    conversation_id = None
+                    if isinstance(conversation, dict):
+                        conversation_id = contact_registry.save_conversation(
+                            job_id=target.job_id or target.url,
+                            target=conversation,
+                        )
+                    contact_status = "submitted" if status == "submitted" else "failed"
+                    contact_registry.finish_attempt(
+                        attempt.id,
+                        status=contact_status,
+                        result=extra,
+                        conversation_id=conversation_id,
+                    )
                 if registry is not None and status == "submitted":
                     entry["progress_recorded"] = self._record_greeted(
                         registry, target
@@ -156,6 +199,8 @@ class BossGreetingsManager:
         succeeded = sum(1 for r in results if r["status"] == "submitted")
         if registry is not None:
             registry.close()
+        if contact_registry is not None:
+            contact_registry.close()
         result: dict[str, Any] = {
             "status": "completed" if succeeded > 0 else "failed",
             "total": len(targets),

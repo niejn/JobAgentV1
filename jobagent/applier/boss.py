@@ -314,7 +314,7 @@ class BossApplier(BaseApplier):
                         item["name"]: item["value"]
                         for item in await self._context.cookies("https://www.zhipin.com")
                     }
-                    await send_text_to_conversation(
+                    target = await send_text_to_conversation(
                         cookies=cookies,
                         company=job.company,
                         job_title=job.title,
@@ -337,6 +337,18 @@ class BossApplier(BaseApplier):
                         "custom_greeting_status": "sent" if custom_sent else "failed",
                         "requested_greeting": greeting,
                         "custom_greeting_error": custom_error,
+                        "conversation": (
+                            {
+                                "friend_id": target.friend_id,
+                                "friend_source": target.friend_source,
+                                "encrypt_boss_id": target.encrypt_boss_id,
+                                "name": target.name,
+                                "company": target.company,
+                                "job_title": target.job_title,
+                            }
+                            if custom_sent
+                            else None
+                        ),
                         "response_time": round(elapsed, 2),
                     },
                 )
