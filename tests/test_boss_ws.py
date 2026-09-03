@@ -11,9 +11,11 @@ from jobagent.applier.boss_ws import (
     encode_mqtt_publish,
     encode_text_protocol,
     fetch_ws_nodes,
+    find_resume_requests,
     mqtt_connack_code,
     mqtt_packet_type,
     mqtt_puback_packet_id,
+    mqtt_publish_payload,
     probe_ws_handshake,
 )
 
@@ -43,6 +45,35 @@ def test_text_protocol_contains_utf8_payload_and_protocol_type() -> None:
     )
     assert payload[0] == 0x08 and payload[1] == 0x01
     assert "测试消息".encode() in payload
+
+
+def test_resume_card_is_detected_from_chat_protocol() -> None:
+    # TechwolfMessage: from.uid=7, to.uid=8, mid=99, body.type=9.
+    from_user = bytes.fromhex("0807")
+    to_user = bytes.fromhex("0808")
+    body = bytes.fromhex("0809")
+    message = (
+        bytes.fromhex("0a02") + from_user
+        + bytes.fromhex("1202") + to_user
+        + bytes.fromhex("2063")
+        + bytes.fromhex("3202") + body
+    )
+    protocol = bytes.fromhex("0801") + bytes.fromhex("1a") + bytes([len(message)]) + message
+    requests = find_resume_requests(protocol)
+    assert requests == [{
+        "type": 0,
+        "mid": 99,
+        "from_uid": 7,
+        "to_uid": 8,
+        "body_type": 9,
+        "text": "",
+        "body_fields": {"1": [9]},
+    }]
+
+
+def test_mqtt_publish_payload_strips_topic_and_packet_id() -> None:
+    packet = encode_mqtt_publish(topic="chat", payload=b"payload", packet_id=7)
+    assert mqtt_publish_payload(packet) == b"payload"
 
 
 @pytest.mark.asyncio

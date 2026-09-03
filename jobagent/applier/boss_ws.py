@@ -9,6 +9,7 @@ application-level send path; callers must opt into it explicitly.
 from __future__ import annotations
 
 import asyncio
+import base64
 import secrets
 import struct
 import time
@@ -94,6 +95,35 @@ def mqtt_puback_packet_id(packet: bytes) -> int:
     return int(struct.unpack(">H", packet[-2:])[0])
 
 
+def mqtt_publish_payload(packet: bytes) -> bytes:
+    """Extract the application payload from one MQTT PUBLISH packet."""
+
+    if not packet or mqtt_packet_type(packet) != 3:
+        raise ValueError("not an MQTT PUBLISH packet")
+    index = 1
+    multiplier = 1
+    remaining = 0
+    while True:
+        if index >= len(packet) or multiplier > 128**3:
+            raise ValueError("invalid MQTT remaining length")
+        digit = packet[index]
+        index += 1
+        remaining += (digit & 0x7F) * multiplier
+        if not digit & 0x80:
+            break
+        multiplier *= 128
+    if index + 2 > len(packet):
+        raise ValueError("truncated MQTT topic")
+    topic_length = struct.unpack(">H", packet[index : index + 2])[0]
+    index += 2 + topic_length
+    qos = (packet[0] >> 1) & 0x03
+    if qos:
+        index += 2
+    if index > len(packet):
+        raise ValueError("truncated MQTT PUBLISH packet")
+    return packet[index:]
+
+
 def _protobuf_varint(value: int) -> bytes:
     if value < 0:
         raise ValueError("only unsigned protobuf integers are supported")
@@ -123,6 +153,103 @@ def _protobuf_string(field_number: int, value: str) -> bytes:
 
 def _protobuf_message(field_number: int, value: bytes) -> bytes:
     return _protobuf_bytes(field_number, value)
+
+
+def _protobuf_fields(payload: bytes) -> dict[int, list[int | bytes]]:
+    """Parse the protobuf wire types used by Boss chat messages."""
+
+    fields: dict[int, list[int | bytes]] = {}
+    index = 0
+    while index < len(payload):
+        key, index = _read_varint(payload, index)
+        field_number, wire_type = key >> 3, key & 0x07
+        if not field_number:
+            raise ValueError("invalid protobuf field number")
+        if wire_type == 0:
+            int_value, index = _read_varint(payload, index)
+            value: int | bytes = int_value
+        elif wire_type == 2:
+            size, index = _read_varint(payload, index)
+            end = index + size
+            if end > len(payload):
+                raise ValueError("truncated protobuf field")
+            value, index = payload[index:end], end
+        else:
+            raise ValueError(f"unsupported protobuf wire type: {wire_type}")
+        fields.setdefault(field_number, []).append(value)
+    return fields
+
+
+def _read_varint(payload: bytes, index: int) -> tuple[int, int]:
+    value = 0
+    shift = 0
+    while index < len(payload):
+        digit = payload[index]
+        index += 1
+        value |= (digit & 0x7F) << shift
+        if not digit & 0x80:
+            return value, index
+        shift += 7
+        if shift > 63:
+            raise ValueError("protobuf varint is too large")
+    raise ValueError("truncated protobuf varint")
+
+
+def decode_chat_protocol(payload: bytes) -> dict[str, Any]:
+    """Decode the stable envelope and message identity fields."""
+
+    protocol = _protobuf_fields(payload)
+    result: dict[str, Any] = {
+        "type": int(protocol.get(1, [0])[0]),
+        "messages": [],
+    }
+    for raw_message in protocol.get(3, []):
+        if not isinstance(raw_message, bytes):
+            continue
+        message = _protobuf_fields(raw_message)
+        item: dict[str, Any] = {
+            "type": int(message.get(3, [0])[0]),
+            "mid": int(message.get(4, [0])[0]),
+            "from_uid": _nested_int(message.get(1, []), 1),
+            "to_uid": _nested_int(message.get(2, []), 1),
+        }
+        bodies = message.get(6, [])
+        if bodies and isinstance(bodies[0], bytes):
+            body = _protobuf_fields(bodies[0])
+            body_type = int(body.get(1, [0])[0])
+            item["body_type"] = body_type
+            item["text"] = _nested_text(body.get(3, []))
+            item["body_fields"] = {
+                str(number): [
+                    base64.b64encode(value).decode("ascii")
+                    if isinstance(value, bytes)
+                    else value
+                    for value in values
+                ]
+                for number, values in body.items()
+            }
+        result["messages"].append(item)
+    return result
+
+
+def find_resume_requests(payload: bytes) -> list[dict[str, Any]]:
+    """Return only inbound messages representing resume request cards."""
+
+    decoded = decode_chat_protocol(payload)
+    return [message for message in decoded["messages"] if message.get("body_type") == 9]
+
+
+def _nested_int(values: list[int | bytes], field_number: int) -> int:
+    if not values or not isinstance(values[0], bytes):
+        return 0
+    nested = _protobuf_fields(values[0])
+    return int(nested.get(field_number, [0])[0])
+
+
+def _nested_text(values: list[int | bytes]) -> str:
+    if not values or not isinstance(values[0], bytes):
+        return ""
+    return values[0].decode("utf-8", errors="replace")
 
 
 def encode_text_protocol(
