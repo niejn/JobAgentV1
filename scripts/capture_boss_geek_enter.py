@@ -51,11 +51,14 @@ async def capture(
                 ) as response_info:
                     await page.goto(job_url, wait_until="domcontentloaded", timeout=30_000)
                     if company or title:
-                        if not company or not title:
-                            raise RuntimeError("列表页模式必须同时提供 --company 和 --title")
+                        if not title:
+                            raise RuntimeError("列表页模式至少需要提供 --title")
                         card = page.locator(
                             "li, article, .job-card, .job-card-wrap, .job-list-item"
-                        ).filter(has_text=company).filter(has_text=title).first
+                        ).filter(has_text=title)
+                        if company:
+                            card = card.filter(has_text=company)
+                        card = card.first
                         if not await card.is_visible():
                             raise RuntimeError(f"列表中未找到职位卡片：{company} / {title}")
                         await card.click()
@@ -103,9 +106,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "job_url",
-        help="Boss 职位详情 URL，或岗位列表页 URL（列表页需同时提供 --company/--title）",
+        help="Boss 职位详情 URL，或岗位列表页 URL（列表页至少提供 --title）",
     )
-    parser.add_argument("--company", help="列表页中目标公司的精确名称")
+    parser.add_argument("--company", help="列表页中目标公司的精确名称（可选）")
     parser.add_argument("--title", help="列表页中目标职位名称")
     parser.add_argument(
         "--output",
