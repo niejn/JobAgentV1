@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from jobagent.applier.boss_ws import BossConversationTarget
+from jobagent.models import Job, JobSource
 from jobagent.tools.boss_greet import (
     BossGreetingsManager,
     BossGreetJobsRequest,
@@ -73,6 +75,63 @@ def test_greet_schema_has_no_user_confirmed_field() -> None:
     so the model cannot bypass-or-satisfy approval through a flag."""
     assert "user_confirmed" not in BossGreetJobsRequest.model_fields
     assert "user_confirmed" not in GreetingTarget.model_fields
+
+
+@pytest.mark.asyncio
+async def test_http_contact_creates_conversation_then_sends_greeting(tmp_path) -> None:
+    settings = _settings_stub(tmp_path)
+    settings.boss_contact_transport = "http"
+    request = BossGreetJobsRequest(
+        jobs=[
+            GreetingTarget(
+                url="https://www.zhipin.com/job_detail/abc.html",
+                company="际数科技",
+                title="标注工程师实习岗",
+                job_id="boss:abc",
+                greeting="您好，想进一步沟通。",
+            )
+        ]
+    )
+    job = Job(
+        id="boss:abc",
+        source=JobSource.BOSS,
+        title="标注工程师实习岗",
+        company="际数科技",
+        location="上海",
+        url="https://www.zhipin.com/job_detail/abc.html",
+        description="",
+        metadata={"security_id": "security", "lid": "lid"},
+    )
+    target = BossConversationTarget(42, 0, "enc", "王媛", "际数科技", job.title)
+    profile = SimpleNamespace(name="n", skills=[], years_experience=1, summary="s")
+
+    with (
+        patch("jobagent.tools.boss_greet.get_boss_cooldown") as cooldown,
+        patch.object(BossGreetingsManager, "_load_profile", return_value=profile),
+        patch("jobagent.auth.cookie_manager.get_cookies", new=AsyncMock(return_value=[
+            {"name": "bst", "value": "b"},
+            {"name": "wt2", "value": "w"},
+            {"name": "__zp_stoken__", "value": "s"},
+        ])),
+        patch("jobagent.scraper.boss_http.BossHttpBackend") as search_cls,
+        patch("jobagent.applier.boss_direct_contact.BossDirectContactAdapter") as contact_cls,
+        patch("jobagent.applier.boss_ws.send_text_to_target", new=AsyncMock()) as send,
+    ):
+        cooldown.return_value.check.return_value = (True, 0, None)
+        search_cls.return_value.discover = AsyncMock(return_value=[job])
+        contact_cls.return_value.enter = AsyncMock(
+            return_value=SimpleNamespace(
+                status="confirmed",
+                target=target,
+                default_greeting="Boss 默认招呼",
+                error_type=None,
+            )
+        )
+        result = await BossGreetingsManager(settings).greet(request)
+
+    assert result["status"] == "completed"
+    assert result["succeeded"] == 1
+    send.assert_awaited_once()
 
 
 def _settings_stub(tmp_path) -> object:

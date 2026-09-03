@@ -45,6 +45,9 @@ JobAgent 已具备：
 - `BossHttpBackend` 的关键词/城市/公司规模搜索、串行限频、风控冷却和结构化 blocked 结果。
 - `BossHttpBackend` 已落地为 `httpx` 只读 Adapter，可通过 `BOSS_SEARCH_TRANSPORT=http` 显式启用；
   默认仍使用 CDP。真实账号直连可能返回环境异常，遇到风控必须停止而不是重试或切换指纹。
+- `BossDirectContactAdapter` 已通过隔离小号真机验证：`friend/add.json` 返回 `code=0` 后，
+  会话列表出现对应招聘者和 `friend_id`。`BOSS_CONTACT_TRANSPORT=http` 可让
+  `boss_greet_jobs` 走“HTTP 创建会话 -> MQTT/WS 招呼 -> 会话登记/幂等审计”的无页面路径。
 - 已安装 Playwright Chromium；真实 `jobagent login --platform boss --check` 通过。
 
 当前不足：

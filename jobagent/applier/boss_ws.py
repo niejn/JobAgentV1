@@ -485,6 +485,8 @@ async def find_conversation_target(
     cookies: dict[str, str],
     company: str,
     job_title: str,
+    friend_name: str | None = None,
+    expected_encrypt_boss_id: str | None = None,
     user_agent: str = "Mozilla/5.0",
     base_url: str = "https://www.zhipin.com",
 ) -> BossConversationTarget:
@@ -515,21 +517,36 @@ async def find_conversation_target(
     for friend in friends:
         friend_company = str(friend.get("brandName") or "")
         friend_title = str(friend.get("jobName") or friend.get("positionName") or "")
+        actual_encrypt_boss_id = str(
+            friend.get("encryptBossId") or friend.get("encryptFriendId") or ""
+        )
         if friend_company != company:
             continue
-        if job_title not in friend_title and friend_title not in job_title:
+        exact_boss_match = bool(
+            expected_encrypt_boss_id
+            and expected_encrypt_boss_id == actual_encrypt_boss_id
+        )
+        if (
+            not exact_boss_match
+            and job_title not in friend_title
+            and friend_title not in job_title
+        ):
+            continue
+        if friend_name and str(friend.get("name") or "") != friend_name:
             continue
         if not friend.get("friendId"):
             continue
-        encrypt_boss_id = str(
-            friend.get("encryptBossId") or friend.get("encryptFriendId") or ""
-        )
-        if encrypt_boss_id:
+        if actual_encrypt_boss_id:
+            if (
+                expected_encrypt_boss_id
+                and expected_encrypt_boss_id != actual_encrypt_boss_id
+            ):
+                continue
             candidates.append(
                 BossConversationTarget(
                     friend_id=int(friend["friendId"]),
                     friend_source=int(friend.get("friendSource") or 0),
-                    encrypt_boss_id=encrypt_boss_id,
+                    encrypt_boss_id=actual_encrypt_boss_id,
                     name=str(friend.get("name") or ""),
                     company=friend_company,
                     job_title=friend_title,
@@ -573,6 +590,36 @@ async def send_text_to_conversation(
     finally:
         await client.close()
     return target
+
+
+async def send_text_to_target(
+    *,
+    cookies: dict[str, str],
+    target: BossConversationTarget,
+    text: str,
+    user_agent: str = "Mozilla/5.0",
+) -> None:
+    """Send text to an already resolved conversation without another lookup."""
+
+    credentials = await fetch_ws_credentials(cookies=cookies, user_agent=user_agent)
+    client = BossMqttWsClient(
+        node=credentials.nodes[0],
+        page_token=credentials.page_token,
+        ws_password=credentials.ws_password,
+        cookies=cookies,
+        user_agent=user_agent,
+    )
+    await client.connect()
+    try:
+        await client.publish_text(
+            from_uid=credentials.user_id,
+            to_uid=target.friend_id,
+            friend_source=target.friend_source,
+            encrypt_uid=target.encrypt_boss_id,
+            text=text,
+        )
+    finally:
+        await client.close()
 
 
 async def probe_ws_handshake(

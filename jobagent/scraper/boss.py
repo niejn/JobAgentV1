@@ -193,6 +193,13 @@ def _normalize_job(raw: dict[str, Any]) -> Job:
             "degree": raw.get("jobDegree"),
             "listing_summary_only": True,
             "security_id": raw.get("securityId"),
+            # Internal-only transport identity. _job_payload deliberately
+            # does not expose these values to the LLM/tool response.
+            "encrypt_boss_id": raw.get("encryptBossId"),
+            "boss_name": raw.get("bossName"),
+            "boss_title": raw.get("bossTitle"),
+            "lid": raw.get("lid"),
+            "job_source": raw.get("jobSource") or 0,
         },
     )
 

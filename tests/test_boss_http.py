@@ -45,6 +45,10 @@ async def test_http_search_normalizes_jobs_and_preserves_security_id(tmp_path: P
                             "areaDistrict": "闵行区",
                             "salaryDesc": "20-30K·15薪",
                             "securityId": "opaque-security-id",
+                            "encryptBossId": "opaque-boss-id",
+                            "bossName": "王媛",
+                            "bossTitle": "招聘者",
+                            "lid": "opaque-lid",
                         }
                     ]
                 },
@@ -65,6 +69,8 @@ async def test_http_search_normalizes_jobs_and_preserves_security_id(tmp_path: P
     assert len(jobs) == 1
     assert jobs[0].id == "boss:job-1"
     assert jobs[0].metadata["security_id"] == "opaque-security-id"
+    assert jobs[0].metadata["boss_name"] == "王媛"
+    assert jobs[0].metadata["encrypt_boss_id"] == "opaque-boss-id"
     assert client.kwargs["params"]["city"] == "101020100"
     assert client.kwargs["headers"]["zp_token"] == "bst-value"
 

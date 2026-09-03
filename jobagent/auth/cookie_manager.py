@@ -5,7 +5,9 @@ Provides a single entry point for all cookie needs across scraper and applier la
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import Any, cast
 
 from jobagent.auth.browser_login import load_cookies, normalize_cookies_for_playwright
@@ -44,6 +46,13 @@ async def get_cookies(platform: str, settings: object) -> list[dict[str, Any]]:
     Raises:
         CookieNotFoundError: If no cookies are available from any source.
     """
+    # Boss direct adapters need the complete browser session rather than only
+    # the historical BOSS_COOKIE=wt2 shortcut.
+    if platform == "boss":
+        cookie_file = getattr(settings, "boss_cookie_file", None)
+        if isinstance(cookie_file, (str, Path)) and str(cookie_file).strip():
+            return load_cookie_export(Path(cookie_file))
+
     # Priority 1: .env / Settings
     attr = _PLATFORM_COOKIE_ATTR.get(platform)
     if attr:
@@ -71,6 +80,30 @@ async def get_cookies(platform: str, settings: object) -> list[dict[str, Any]]:
         f"No cookies found for {platform}. "
         f"Please run: jobagent login --platform {platform}"
     )
+
+
+def load_cookie_export(path: Path) -> list[dict[str, Any]]:
+    """Load a browser-exported JSON Cookie file without logging values."""
+
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        raise CookieNotFoundError(f"Boss Cookie file not found: {resolved}")
+    try:
+        payload = json.loads(resolved.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise CookieNotFoundError(f"Invalid Boss Cookie file: {resolved}") from exc
+    items = payload.get("cookies") if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        raise CookieNotFoundError("Boss Cookie export must contain a cookies list")
+    cookies = [item for item in items if isinstance(item, dict) and item.get("name")]
+    names = {str(item["name"]) for item in cookies}
+    required = {"wt2", "bst", "__zp_stoken__"}
+    missing = sorted(required - names)
+    if missing:
+        raise CookieNotFoundError(
+            "Boss Cookie export is incomplete; missing: " + ", ".join(missing)
+        )
+    return cookies
 
 
 async def inject_cookies(context: object, platform: str, settings: object) -> None:

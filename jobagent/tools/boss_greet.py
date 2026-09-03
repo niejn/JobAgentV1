@@ -109,6 +109,8 @@ class BossGreetingsManager:
                 "status": "failed",
                 "message": "候选人背景未就绪；请先导入简历并确认候选背景。",
             }
+        if self._settings.boss_contact_transport == "http":
+            return await self._greet_direct(request)
 
         targets = request.jobs[: request.max_greetings]
         results: list[dict[str, Any]] = []
@@ -212,6 +214,156 @@ class BossGreetingsManager:
         if interview_mode:
             result["interview_mode_note"] = interview_mode
         return result
+
+    async def _greet_direct(self, request: BossGreetJobsRequest) -> dict[str, Any]:
+        """Create conversations with friend/add and greet through MQTT/WS."""
+
+        from jobagent.applier.boss_direct_contact import BossDirectContactAdapter
+        from jobagent.applier.boss_ws import send_text_to_target
+        from jobagent.auth.cookie_manager import get_cookies
+        from jobagent.journey.boss_contact import BossContactRegistry
+        from jobagent.scraper.boss import BossDiscoveryRequest
+        from jobagent.scraper.boss_http import BossHttpBackend
+
+        cookie_items = await get_cookies("boss", self._settings)
+        cookies = {
+            str(item["name"]): str(item["value"])
+            for item in cookie_items
+            if item.get("name") and item.get("value")
+        }
+        targets = request.jobs[: request.max_greetings]
+        results: list[dict[str, Any]] = []
+        registry = (
+            SQLiteJobRegistry(self._registry_path)
+            if self._registry_path is not None
+            else None
+        )
+        contact_registry = (
+            BossContactRegistry(self._registry_path)
+            if self._registry_path is not None
+            else None
+        )
+        try:
+            search = BossHttpBackend(self._settings, cookies=cookies)
+            contact = BossDirectContactAdapter(self._settings, cookies=cookies)
+            for target in targets:
+                job_id = target.job_id or target.url
+                attempt = (
+                    contact_registry.begin_attempt(
+                        job_id=job_id,
+                        action="greeting",
+                        requested_text=target.greeting,
+                    )
+                    if contact_registry is not None
+                    else None
+                )
+                if attempt is not None and attempt.status in {"confirmed", "submitted"}:
+                    results.append(
+                        {
+                            "job_id": job_id,
+                            "company": target.company,
+                            "title": target.title,
+                            "status": "submitted",
+                            "reason": "already_contacted",
+                            "greeting_sent": attempt.result.get("greeting_sent"),
+                        }
+                    )
+                    continue
+                jobs = await search.discover(
+                    BossDiscoveryRequest(
+                        query=f"{target.company} {target.title}", city="全国", limit=100
+                    )
+                )
+                job = next(
+                    (
+                        item
+                        for item in jobs
+                        if item.id == job_id or str(item.url) == target.url
+                    ),
+                    None,
+                )
+                if job is None:
+                    entry = {
+                        "job_id": job_id,
+                        "company": target.company,
+                        "title": target.title,
+                        "status": "failed",
+                        "reason": "job_transport_data_missing",
+                        "greeting_sent": False,
+                    }
+                    if contact_registry is not None and attempt is not None:
+                        contact_registry.finish_attempt(
+                            attempt.id, status="failed", result=entry
+                        )
+                    results.append(entry)
+                    continue
+                created = await contact.enter(job)
+                custom_sent = False
+                send_error = ""
+                if created.status == "confirmed" and created.target and target.greeting:
+                    try:
+                        await send_text_to_target(
+                            cookies=cookies,
+                            target=created.target,
+                            text=target.greeting,
+                        )
+                        custom_sent = True
+                    except Exception as exc:
+                        send_error = type(exc).__name__
+                        logger.warning("Direct Boss greeting failed: %s", send_error)
+                status = (
+                    "submitted"
+                    if created.status == "confirmed" and custom_sent
+                    else "failed"
+                )
+                entry = {
+                    "job_id": job_id,
+                    "company": target.company,
+                    "title": target.title,
+                    "status": status,
+                    "reason": (
+                        "direct_contact_confirmed"
+                        if status == "submitted"
+                        else created.error_type or send_error or "greeting_unconfirmed"
+                    ),
+                    "greeting_sent": custom_sent,
+                    "default_greeting_present": created.default_greeting is not None,
+                }
+                conversation_id = None
+                if contact_registry is not None and created.target is not None:
+                    conversation_id = contact_registry.save_conversation(
+                        job_id=job_id,
+                        target={
+                            "friend_id": created.target.friend_id,
+                            "friend_source": created.target.friend_source,
+                            "encrypt_boss_id": created.target.encrypt_boss_id,
+                            "name": created.target.name,
+                            "company": created.target.company,
+                            "job_title": created.target.job_title,
+                        },
+                    )
+                if contact_registry is not None and attempt is not None:
+                    contact_registry.finish_attempt(
+                        attempt.id,
+                        status=status,
+                        result=entry,
+                        conversation_id=conversation_id,
+                    )
+                if registry is not None and status == "submitted":
+                    entry["progress_recorded"] = self._record_greeted(registry, target)
+                results.append(entry)
+        finally:
+            if registry is not None:
+                registry.close()
+            if contact_registry is not None:
+                contact_registry.close()
+        succeeded = sum(1 for item in results if item["status"] == "submitted")
+        return {
+            "status": "completed" if succeeded else "failed",
+            "total": len(targets),
+            "succeeded": succeeded,
+            "results": results,
+        }
 
     def _record_greeted(
         self, registry: SQLiteJobRegistry, target: GreetingTarget

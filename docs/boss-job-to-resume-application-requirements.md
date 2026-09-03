@@ -1,6 +1,6 @@
 # Boss 职位联系与简历投递需求设计
 
-> 状态：Ready for implementation
+> 状态：职位到 HR 直接联系闭环已实施（2026-09-03）
 > 版本：v1.0（2026-09-03）
 > 范围：Boss 职位发现、立即沟通、新建 HR 会话、招呼、简历请求审批与简历发送
 
@@ -92,6 +92,13 @@ HR 在会话中发出的请求候选人提供简历的卡片。当前已识别�
 4. 通过 `friend_id/encrypt_boss_id` 或历史列表确认 HR Conversation 已创建。
 5. 会话创建失败时停止，不发送后续消息。
 6. 会话已存在时不得重复创建或重复打招呼。
+
+当前实现：`BossHttpBackend` 直接搜索并保留内部 `securityId/lid/encryptBossId`；
+`BossDirectContactAdapter` 调用
+`POST /wapi/zpgeek/friend/add.json?securityId=&jobId=&lid=`，表单为 `expectId=0`，
+并通过会话列表确认 `friend_id`。`geekEnter` 仅用于进入已有会话，不作为创建成功证据。
+配置 `BOSS_SEARCH_TRANSPORT=http` 与 `BOSS_CONTACT_TRANSPORT=http` 后，Agent 的
+`boss_greet_jobs` 不再需要职位网页即可创建会话，并在确认后通过 MQTT/WS 发送定制招呼。
 
 ### 5.3 招呼发送
 

@@ -84,11 +84,22 @@ class Settings(BaseSettings):
     jobagent_llm_thinking_level: str | None = None
 
     boss_cookie: str | None = None
+    boss_cookie_file: Path | None = Field(
+        default=None,
+        description="Browser-exported Boss Cookie JSON used by direct HTTP/WS adapters.",
+    )
     boss_search_transport: Literal["cdp", "http"] = Field(
         default="cdp",
         description=(
             "Boss read-only job search transport. HTTP uses persisted session cookies; "
             "CDP remains the default fallback."
+        ),
+    )
+    boss_contact_transport: Literal["cdp", "http"] = Field(
+        default="cdp",
+        description=(
+            "Boss HR conversation creation transport. HTTP uses friend/add and "
+            "confirms the new conversation before sending a greeting."
         ),
     )
     boss_greeting: str | None = Field(
