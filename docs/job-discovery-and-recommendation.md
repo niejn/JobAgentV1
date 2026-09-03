@@ -112,9 +112,10 @@ Boss 发现具体岗位与完整 JD
 找到按钮或输入框就记录 `APPLIED`。在该可靠性问题关闭前，此流程只能生成草稿并等待人工操作，
 不能声称已经自动投递。
 
-Boss 只读发现使用 `/wapi/zpgeek/search/joblist.json` 的薄 Adapter，并保留 Playwright 抓取器作为
-诊断/回退代码。Adapter 使用 Provider Cookie 自动匹配、公司规模官方代码、稳定 encryptJobId、
-单请求串行限频和风控冷却；`code != 0` 时停止而不是切换指纹或重试。列表响应是候选岗位摘要，
+Boss 只读发现使用 `/wapi/zpgeek/search/joblist.json` 的 HTTP Adapter，并保留 Playwright/CDP
+抓取器作为默认路径与诊断回退。HTTP Adapter 使用 Provider Cookie 自动匹配、公司规模官方代码、
+稳定 encryptJobId、单请求串行限频和风控冷却；`code != 0` 时停止而不是切换指纹或重试。
+真实账号可能因环境异常拒绝 HTTP 请求，因此 HTTP transport 必须显式开启。列表响应是候选岗位摘要，
 完整匹配仍需后续取得具体 JD，不能把标签列表当作完整岗位描述。
 
 ## 4. 第一版去重

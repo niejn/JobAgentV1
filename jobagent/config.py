@@ -3,6 +3,7 @@
 import ipaddress
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
@@ -83,6 +84,13 @@ class Settings(BaseSettings):
     jobagent_llm_thinking_level: str | None = None
 
     boss_cookie: str | None = None
+    boss_search_transport: Literal["cdp", "http"] = Field(
+        default="cdp",
+        description=(
+            "Boss read-only job search transport. HTTP uses persisted session cookies; "
+            "CDP remains the default fallback."
+        ),
+    )
     boss_greeting: str | None = Field(
         default=None,
         description="Greeting template for Boss直聘. Supports {company}, {title}, {name}.",

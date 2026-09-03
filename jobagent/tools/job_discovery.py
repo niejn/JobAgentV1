@@ -29,6 +29,10 @@ class BossJobDiscovery:
         self._crawl_gate = crawl_gate
 
     async def discover(self, request: BossDiscoveryRequest) -> list[Job]:
+        if self._settings.boss_search_transport == "http":
+            from jobagent.scraper.boss_http import BossHttpBackend
+
+            return await BossHttpBackend(self._settings).discover(request)
         from jobagent.scraper.boss_cdp import BossCdpBackend
 
         backend = BossCdpBackend(self._settings, crawl_gate=self._crawl_gate)

@@ -43,6 +43,8 @@ JobAgent 已具备：
 - Cookie Provider 自动匹配、`~/.jobclaw -> ~/.jobagent` 兼容迁移、过期检查和 Playwright
   Cookie 规范化。
 - `BossHttpBackend` 的关键词/城市/公司规模搜索、串行限频、风控冷却和结构化 blocked 结果。
+- `BossHttpBackend` 已落地为 `httpx` 只读 Adapter，可通过 `BOSS_SEARCH_TRANSPORT=http` 显式启用；
+  默认仍使用 CDP。真实账号直连可能返回环境异常，遇到风控必须停止而不是重试或切换指纹。
 - 已安装 Playwright Chromium；真实 `jobagent login --platform boss --check` 通过。
 
 当前不足：
