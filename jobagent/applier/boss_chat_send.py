@@ -349,6 +349,19 @@ class BossChatSender:
             await asyncio.sleep(1.5)  # render grace, then one retry
             panel_has_it = await _panel_echo()
 
+        # A page-level evaluate can be unavailable after Boss's anti-debug
+        # guard tears down the execution context.  A normal locator query is
+        # a second, narrower confirmation seam and does not require reading
+        # the whole document body.  It is only positive evidence when the
+        # exact tail is visible in a rendered message node.
+        if panel_has_it is not True:
+            try:
+                echo = page.get_by_text(tail, exact=False).last
+                if await echo.is_visible():
+                    panel_has_it = True
+            except Exception:
+                pass
+
         if editor_holds_it:
             # One self-heal Enter: the first keypress can miss the editor
             # when focus drifted (live case 2026-08-28: text typed, Enter
