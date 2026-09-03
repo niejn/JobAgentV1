@@ -229,6 +229,23 @@ class TestBossApplier:
         assert result.status == ApplicationStatus.SUBMITTED
 
     @pytest.mark.asyncio
+    async def test_custom_greeting_not_claimed_when_boss_auto_sends_default(
+        self, settings: Settings, job: Job, profile: Profile, history: ApplyHistory,
+    ) -> None:
+        """A missing editor means Boss sent its default, not our custom text."""
+        page = _make_mock_page(has_chat_input=False)
+        applier = BossApplier(settings, history=history)
+
+        with patch("jobagent.applier.boss.asyncio.sleep", new=AsyncMock()):
+            result = await applier._do_apply(
+                page, job, profile, 0.0, greeting="定制招呼"
+            )
+
+        assert result.status == ApplicationStatus.SUBMITTED
+        assert result.extra["reason"] == "default_greeting"
+        assert result.extra["greeting_sent"] is False
+
+    @pytest.mark.asyncio
     async def test_greeting_template_substitution(
         self, settings: Settings, job: Job, profile: Profile, history: ApplyHistory,
     ) -> None:

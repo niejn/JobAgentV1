@@ -303,7 +303,12 @@ class BossApplier(BaseApplier):
                 elapsed = time.monotonic() - t0
                 return self._make_app(
                     job, ApplicationStatus.SUBMITTED,
-                    extra={"reason": "default_greeting", "response_time": round(elapsed, 2)},
+                    extra={
+                        "reason": "default_greeting",
+                        "greeting_sent": False,
+                        "requested_greeting": greeting,
+                        "response_time": round(elapsed, 2),
+                    },
                 )
 
             logger.info("Typing greeting: %s", greeting[:60])
