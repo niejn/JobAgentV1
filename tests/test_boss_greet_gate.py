@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from jobagent.applier.boss_ws import BossConversationTarget
+from jobagent.journey.boss_contact import BossContactRegistry
 from jobagent.models import Job, JobSource
 from jobagent.tools.boss_greet import (
     BossGreetingsManager,
@@ -104,6 +105,8 @@ async def test_http_contact_creates_conversation_then_sends_greeting(tmp_path) -
     )
     target = BossConversationTarget(42, 0, "enc", "王媛", "际数科技", job.title)
     profile = SimpleNamespace(name="n", skills=[], years_experience=1, summary="s")
+    with BossContactRegistry(settings.jobagent_state_db) as contact_registry:
+        contact_registry.save_job_transport(job_id="boss:abc", metadata=job.metadata)
 
     with (
         patch("jobagent.tools.boss_greet.get_boss_cooldown") as cooldown,
@@ -113,12 +116,10 @@ async def test_http_contact_creates_conversation_then_sends_greeting(tmp_path) -
             {"name": "wt2", "value": "w"},
             {"name": "__zp_stoken__", "value": "s"},
         ])),
-        patch("jobagent.scraper.boss_http.BossHttpBackend") as search_cls,
         patch("jobagent.applier.boss_direct_contact.BossDirectContactAdapter") as contact_cls,
         patch("jobagent.applier.boss_ws.send_text_to_target", new=AsyncMock()) as send,
     ):
         cooldown.return_value.check.return_value = (True, 0, None)
-        search_cls.return_value.discover = AsyncMock(return_value=[job])
         contact_cls.return_value.enter = AsyncMock(
             return_value=SimpleNamespace(
                 status="confirmed",
@@ -127,7 +128,9 @@ async def test_http_contact_creates_conversation_then_sends_greeting(tmp_path) -
                 error_type=None,
             )
         )
-        result = await BossGreetingsManager(settings).greet(request)
+        result = await BossGreetingsManager(
+            settings, registry_path=settings.jobagent_state_db
+        ).greet(request)
 
     assert result["status"] == "completed"
     assert result["succeeded"] == 1

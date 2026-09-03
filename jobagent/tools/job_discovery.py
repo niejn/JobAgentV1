@@ -195,11 +195,17 @@ def _record_jobs(
 
     if registry_path is None:
         return [_job_payload(job) for job in jobs], len(jobs)
+    from jobagent.journey.boss_contact import BossContactRegistry
+
     payloads: list[dict[str, Any]] = []
     new_count = 0
-    with SQLiteJobRegistry(registry_path) as registry:
+    with (
+        SQLiteJobRegistry(registry_path) as registry,
+        BossContactRegistry(registry_path) as contact_registry,
+    ):
         for job in jobs:
             payload = _job_payload(job)
+            contact_registry.save_job_transport(job_id=job.id, metadata=job.metadata)
             created = registry.upsert_discovered(
                 job_id=job.id,
                 source=job.source.value,

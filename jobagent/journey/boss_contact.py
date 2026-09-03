@@ -9,7 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from jobagent.journey.store import _enable_wal
 
@@ -46,6 +46,11 @@ CREATE TABLE IF NOT EXISTS boss_contact_audit (
     event_type TEXT NOT NULL,
     details_json TEXT NOT NULL,
     created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS boss_job_transport (
+    job_id TEXT PRIMARY KEY,
+    metadata_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
 );
 """
 
@@ -134,6 +139,44 @@ class BossContactRegistry:
         )
         self._connection.commit()
         return conversation_id
+
+    def save_job_transport(self, *, job_id: str, metadata: dict[str, Any]) -> None:
+        """Persist only internal fields needed to contact a discovered job."""
+
+        allowed = {
+            key: metadata[key]
+            for key in (
+                "security_id",
+                "encrypt_boss_id",
+                "boss_name",
+                "boss_title",
+                "lid",
+                "job_source",
+            )
+            if metadata.get(key) not in (None, "")
+        }
+        if not allowed:
+            return
+        self._connection.execute(
+            """
+            INSERT INTO boss_job_transport(job_id, metadata_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(job_id) DO UPDATE SET
+                metadata_json=excluded.metadata_json,
+                updated_at=excluded.updated_at
+            """,
+            (job_id, json.dumps(allowed, ensure_ascii=False), int(time.time() * 1000)),
+        )
+        self._connection.commit()
+
+    def get_job_transport(self, job_id: str) -> dict[str, Any]:
+        row = self._connection.execute(
+            "SELECT metadata_json FROM boss_job_transport WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        if row is None:
+            return {}
+        payload = json.loads(str(row[0]))
+        return cast(dict[str, Any], payload) if isinstance(payload, dict) else {}
 
     def finish_attempt(
         self,

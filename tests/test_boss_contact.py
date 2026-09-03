@@ -34,3 +34,19 @@ def test_contact_attempt_and_conversation_are_idempotent(tmp_path: Path) -> None
         assert registry.begin_attempt(
             job_id="boss:job-1", action="greeting", requested_text="你好"
         ).status == "confirmed"
+
+
+def test_job_transport_metadata_survives_discovery_for_later_contact(
+    tmp_path: Path,
+) -> None:
+    with BossContactRegistry(tmp_path / "state.db") as registry:
+        registry.save_job_transport(
+            job_id="boss:job-1",
+            metadata={"security_id": "s", "lid": "l", "boss_name": "王媛"},
+        )
+
+        assert registry.get_job_transport("boss:job-1") == {
+            "security_id": "s",
+            "lid": "l",
+            "boss_name": "王媛",
+        }

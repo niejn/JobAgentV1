@@ -222,8 +222,6 @@ class BossGreetingsManager:
         from jobagent.applier.boss_ws import send_text_to_target
         from jobagent.auth.cookie_manager import get_cookies
         from jobagent.journey.boss_contact import BossContactRegistry
-        from jobagent.scraper.boss import BossDiscoveryRequest
-        from jobagent.scraper.boss_http import BossHttpBackend
 
         cookie_items = await get_cookies("boss", self._settings)
         cookies = {
@@ -244,7 +242,6 @@ class BossGreetingsManager:
             else None
         )
         try:
-            search = BossHttpBackend(self._settings, cookies=cookies)
             contact = BossDirectContactAdapter(self._settings, cookies=cookies)
             for target in targets:
                 job_id = target.job_id or target.url
@@ -269,20 +266,12 @@ class BossGreetingsManager:
                         }
                     )
                     continue
-                jobs = await search.discover(
-                    BossDiscoveryRequest(
-                        query=f"{target.company} {target.title}", city="全国", limit=100
-                    )
+                transport = (
+                    contact_registry.get_job_transport(job_id)
+                    if contact_registry is not None
+                    else {}
                 )
-                job = next(
-                    (
-                        item
-                        for item in jobs
-                        if item.id == job_id or str(item.url) == target.url
-                    ),
-                    None,
-                )
-                if job is None:
+                if not transport:
                     entry = {
                         "job_id": job_id,
                         "company": target.company,
@@ -297,6 +286,16 @@ class BossGreetingsManager:
                         )
                     results.append(entry)
                     continue
+                job = Job(
+                    id=job_id,
+                    source=JobSource.BOSS,
+                    title=target.title,
+                    company=target.company,
+                    location="",
+                    url=HttpUrl(target.url),
+                    description="",
+                    metadata=transport,
+                )
                 created = await contact.enter(job)
                 custom_sent = False
                 send_error = ""
