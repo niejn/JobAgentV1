@@ -38,6 +38,16 @@ class BossWsCredentials:
     nodes: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class BossConversationTarget:
+    friend_id: int
+    friend_source: int
+    encrypt_boss_id: str
+    name: str
+    company: str
+    job_title: str
+
+
 def _mqtt_remaining_length(value: int) -> bytes:
     if value < 0:
         raise ValueError("remaining length must be non-negative")
@@ -468,6 +478,101 @@ async def fetch_ws_credentials(
     if not isinstance(ws_password, str) or not ws_password or not nodes:
         raise ConnectionError("Boss WS credentials or nodes were missing")
     return BossWsCredentials(user_id, page_token, ws_password, nodes)
+
+
+async def find_conversation_target(
+    *,
+    cookies: dict[str, str],
+    company: str,
+    job_title: str,
+    user_agent: str = "Mozilla/5.0",
+    base_url: str = "https://www.zhipin.com",
+) -> BossConversationTarget:
+    """Find the unique HR conversation created for a job card."""
+
+    try:
+        import httpx
+    except ImportError as exc:
+        raise RuntimeError("httpx dependency is required") from exc
+    bst = cookies.get("bst", "")
+    headers = {
+        "User-Agent": user_agent,
+        "Origin": base_url,
+        "Referer": f"{base_url}/web/geek/chat",
+        "X-Requested-With": "XMLHttpRequest",
+        "zp_token": bst,
+    }
+    async with httpx.AsyncClient(
+        cookies=cookies, headers=headers, timeout=20, follow_redirects=True
+    ) as client:
+        response = await client.get(
+            f"{base_url}/wapi/zprelation/friend/geekFilterByLabel",
+            params={"labelId": 0, "_": int(time.time() * 1000)},
+        )
+    body = response.json()
+    friends = ((body.get("zpData") or {}).get("friendList") or [])
+    candidates = []
+    for friend in friends:
+        friend_company = str(friend.get("brandName") or "")
+        friend_title = str(friend.get("jobName") or friend.get("positionName") or "")
+        if friend_company != company:
+            continue
+        if job_title not in friend_title and friend_title not in job_title:
+            continue
+        if not friend.get("friendId"):
+            continue
+        encrypt_boss_id = str(
+            friend.get("encryptBossId") or friend.get("encryptFriendId") or ""
+        )
+        if encrypt_boss_id:
+            candidates.append(
+                BossConversationTarget(
+                    friend_id=int(friend["friendId"]),
+                    friend_source=int(friend.get("friendSource") or 0),
+                    encrypt_boss_id=encrypt_boss_id,
+                    name=str(friend.get("name") or ""),
+                    company=friend_company,
+                    job_title=friend_title,
+                )
+            )
+    if len(candidates) != 1:
+        raise LookupError(f"expected one Boss conversation, found {len(candidates)}")
+    return candidates[0]
+
+
+async def send_text_to_conversation(
+    *,
+    cookies: dict[str, str],
+    company: str,
+    job_title: str,
+    text: str,
+    user_agent: str = "Mozilla/5.0",
+) -> BossConversationTarget:
+    """Send one text to a job-created conversation over direct MQTT/WS."""
+
+    target = await find_conversation_target(
+        cookies=cookies, company=company, job_title=job_title, user_agent=user_agent
+    )
+    credentials = await fetch_ws_credentials(cookies=cookies, user_agent=user_agent)
+    client = BossMqttWsClient(
+        node=credentials.nodes[0],
+        page_token=credentials.page_token,
+        ws_password=credentials.ws_password,
+        cookies=cookies,
+        user_agent=user_agent,
+    )
+    await client.connect()
+    try:
+        await client.publish_text(
+            from_uid=credentials.user_id,
+            to_uid=target.friend_id,
+            friend_source=target.friend_source,
+            encrypt_uid=target.encrypt_boss_id,
+            text=text,
+        )
+    finally:
+        await client.close()
+    return target
 
 
 async def probe_ws_handshake(

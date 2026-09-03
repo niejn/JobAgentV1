@@ -297,16 +297,46 @@ class BossApplier(BaseApplier):
             # 8. Find chat input and type greeting
             chat_input = await self._find_element(page, _CHAT_INPUT)
             if not chat_input:
-                # Might have auto-sent the default greeting from Boss backend
-                logger.info("No chat input found — default greeting may have been sent")
+                # Boss may have auto-sent its default greeting as part of the
+                # "立即沟通" action and leave no editor on the job page. Keep
+                # that message and append the user's custom greeting through
+                # the already-verified direct chat transport.
+                logger.info(
+                    "No chat input found — appending custom greeting after Boss default"
+                )
+                custom_sent = False
+                custom_error = ""
+                try:
+                    from jobagent.applier.boss_ws import send_text_to_conversation
+
+                    assert self._context is not None
+                    cookies = {
+                        item["name"]: item["value"]
+                        for item in await self._context.cookies("https://www.zhipin.com")
+                    }
+                    await send_text_to_conversation(
+                        cookies=cookies,
+                        company=job.company,
+                        job_title=job.title,
+                        text=greeting,
+                    )
+                    custom_sent = True
+                except Exception as exc:
+                    custom_error = type(exc).__name__
+                    logger.warning(
+                        "Custom greeting follow-up failed after default greeting: %s",
+                        custom_error,
+                    )
                 self._history.mark_applied(job.id, "submitted")
                 elapsed = time.monotonic() - t0
                 return self._make_app(
                     job, ApplicationStatus.SUBMITTED,
                     extra={
                         "reason": "default_greeting",
-                        "greeting_sent": False,
+                        "greeting_sent": custom_sent,
+                        "custom_greeting_status": "sent" if custom_sent else "failed",
                         "requested_greeting": greeting,
+                        "custom_greeting_error": custom_error,
                         "response_time": round(elapsed, 2),
                     },
                 )

@@ -246,6 +246,32 @@ class TestBossApplier:
         assert result.extra["greeting_sent"] is False
 
     @pytest.mark.asyncio
+    async def test_custom_greeting_is_appended_after_default(
+        self, settings: Settings, job: Job, profile: Profile, history: ApplyHistory,
+    ) -> None:
+        """The custom follow-up is sent without replacing Boss's default."""
+        page = _make_mock_page(has_chat_input=False)
+        context = MagicMock()
+        context.cookies = AsyncMock(return_value=[{"name": "bst", "value": "cookie"}])
+        applier = BossApplier(settings, history=history)
+        applier._context = context
+
+        with (
+            patch("jobagent.applier.boss.asyncio.sleep", new=AsyncMock()),
+            patch(
+                "jobagent.applier.boss_ws.send_text_to_conversation",
+                new=AsyncMock(),
+            ) as send,
+        ):
+            result = await applier._do_apply(
+                page, job, profile, 0.0, greeting="定制招呼"
+            )
+
+        assert result.extra["reason"] == "default_greeting"
+        assert result.extra["greeting_sent"] is True
+        send.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_greeting_template_substitution(
         self, settings: Settings, job: Job, profile: Profile, history: ApplyHistory,
     ) -> None:
