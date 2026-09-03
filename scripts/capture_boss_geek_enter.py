@@ -21,6 +21,8 @@ _BUTTON_SELECTORS = (
     "a[ka='job_detail_chat']",
     "a:has-text('立即沟通')",
     "button:has-text('立即沟通')",
+    "a:has-text('继续沟通')",
+    "button:has-text('继续沟通')",
 )
 
 
@@ -30,6 +32,8 @@ async def capture(
     *,
     company: str | None = None,
     title: str | None = None,
+    first: bool = False,
+    continue_only: bool = False,
 ) -> None:
     async with async_playwright() as playwright:
         browser = await playwright.chromium.connect_over_cdp(
@@ -50,7 +54,15 @@ async def capture(
                     timeout=30_000,
                 ) as response_info:
                     await page.goto(job_url, wait_until="domcontentloaded", timeout=30_000)
-                    if company or title:
+                    if first:
+                        card = page.locator(
+                            "li, article, .job-card, .job-card-wrap, .job-list-item"
+                        ).first
+                        if not await card.is_visible():
+                            raise RuntimeError("列表中未找到第一个职位卡片")
+                        await card.click()
+                        await page.wait_for_timeout(1_000)
+                    elif company or title:
                         if not title:
                             raise RuntimeError("列表页模式至少需要提供 --title")
                         card = page.locator(
@@ -64,7 +76,12 @@ async def capture(
                         await card.click()
                         await page.wait_for_timeout(1_000)
                     button = None
-                    for selector in _BUTTON_SELECTORS:
+                    selectors = (
+                        ("a:has-text('继续沟通')", "button:has-text('继续沟通')")
+                        if continue_only
+                        else _BUTTON_SELECTORS
+                    )
+                    for selector in selectors:
                         candidate = page.locator(selector).first
                         try:
                             if await candidate.is_visible():
@@ -73,7 +90,11 @@ async def capture(
                         except Exception:
                             continue
                     if button is None:
-                        raise RuntimeError("未找到“立即沟通”按钮")
+                        raise RuntimeError(
+                            "未找到“继续沟通”按钮"
+                            if continue_only
+                            else "未找到“立即沟通/继续沟通”按钮"
+                        )
                     await button.click()
             request = await request_info.value
             response = await response_info.value
@@ -106,7 +127,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "job_url",
-        help="Boss 职位详情 URL，或岗位列表页 URL（列表页至少提供 --title）",
+        help="Boss 职位详情 URL，或岗位列表页 URL",
+    )
+    parser.add_argument("--first", action="store_true", help="选择列表中的第一个职位")
+    parser.add_argument(
+        "--continue-only",
+        action="store_true",
+        help="只允许点击“继续沟通”，不会创建新 HR 会话",
     )
     parser.add_argument("--company", help="列表页中目标公司的精确名称（可选）")
     parser.add_argument("--title", help="列表页中目标职位名称")
@@ -118,7 +145,14 @@ def main() -> None:
     )
     args = parser.parse_args()
     asyncio.run(
-        capture(args.job_url, args.output, company=args.company, title=args.title)
+        capture(
+            args.job_url,
+            args.output,
+            company=args.company,
+            title=args.title,
+            first=args.first,
+            continue_only=args.continue_only,
+        )
     )
 
 
