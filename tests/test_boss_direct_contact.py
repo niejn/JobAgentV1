@@ -63,3 +63,36 @@ async def test_direct_contact_enters_and_confirms_new_conversation(tmp_path: Pat
     assert client.call["params"]["jobId"] == "job-1"
     assert client.call["params"]["lid"] == "lid"
     assert client.call["headers"]["token"] == "page-token"
+
+
+@pytest.mark.asyncio
+async def test_server_boss_id_wins_over_display_name_alias() -> None:
+    target = BossConversationTarget(42, 0, "enc", "季钦城", "际数科技", "Python")
+
+    async def finder(**kwargs: object) -> BossConversationTarget:
+        assert kwargs["friend_name"] == "季先生"
+        assert kwargs["expected_encrypt_boss_id"] == "enc"
+        return target
+
+    client = FakeClient()
+    adapter = BossDirectContactAdapter(
+        Settings(_env_file=None),
+        client=client,
+        cookies={"bst": "b", "wt2": "w", "__zp_stoken__": "s"},
+        page_token="page-token",
+        target_finder=finder,
+    )
+    job = Job(
+        id="boss:job-2",
+        source=JobSource.BOSS,
+        title="Python",
+        company="际数科技",
+        location="上海",
+        url="https://www.zhipin.com/job_detail/job-2.html",
+        description="",
+        metadata={"security_id": "security", "lid": "lid", "boss_name": "季先生"},
+    )
+
+    result = await adapter.enter(job)
+
+    assert result.status == "confirmed"

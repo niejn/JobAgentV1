@@ -219,7 +219,10 @@ class BossGreetingsManager:
         """Create conversations with friend/add and greet through MQTT/WS."""
 
         from jobagent.applier.boss_direct_contact import BossDirectContactAdapter
-        from jobagent.applier.boss_ws import send_text_to_target
+        from jobagent.applier.boss_ws import (
+            send_text_to_target,
+            verify_text_in_conversation,
+        )
         from jobagent.auth.cookie_manager import get_cookies
         from jobagent.journey.boss_contact import BossContactRegistry
 
@@ -309,7 +312,13 @@ class BossGreetingsManager:
                         custom_sent = True
                     except Exception as exc:
                         send_error = type(exc).__name__
-                        logger.warning("Direct Boss greeting failed: %s", send_error)
+                        if await verify_text_in_conversation(
+                            cookies=cookies, target=created.target, text=target.greeting
+                        ):
+                            custom_sent = True
+                            send_error = "ack_timeout_but_history_confirmed"
+                        else:
+                            logger.warning("Direct Boss greeting failed: %s", send_error)
                 status = (
                     "submitted"
                     if created.status == "confirmed" and custom_sent

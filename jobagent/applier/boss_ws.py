@@ -532,7 +532,11 @@ async def find_conversation_target(
             and friend_title not in job_title
         ):
             continue
-        if friend_name and str(friend.get("name") or "") != friend_name:
+        if (
+            friend_name
+            and not expected_encrypt_boss_id
+            and str(friend.get("name") or "") != friend_name
+        ):
             continue
         if not friend.get("friendId"):
             continue
@@ -619,7 +623,74 @@ async def send_text_to_target(
             text=text,
         )
     finally:
-        await client.close()
+            await client.close()
+
+
+async def verify_text_in_conversation(
+    *,
+    cookies: dict[str, str],
+    target: BossConversationTarget,
+    text: str,
+    user_agent: str = "Mozilla/5.0",
+) -> bool:
+    """Confirm an outgoing text through Boss history after an ACK ambiguity."""
+
+    try:
+        import httpx
+    except ImportError:
+        return False
+    headers = {
+        "User-Agent": user_agent,
+        "Origin": "https://www.zhipin.com",
+        "Referer": "https://www.zhipin.com/web/geek/chat",
+        "X-Requested-With": "XMLHttpRequest",
+        "zp_token": cookies.get("bst", ""),
+    }
+    async with httpx.AsyncClient(
+        cookies=cookies, headers=headers, timeout=20, follow_redirects=True
+    ) as client:
+        form = (
+            {"dzFriendIds": str(target.friend_id)}
+            if target.friend_source == 1
+            else {"friendIds": str(target.friend_id)}
+        )
+        full_response = await client.post(
+            "https://www.zhipin.com/wapi/zprelation/friend/getGeekFriendList.json",
+            params={"_": int(time.time() * 1000)},
+            data=form,
+        )
+        full_body = full_response.json()
+        full_items = ((full_body.get("zpData") or {}).get("result") or [])
+        full: dict[str, Any] = next(
+            (item for item in full_items if str(item.get("friendId")) == str(target.friend_id)),
+            {},
+        )
+        security_id = str(full.get("securityId") or "")
+        boss_id = str(
+            full.get("encryptBossId")
+            or full.get("encryptFriendId")
+            or target.encrypt_boss_id
+        )
+        if not security_id or not boss_id:
+            return False
+        history_response = await client.get(
+            "https://www.zhipin.com/wapi/zpchat/geek/historyMsg",
+            params={
+                "bossId": boss_id,
+                "maxMsgId": 0,
+                "c": 100,
+                "page": 1,
+                "src": 0,
+                "securityId": security_id,
+                "_": int(time.time() * 1000),
+            },
+        )
+        history_body = history_response.json()
+        messages = ((history_body.get("zpData") or {}).get("messages") or [])
+    return any(
+        str((message.get("body") or {}).get("text") or message.get("text") or "") == text
+        for message in messages
+    )
 
 
 async def probe_ws_handshake(
