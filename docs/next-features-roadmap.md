@@ -1054,3 +1054,9 @@ JD 和匹配分析版本。
 
 **完成标准**：同一 Journey 的所有回答都能引用当前岗位上下文；全局工具不可见且不可调用；
 匹配分析和模拟面试结果可追踪、可版本化，并能在 Journey 关闭后继续查看。
+
+## F9. 小红书招人帖到 HR 邮件投递 📋（2026-09-03 定稿）
+
+从公开小红书招人帖中识别招聘意图，读取正文、图片 OCR 和评论，抽取一个或多个 Job Lead、
+JD Evidence 与 Contact Channel，生成岗位定制简历和 HR 邮件草稿；邮件发送必须经过 HITL。
+完整需求见 `docs/xhs-recruitment-lead-to-email-requirements.md`。
