@@ -20,6 +20,7 @@ from jobagent.tools.boss_greet import (
     BossGreetingsManager,
     BossGreetJobsRequest,
     GreetingTarget,
+    build_boss_greet_jobs_tool,
 )
 
 
@@ -135,6 +136,29 @@ async def test_http_contact_creates_conversation_then_sends_greeting(tmp_path) -
     assert result["status"] == "completed"
     assert result["succeeded"] == 1
     send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_tool_accepts_schema_parsed_greeting_targets(tmp_path) -> None:
+    manager = SimpleNamespace(greet=AsyncMock(return_value={"status": "completed"}))
+    tool = build_boss_greet_jobs_tool(manager)
+
+    result = await tool.ainvoke(
+        {
+            "jobs": [
+                {
+                    "url": "https://www.zhipin.com/job_detail/abc.html",
+                    "company": "示例公司",
+                    "title": "后端工程师",
+                    "greeting": "你好",
+                }
+            ]
+        }
+    )
+
+    assert result["status"] == "completed"
+    manager.greet.assert_awaited_once()
+    assert isinstance(manager.greet.await_args.args[0].jobs[0], GreetingTarget)
 
 
 def _settings_stub(tmp_path) -> object:

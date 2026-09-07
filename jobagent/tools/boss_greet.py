@@ -444,7 +444,7 @@ def build_boss_greet_jobs_tool(manager: BossGreetingsManager) -> BaseTool:
     """Expose batch greeting; approval handled by the HITL middleware."""
 
     async def boss_greet_jobs(
-        jobs: list[dict[str, str]],
+        jobs: list[dict[str, str] | GreetingTarget],
         max_greetings: int = 5,
     ) -> dict[str, Any]:
         """批量向 Boss 招聘方发送打招呼消息（执行前暂停等待人工批准）。
@@ -457,9 +457,13 @@ def build_boss_greet_jobs_tool(manager: BossGreetingsManager) -> BaseTool:
         5. 招呼语使用 BOSS_GREETING 模板（支持 $company / $title / $name 变量）
         """
 
+        normalized_jobs = [
+            item if isinstance(item, GreetingTarget) else GreetingTarget(**item)
+            for item in jobs
+        ]
         return await manager.greet(
             BossGreetJobsRequest(
-                jobs=[GreetingTarget(**j) for j in jobs],
+                jobs=normalized_jobs,
                 max_greetings=max_greetings,
             )
         )
