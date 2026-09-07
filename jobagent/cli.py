@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import traceback
 from collections.abc import AsyncIterator
@@ -668,24 +669,12 @@ async def _handle_hitl_interrupt(
 ) -> None:
     """Show the paused tool call and resume with the human's decision."""
 
-    import json
-
     try:
         request = json.loads(payload_json)
     except json.JSONDecodeError:
         request = {"actions": [{"name": "unknown", "args": {}}]}
-    actions = request.get("actions") or []
     click.echo()
-    click.echo(click.style("⏸ 需要人工批准的外部操作：", fg="yellow", bold=True))
-    for action in actions:
-        click.echo(
-            click.style(f"  工具: {action.get('name', '?')}", fg="yellow")
-        )
-        args = action.get("args", {})
-        click.echo(
-            "  参数: "
-            + json.dumps(args, ensure_ascii=False, indent=2)[:1500]
-        )
+    click.echo(_format_hitl_review(request))
     if not interactive:
         click.echo(
             click.style(
@@ -719,6 +708,48 @@ async def _handle_hitl_interrupt(
             await _handle_hitl_interrupt(agent, text, session_id, interactive=interactive)
             return
     click.echo()
+
+
+def _hitl_actions(request: dict[str, object]) -> list[dict[str, object]]:
+    """Read HITL actions from current and older LangChain payload shapes."""
+
+    raw = request.get("action_requests") or request.get("actions") or []
+    return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+
+
+def _redact_hitl_value(value: object) -> object:
+    sensitive = ("cookie", "token", "password", "secret", "authorization")
+    if isinstance(value, dict):
+        return {
+            str(key): "[REDACTED]"
+            if any(term in str(key).lower() for term in sensitive)
+            else _redact_hitl_value(child)
+            for key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_hitl_value(child) for child in value]
+    return value
+
+
+def _format_hitl_review(request: dict[str, object]) -> str:
+    """Render an actionable, one-to-one HITL review summary."""
+
+    actions = _hitl_actions(request)
+    lines = ["⏸ 需要人工批准的外部操作（逐项确认）："]
+    if not actions:
+        lines.append("  未能解析具体操作，默认拒绝。")
+        return "\n".join(lines)
+    for index, action in enumerate(actions, start=1):
+        lines.append(f"\n[{index}] {action.get('name', '未知工具')}")
+        description = action.get("description")
+        if description:
+            lines.append(f"    说明：{description}")
+        args = _redact_hitl_value(action.get("args", {}))
+        details = json.dumps(args, ensure_ascii=False, indent=2, default=str)
+        lines.append("    将执行：")
+        lines.extend(f"    {line}" for line in details[:5000].splitlines())
+    lines.append("\n每一项都会单独询问，输入 y 才批准该项。")
+    return "\n".join(lines)
 
 
 @main.command("xhs-download", hidden=True)
