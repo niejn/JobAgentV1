@@ -696,10 +696,12 @@ async def _handle_hitl_interrupt(
     decisions: list[bool] = []
     try:
         for index, action in enumerate(actions, start=1):
+            click.echo()
+            click.echo(_format_hitl_action(action, index))
             decisions.append(
                 click.confirm(
                     click.style(
-                        f"批准第 {index} 项（{action.get('name', '未知工具')}）？",
+                        "确认批准上面这项操作？",
                         fg="yellow",
                     ),
                     default=False,
@@ -758,15 +760,22 @@ def _format_hitl_review(request: dict[str, object]) -> str:
         lines.append("  未能解析具体操作，默认拒绝。")
         return "\n".join(lines)
     for index, action in enumerate(actions, start=1):
-        lines.append(f"\n[{index}] {action.get('name', '未知工具')}")
-        description = action.get("description")
-        if description:
-            lines.append(f"    说明：{description}")
-        args = _redact_hitl_value(action.get("args", {}))
-        details = json.dumps(args, ensure_ascii=False, indent=2, default=str)
-        lines.append("    将执行：")
-        lines.extend(f"    {line}" for line in details[:5000].splitlines())
+        lines.append(_format_hitl_action(action, index))
     lines.append("\n每一项都会单独询问，输入 y 才批准该项。")
+    return "\n".join(lines)
+
+
+def _format_hitl_action(action: dict[str, object], index: int) -> str:
+    """Render one tool call immediately before its approval prompt."""
+
+    lines = [f"[{index}] {action.get('name', '未知工具')}（工具）"]
+    description = action.get("description")
+    if description:
+        lines.append(f"    说明：{description}")
+    args = _redact_hitl_value(action.get("args", {}))
+    details = json.dumps(args, ensure_ascii=False, indent=2, default=str)
+    lines.append("    执行参数：")
+    lines.extend(f"    {line}" for line in details[:5000].splitlines())
     return "\n".join(lines)
 
 
