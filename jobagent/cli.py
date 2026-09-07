@@ -712,16 +712,20 @@ async def _handle_hitl_interrupt(
     resume_decision: bool | Sequence[bool] = (
         decisions[0] if len(decisions) == 1 else decisions
     )
+    answer_line_open = False
     async for event in agent.resume_reply(resume_decision, session_id=session_id):
         kind = getattr(event, "kind", "")
         text = str(getattr(event, "text", ""))
         if kind == "token" and text:
-            click.echo("JobAgent> ", nl=False)
+            if not answer_line_open:
+                click.echo("JobAgent> ", nl=False)
+                answer_line_open = True
             click.echo(text, nl=False)
         elif kind == "interrupt" and text:
             await _handle_hitl_interrupt(agent, text, session_id, interactive=interactive)
             return
-    click.echo()
+    if answer_line_open:
+        click.echo()
 
 
 def _hitl_actions(request: dict[str, object]) -> list[dict[str, object]]:
