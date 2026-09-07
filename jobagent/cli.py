@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import traceback
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import AsyncExitStack
 from datetime import datetime
 from pathlib import Path
@@ -57,7 +57,7 @@ class StreamingJobAgent(Protocol):
 
     def resume_reply(
         self,
-        approved: bool,
+        approved: bool | Sequence[bool],
         *,
         session_id: str,
         reject_reason: str = "",
@@ -673,6 +673,7 @@ async def _handle_hitl_interrupt(
         request = json.loads(payload_json)
     except json.JSONDecodeError:
         request = {"actions": [{"name": "unknown", "args": {}}]}
+    actions = _hitl_actions(request)
     click.echo()
     click.echo(_format_hitl_review(request))
     if not interactive:
@@ -692,13 +693,26 @@ async def _handle_hitl_interrupt(
                 click.echo(text, nl=False)
         click.echo()
         return
+    decisions: list[bool] = []
     try:
-        approved = click.confirm(
-            click.style("批准执行以上操作？", fg="yellow"), default=False
-        )
+        for index, action in enumerate(actions, start=1):
+            decisions.append(
+                click.confirm(
+                    click.style(
+                        f"批准第 {index} 项（{action.get('name', '未知工具')}）？",
+                        fg="yellow",
+                    ),
+                    default=False,
+                )
+            )
     except (EOFError, KeyboardInterrupt):
-        approved = False
-    async for event in agent.resume_reply(approved, session_id=session_id):
+        decisions.extend([False] * (len(actions) - len(decisions)))
+    if not decisions:
+        decisions = [False]
+    resume_decision: bool | Sequence[bool] = (
+        decisions[0] if len(decisions) == 1 else decisions
+    )
+    async for event in agent.resume_reply(resume_decision, session_id=session_id):
         kind = getattr(event, "kind", "")
         text = str(getattr(event, "text", ""))
         if kind == "token" and text:

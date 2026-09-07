@@ -272,7 +272,7 @@ class JobAgent:
 
     async def resume_reply(
         self,
-        approved: bool,
+        approved: bool | Sequence[bool],
         *,
         session_id: str = "default",
         reject_reason: str = "",
@@ -281,10 +281,16 @@ class JobAgent:
 
         from langgraph.types import Command
 
-        decision: dict[str, Any] = {"type": "approve" if approved else "reject"}
-        if not approved and reject_reason:
-            decision["args"] = reject_reason
-        resume_input: Any = Command(resume={"decisions": [decision]})
+        decisions = [approved] if isinstance(approved, bool) else list(approved)
+        if not decisions:
+            decisions = [False]
+        decision_payloads: list[dict[str, Any]] = []
+        for decision in decisions:
+            item: dict[str, Any] = {"type": "approve" if decision else "reject"}
+            if not decision and reject_reason:
+                item["args"] = reject_reason
+            decision_payloads.append(item)
+        resume_input: Any = Command(resume={"decisions": decision_payloads})
         self._pending_hitl = None
         async for event in self._reply_with_log(
             self._stream_reply_events("", session_id=session_id, resume_input=resume_input),
