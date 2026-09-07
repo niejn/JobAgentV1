@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from contextvars import copy_context
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -157,6 +158,13 @@ def test_trace_id_is_present_on_structured_decision_log(caplog) -> None:
     assert trace_id
     assert caplog.records[-1].name == "jobagent.trace-test"
     assert caplog.records[-1].trace_id == trace_id
+
+
+def test_reset_trace_ignores_token_from_another_context() -> None:
+    """Async-generator cleanup must not leak a ContextVar traceback."""
+
+    token = copy_context().run(begin_trace)
+    reset_trace(token)
 
 
 def test_trace_node_decorator_records_sync_success_and_exception(caplog) -> None:

@@ -227,7 +227,16 @@ def reset_trace(token: tuple[ContextVar[str | None], Any]) -> None:
     """Restore the previous trace context after a request completes."""
 
     variable, context_token = token
-    variable.reset(context_token)
+    try:
+        variable.reset(context_token)
+    except ValueError:
+        # Async-generator finalizers may run in a copied Context after the
+        # consumer stops at an interrupt.  The token cannot be reset there;
+        # silently leave that isolated Context unchanged instead of leaking a
+        # traceback into the user's chat.
+        logging.getLogger(__name__).debug(
+            "Trace context already moved; skipped cross-context reset"
+        )
 
 
 def current_trace_id() -> str | None:

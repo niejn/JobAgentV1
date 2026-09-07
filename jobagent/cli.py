@@ -624,8 +624,9 @@ async def _render_streaming_reply(
     answer_line_open = False
     emitted_answer = False
     approved_hitl_requests: set[str] = set()
+    reply_stream = agent.stream_reply(message, session_id=session_id)
     try:
-        async for event in agent.stream_reply(message, session_id=session_id):
+        async for event in reply_stream:
             kind = getattr(event, "kind", "")
             text = str(getattr(event, "text", ""))
             if kind == "interrupt" and text:
@@ -657,6 +658,7 @@ async def _render_streaming_reply(
                     answer_line_open = True
                 click.echo(text, nl=False)
     finally:
+        await _close_async_stream(reply_stream)
         transcript.close()
     if answer_line_open:
         click.echo()
@@ -693,14 +695,18 @@ async def _handle_hitl_interrupt(
                 fg="red",
             )
         )
-        async for event in agent.resume_reply(
+        resume_stream = agent.resume_reply(
             False,
             session_id=session_id,
             reject_reason="非交互模式自动拒绝：请用户在交互会话中确认。",
-        ):
-            text = str(getattr(event, "text", ""))
-            if getattr(event, "kind", "") == "token" and text:
-                click.echo(text, nl=False)
+        )
+        try:
+            async for event in resume_stream:
+                text = str(getattr(event, "text", ""))
+                if getattr(event, "kind", "") == "token" and text:
+                    click.echo(text, nl=False)
+        finally:
+            await _close_async_stream(resume_stream)
         click.echo()
         return
     decisions: list[bool] = []
@@ -731,25 +737,41 @@ async def _handle_hitl_interrupt(
         decisions[0] if len(decisions) == 1 else decisions
     )
     answer_line_open = False
-    async for event in agent.resume_reply(resume_decision, session_id=session_id):
-        kind = getattr(event, "kind", "")
-        text = str(getattr(event, "text", ""))
-        if kind == "token" and text:
-            if not answer_line_open:
-                click.echo("JobAgent> ", nl=False)
-                answer_line_open = True
-            click.echo(text, nl=False)
-        elif kind == "interrupt" and text:
-            await _handle_hitl_interrupt(
-                agent,
-                text,
-                session_id,
-                interactive=interactive,
-                approved_requests=approved_requests,
-            )
-            return
+    resume_stream = agent.resume_reply(resume_decision, session_id=session_id)
+    try:
+        async for event in resume_stream:
+            kind = getattr(event, "kind", "")
+            text = str(getattr(event, "text", ""))
+            if kind == "token" and text:
+                if not answer_line_open:
+                    click.echo("JobAgent> ", nl=False)
+                    answer_line_open = True
+                click.echo(text, nl=False)
+            elif kind == "interrupt" and text:
+                await _handle_hitl_interrupt(
+                    agent,
+                    text,
+                    session_id,
+                    interactive=interactive,
+                    approved_requests=approved_requests,
+                )
+                return
+    finally:
+        await _close_async_stream(resume_stream)
     if answer_line_open:
         click.echo()
+
+
+async def _close_async_stream(stream: AsyncIterator[object]) -> None:
+    """Close an interrupted async stream in the current asyncio context."""
+
+    close = getattr(stream, "aclose", None)
+    if close is None:
+        return
+    try:
+        await close()
+    except Exception:  # pragma: no cover - defensive cleanup boundary
+        logger.debug("Failed to close Agent stream cleanly", exc_info=True)
 
 
 def _hitl_actions(request: dict[str, object]) -> list[dict[str, object]]:
