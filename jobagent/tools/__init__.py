@@ -10,6 +10,10 @@ from jobagent.tools.boss_greet import (
     build_boss_greet_jobs_tool,
 )
 from jobagent.tools.boss_resume import build_boss_resume_upload_tool
+from jobagent.tools.boss_resume_delivery import (
+    build_prepare_boss_resume_after_hr_reply_tool,
+    build_send_boss_resume_after_hr_reply_tool,
+)
 from jobagent.tools.candidate_profile import (
     CandidateProfileManager,
     CandidateResumeFile,
@@ -81,6 +85,8 @@ __all__ = [
     "BossGreetingsManager",
     "build_boss_greet_jobs_tool",
     "build_boss_resume_upload_tool",
+    "build_prepare_boss_resume_after_hr_reply_tool",
+    "build_send_boss_resume_after_hr_reply_tool",
     "build_boss_chat_history_tool",
     "build_save_user_fact_tool",
     "build_search_history_tool",

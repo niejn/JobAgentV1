@@ -1,5 +1,16 @@
 # Future Work
 
+## 高优先级：平台招聘 Subagent 重构
+
+在 Boss 主动发送简历功能完成后，将当前主 JobAgent 的平台底层能力按渠道收敛为两个
+Subagent，主 JobAgent 只负责岗位匹配判断、Opportunity Journey 和跨渠道调度：
+
+- `BossRecruitingAgent`：Boss 岗位发现、HR 会话、招呼、HR 回复后的简历发送和回执；
+- `XhsRecruitingAgent`：小红书招人帖发现、JD/公开邮箱提取、定制邮件和附件简历投递；
+- 主 Agent 不再直接持有 Boss token/会话、SMTP 或小红书抓取等平台私有工具；
+- 两个 Subagent 统一交付 `JobDiscoveryResult`、`ResumeDeliveryProposal`、
+  `DeliveryReceipt`，外部写操作仍通过 HITL 向用户展示渠道、收件人、岗位和简历文件名。
+
 ## 已实现：损坏多模态 checkpoint session 的兼容处理
 
 - 文本模型调用时只生成 request 级别的消息投影，不删除 checkpoint 中的原始图片。

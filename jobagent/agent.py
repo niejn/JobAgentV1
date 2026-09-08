@@ -31,6 +31,7 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.errors import GraphRecursionError
 
+from jobagent.applier.boss_resume_delivery import BossResumeDelivery
 from jobagent.artifacts import (
     LocalOpportunityArtifacts,
     OpportunityStatusBoard,
@@ -81,6 +82,7 @@ from jobagent.tools import (
     build_list_job_records_tool,
     build_list_recent_emails_tool,
     build_merge_job_identities_tool,
+    build_prepare_boss_resume_after_hr_reply_tool,
     build_read_email_tool,
     build_save_candidate_background_tool,
     build_save_job_analysis_tool,
@@ -88,6 +90,7 @@ from jobagent.tools import (
     build_save_user_fact_tool,
     build_search_history_tool,
     build_send_application_email_tool,
+    build_send_boss_resume_after_hr_reply_tool,
     build_shared_url_extract_tool,
     build_shared_url_save_tool,
     build_skill_tools,
@@ -132,6 +135,7 @@ _HITL_TOOLS: dict[str, str] = {
     "send_application_email": "发送求职投递邮件（含简历附件）给外部 HR",
     "boss_greet_jobs": "向 Boss 招聘方批量发送打招呼消息",
     "upload_boss_resume_pdf": "向 Boss 账户上传/替换附件简历",
+    "send_boss_resume_after_hr_reply": "向已回复的 Boss HR 发送用户选定的简历",
     "reply_boss_greeting": "在 Boss 聊天中向 HR 发送一条消息",
     "merge_job_identities": "合并两条岗位身份记录（不可自动撤销）",
 }
@@ -1076,6 +1080,7 @@ def build_job_agent(
             settings,
             xhs_saver=XhsNoteSaver(settings, backend_factory=backend_factory),
         )
+        boss_resume_delivery = BossResumeDelivery(settings, crawl_gate=crawl_gate)
         # Job discovery reads the latest persisted context at tool-call time
         # so it refuses to crawl until the Job Search Profile and the resume /
         # confirmed background have been collected and saved by the Agent.
@@ -1112,6 +1117,14 @@ def build_job_agent(
             (
                 "upload_boss_resume_pdf",
                 lambda: build_boss_resume_upload_tool(settings, crawl_gate=crawl_gate),
+            ),
+            (
+                "prepare_boss_resume_after_hr_reply",
+                lambda: build_prepare_boss_resume_after_hr_reply_tool(boss_resume_delivery),
+            ),
+            (
+                "send_boss_resume_after_hr_reply",
+                lambda: build_send_boss_resume_after_hr_reply_tool(boss_resume_delivery),
             ),
             ("list_boss_greetings", lambda: build_boss_chat_list_tool(settings)),
             ("save_user_fact", lambda: build_save_user_fact_tool(settings)),
