@@ -105,6 +105,27 @@ _Avoid_: 静默偏好漂移、覆盖求职画像、一次搜索改词
 当前策略、公司/职位特征和渠道可用性决定，并独立于面经研究来源。
 _Avoid_: 求职策略组合、面经来源、自动投递授权
 
+**Recruiting Channel（招聘渠道）**:
+一个可独立发现岗位、读取招聘方沟通、准备并执行投递动作的平台边界，例如 Boss Chat 或
+XHS Recruitment Email；它拥有平台身份、限流、风控和传输 Adapter，但不拥有全局求职策略。
+_Avoid_: Opportunity Journey、单一工具、平台网站
+
+**Platform Recruiting Subagent（平台招聘 Subagent）**:
+只服务一个 Recruiting Channel 的受限 Agent，使用该渠道专属工具产生结构化发现、沟通和
+投递提案；它不判断跨渠道优先级，也不能直接绕过用户批准执行外部写操作。
+_Avoid_: 主 JobAgent、平台 Adapter、后台 worker
+
+**Recruiting Action Proposal（招聘渠道行动提案）**:
+由 Platform Recruiting Subagent 为一个具体 Opportunity Journey 生成、经过事实与策略校验的
+待执行外部动作，包含渠道、收件人/会话、岗位、简历版本或消息草稿、幂等键与预期回执；它
+不是已发送记录。
+_Avoid_: Tool call、HITL 中断、Delivery Receipt
+
+**Recruiting Action Executor（招聘渠道行动执行器）**:
+唯一可消费已批准 Recruiting Action Proposal、调用对应渠道 Adapter 并写入 Delivery Receipt
+的模块；它不生成文案、不选择岗位或简历。
+_Avoid_: Subagent、主 Agent、平台 Adapter
+
 **Job Posting（岗位发布）**:
 某个招聘来源在特定时间展示的一版岗位信息，包含来源、外部岗位 ID、URL、JD 和发布时间；同一岗位可以有多个来源或历史版本。
 _Avoid_: Opportunity Journey、投递记录、唯一岗位

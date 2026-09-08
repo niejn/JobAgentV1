@@ -5,6 +5,8 @@
 在 Boss 主动发送简历功能完成后，将当前主 JobAgent 的平台底层能力按渠道收敛为两个
 Subagent，主 JobAgent 只负责岗位匹配判断、Opportunity Journey 和跨渠道调度：
 
+详细设计见 `docs/platform-subagent-rearchitecture-design.md`。
+
 - `BossRecruitingAgent`：Boss 岗位发现、HR 会话、招呼、HR 回复后的简历发送和回执；
 - `XhsRecruitingAgent`：小红书招人帖发现、JD/公开邮箱提取、定制邮件和附件简历投递；
 - 主 Agent 不再直接持有 Boss token/会话、SMTP 或小红书抓取等平台私有工具；
