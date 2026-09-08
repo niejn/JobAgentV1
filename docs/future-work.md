@@ -10,8 +10,8 @@ Subagent，主 JobAgent 只负责岗位匹配判断、Opportunity Journey 和跨
 - `BossRecruitingAgent`：Boss 岗位发现、HR 会话、招呼、HR 回复后的简历发送和回执；
 - `XhsRecruitingAgent`：小红书招人帖发现、JD/公开邮箱提取、定制邮件和附件简历投递；
 - 主 Agent 不再直接持有 Boss token/会话、SMTP 或小红书抓取等平台私有工具；
-- 两个 Subagent 统一交付 `JobDiscoveryResult`、`ResumeDeliveryProposal`、
-  `DeliveryReceipt`，外部写操作仍通过 HITL 向用户展示渠道、收件人、岗位和简历文件名。
+- 两个 Subagent 交付 `JobDiscoveryResult`、短时 `ChannelActionDraft` 和最终
+  `DeliveryReceipt`；外部写操作仍通过 HITL 向用户展示渠道、收件人、岗位和简历文件名。
 
 ## 高优先级：Boss HR 消息后台监控与受控自动回复
 
