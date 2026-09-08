@@ -155,7 +155,7 @@ Proposal 状态机：
 
 ```text
 DRAFT -> VALIDATING -> READY -> APPROVAL_PENDING -> EXECUTING -> CONFIRMED
-                                      |                |             
+                                      |                |
                                       -> REJECTED      -> UNVERIFIED | FAILED | BLOCKED
 READY / APPROVAL_PENDING -> EXPIRED
 ```
