@@ -24,8 +24,8 @@ JobAgent Supervisor
  ▼
 JobAgent Supervisor
  ├─ 匹配判断、Journey、选择渠道
- ├─ delegate_boss_task / delegate_xhs_task
- ├─ execute_boss_action / execute_xhs_action  [HITL]
+ ├─ Deep Agents 原生 task Tool
+ ├─ execute_channel_draft  [HITL]
  │
  ├─────────────┐
  ▼             ▼
@@ -54,7 +54,21 @@ BossActionHandler   EmailActionHandler
 
 不通过自由文本、长上下文注入或数据库 Artifact 在前台 Agent 间传递动作内容。
 
-主 Agent 调渠道 Subagent 时使用直接结构化参数：
+当前 Deep Agents 原生 `task` Tool 的参数只有 `subagent_type` 与 `description`。它会将任务描述
+作为子 Agent 的 HumanMessage，并复制父图的非 private state。因此不应另写四个 delegate Tool。
+
+```text
+task(
+  subagent_type="boss_recruiting",
+  description='{"journey_id":"...", "intent":"prepare_resume_delivery"}'
+)
+```
+
+任务 description 是最小委派信号，不是可信事实源。Boss/XHS Subagent 必须校验其中的
+`journey_id`，并从受控 Journey Store/运行上下文读取实际 Job、Candidate Background 和策略。
+静态渠道策略通过子 Agent system prompt 注入；动态平台凭据不通过 state 或 description 传递。
+
+渠道内部使用的结构化上下文为：
 
 ```python
 class ChannelTaskContext:
@@ -77,8 +91,8 @@ class ChannelTaskResult:
     warnings: list[str]
 ```
 
-`channel` 不由模型作为普通参数传递：调用 `BossRecruitingAgent` 时它固定为 `boss`，调用
-`XhsRecruitingAgent` 时它固定为 `xhs_email`。平台私有凭据从不进入上述对象。
+`channel` 不由模型作为普通参数传递：`subagent_type="boss_recruiting"` 固定为 `boss`，
+`subagent_type="xhs_recruiting"` 固定为 `xhs_email`。平台私有凭据从不进入上述对象。
 
 ## 5. Channel Action Draft
 
@@ -108,23 +122,31 @@ class ChannelActionDraft:
 
 ```python
 supervisor_tools = [
-    delegate_boss_task,
-    delegate_xhs_task,
     list_current_action_drafts,
-    execute_boss_action,
-    execute_xhs_action,
+    execute_channel_draft,
     *journey_tools,
 ]
+
+create_deep_agent(
+    model=model,
+    tools=supervisor_tools,
+    subagents=[boss_recruiting_spec, xhs_recruiting_spec],
+    middleware=[..., build_hitl_middleware()],
+)
 ```
 
-`execute_boss_action` 与 `execute_xhs_action` 加入现有 `_HITL_TOOLS`。`prepare`/`delegate`
-Tool 为只读，不触发 HITL。
+传入 `subagents` 后框架自动注入 `task` Tool。每个 Subagent spec 配置自己的 `tools` 列表；
+Boss spec 只给 Boss 读取/prepare Tool，XHS spec 只给 XHS 读取/prepare Tool。两者都不配置
+最终外发 Tool。`execute_channel_draft` 是主图唯一的外发 Tool，加入现有 `_HITL_TOOLS`。
+
+它不是第三个 Subagent：只从内存 Draft 读取已固定的 `channel`，用 Python 映射调用
+`BossActionHandler` 或 `EmailActionHandler`。模型无法把 Boss Draft 改路由到 Email。
 
 ```text
 BossAgent prepare
   -> DraftStore.put(session_id, draft)
   -> 主 Agent 展示候选简历或邮件草稿
-  -> execute_boss_action(draft_id, approval_summary_hash)
+  -> execute_channel_draft(draft_id, approval_summary_hash)
   -> HumanInTheLoopMiddleware interrupt
   -> BossActionHandler.execute(draft)
   -> Delivery Receipt 写入 Journey
@@ -184,15 +206,15 @@ DeliveryReceipt
 ### Phase A：Boss 先行
 
 1. `ActionDraftStore`：内存 TTL、session/Journey 绑定、摘要 hash；
-2. 将现有 Boss greet/reply/resume 逻辑包装为 `prepare_*` + `execute_boss_action`；
-3. 主图只保留高层 Boss delegate/execute Tool，移除主图的 Boss 原始写 Tool；
+2. 将现有 Boss greet/reply/resume 逻辑包装为 `prepare_*` + `execute_channel_draft`；
+3. 主图使用原生 `task` 委派，并移除主图的 Boss 原始写 Tool；
 4. 复用当前 `HumanInTheLoopMiddleware`，增加动态 Draft 审批预览；
 5. 回执继续写现有 Journey/Delivery 记录。
 
 ### Phase B：BossRecruitingAgent
 
 1. 用专属 tool bundle 构建同步 Boss 子图；
-2. 主 Agent 用 `delegate_boss_task` 调用，传递 `ChannelTaskContext`；
+2. 主 Agent 用原生 `task(subagent_type="boss_recruiting", description=...)` 调用；
 3. 子图只产生 `ChannelTaskResult` 和 ActionDraft，不执行最终外发；
 4. 接入后台 HR Message Monitor 与 `BossReplyQueue`。
 
