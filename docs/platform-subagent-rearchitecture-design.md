@@ -136,6 +136,46 @@ HR 回复资格预检、Boss 可投递简历列表。
 XHS Subagent 的私有工具集：招人帖搜索/保存、正文/图片/评论证据提取、JD 拆分、公开邮箱
 提取、邮件和定制简历草稿。它不持有 SMTP 发送 Tool。
 
+## 5.1 Proposal 传递与一致性保证
+
+`proposal_id` 不是模型之间传递可变 JSON 的捷径，而是不可变 Proposal Snapshot 的数据库引用。
+主 Agent、Subagent 和执行器都不信任彼此的自然语言复述；执行器永远重新读取 Snapshot。
+
+```text
+Subagent 写 Proposal v1（含 payload_hash）
+  -> 校验通过，状态 READY
+  -> 主 Agent 仅展示 summary + proposal_id
+  -> execute_recruiting_action(proposal_id)
+  -> Executor 原子领取 v1，校验 hash/状态/过期/幂等
+  -> HITL 批准绑定 proposal_id + payload_hash
+  -> Executor 路由并执行，写 Receipt
+```
+
+Proposal 状态机：
+
+```text
+DRAFT -> VALIDATING -> READY -> APPROVAL_PENDING -> EXECUTING -> CONFIRMED
+                                      |                |             
+                                      -> REJECTED      -> UNVERIFIED | FAILED | BLOCKED
+READY / APPROVAL_PENDING -> EXPIRED
+```
+
+必须满足以下不变量：
+
+1. `payload_hash` 覆盖渠道、动作、稳定收件人、岗位、简历版本/消息正文和幂等键；Proposal
+   一旦进入 `READY` 不可原地修改，修改只能创建新版本；
+2. HITL 恢复请求包含 `proposal_id + payload_hash`。如果审批前 Proposal 已过期、被替换或 hash
+   不一致，执行器拒绝执行并要求重新准备；
+3. `EXECUTING` 的领取使用 SQLite 事务和乐观版本/租约，同一 Proposal 只能有一个执行者；
+4. 幂等键在 Receipt 表中唯一。进程重启、重复点击批准或后台 worker 重试都先查询 Receipt；
+5. Adapter 临时凭据不在 Snapshot 中。执行器领取 Proposal 后，由目标渠道 Handler 重新读取
+   当前会话/当前简历/当前邮箱配置；读取结果不再满足 Proposal 的稳定事实时，标为 `BLOCKED`；
+6. `UNVERIFIED` 不自动重试；只允许用户显式创建新的 Proposal 重新发送。
+
+因此 channel 不通过上下文注入或模型自由填写传递，而是 Proposal 的受限 enum 字段。主 Agent
+的上下文只得到供用户理解的摘要；Boss `securityId`、`mid`、`encryptResumeId` 与邮件密码均不跨
+Agent 传递。
+
 ## 6. Boss 与 XHS 工作流
 
 ### Boss
