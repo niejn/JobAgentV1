@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -50,8 +51,107 @@ _NAV_TIMEOUT_MS = 30_000
 _LIST_TIMEOUT_S = 45.0
 _MAX_FRIENDS = 100
 
-_FETCH_LIST_JS = """
+
+def _normalize_job_metadata(
+    value: Mapping[str, Any] | None,
+    *,
+    source: str,
+) -> dict[str, str] | None:
+    """Return a safe, canonical Boss job reference from chat payload metadata."""
+
+    if not value:
+        return None
+    raw_id = value.get("jobId") or value.get("job_id") or value.get("encryptJobId")
+    job_id = str(raw_id or "").strip()
+    raw_url = str(value.get("jobUrl") or value.get("job_url") or "").strip()
+    if raw_url:
+        parsed = urlsplit(raw_url)
+        if (
+            parsed.hostname
+            and (
+                parsed.hostname == "zhipin.com"
+                or parsed.hostname.endswith(".zhipin.com")
+            )
+            and "/job_detail/" in parsed.path
+        ):
+            raw_url = f"https://www.zhipin.com{parsed.path}"
+            job_id = job_id or parsed.path.rsplit("/", 1)[-1].removesuffix(".html")
+        else:
+            raw_url = ""
+    if not raw_url and job_id:
+        raw_url = f"https://www.zhipin.com/job_detail/{job_id}.html"
+    if not job_id and not raw_url:
+        return None
+    return {
+        "job_id": job_id,
+        "job_url": raw_url,
+        "title": str(value.get("title") or value.get("jobName") or ""),
+        "company": str(value.get("company") or value.get("brandName") or ""),
+        "city": str(value.get("city") or value.get("jobCity") or ""),
+        "source": str(value.get("source") or source),
+    }
+
+
+def _normalized_match_key(value: str) -> str:
+    """Normalize display labels for an exact, non-guessing registry match."""
+
+    return "".join(value.casefold().split())
+
+
+def _resolve_registry_job_metadata(
+    settings: Settings, *, company: str, title: str
+) -> dict[str, str] | None:
+    """Recover one known Boss posting only when company and title are unambiguous."""
+
+    if not company.strip() or not title.strip():
+        return None
+    from jobagent.journey.job_registry import SQLiteJobRegistry
+
+    with SQLiteJobRegistry(settings.jobagent_state_db) as registry:
+        matches = [
+            record
+            for record in registry.list_records(company=company, limit=20)
+            if record.source == "boss"
+            and record.url
+            and _normalized_match_key(record.company) == _normalized_match_key(company)
+            and _normalized_match_key(record.title) == _normalized_match_key(title)
+        ]
+    if len(matches) != 1:
+        return None
+    record = matches[0]
+    return _normalize_job_metadata(
+        {
+            "jobId": record.job_id.removeprefix("boss:"),
+            "jobUrl": record.url,
+            "title": record.title,
+            "company": record.company,
+            "city": record.location,
+            "source": "job_registry_exact_match",
+        },
+        source="job_registry_exact_match",
+    )
+
+
+_FETCH_LIST_JS = r"""
 async (payload) => {
+  const jobFrom = (f, source) => {
+    const jobId = String(
+      f.encryptJobId || f.jobId || f.encryptPositionId || f.positionId || "",
+    );
+    const rawUrl = String(f.jobUrl || f.jobDetailUrl || f.job_url || f.url || "");
+    const match = rawUrl.match(/https?:\/\/[^\s"']*zhipin\.com\/job_detail\/[^\s"']+/i);
+    const jobUrl = match
+      ? match[0].replace(/[?#].*$/, "")
+      : (jobId ? "https://www.zhipin.com/job_detail/" + jobId + ".html" : "");
+    return {
+      jobId,
+      jobUrl,
+      title: f.jobName || f.positionName || f.jobTitle || "",
+      company: f.brandName || f.companyName || "",
+      city: f.jobCity || f.cityName || "",
+      source,
+    };
+  };
   const bstMatch = document.cookie.match(/(?:^|;\s*)bst=([^;]+)/);
   const zpToken = bstMatch ? decodeURIComponent(bstMatch[1]) : "";
   const base = {
@@ -85,6 +185,7 @@ async (payload) => {
       bossTitle: f.bossTitle || "",
       jobCity: f.jobCity || "",
       updateTime: f.updateTime || 0,
+      jobMetadata: jobFrom(f, "conversation_friend"),
       lastMessage: (f.lastMessageInfo && {
         text: String(
           f.lastMessageInfo.text
@@ -104,8 +205,44 @@ async (payload) => {
 # history, all page-internal fetches with a single CDP round-trip.
 # (Live finding: warlock tolerates only ~2-3 automated fetch rounds per
 # page load; the previous 3-stage Python flow burned them all at once.)
-_FETCH_CONVERSATION_JS = """
+_FETCH_CONVERSATION_JS = r"""
 async (payload) => {
+  const jobFrom = (f, source) => {
+    const jobId = String(
+      f.encryptJobId || f.jobId || f.encryptPositionId || f.positionId || "",
+    );
+    const rawUrl = String(f.jobUrl || f.jobDetailUrl || f.job_url || f.url || "");
+    const match = rawUrl.match(/https?:\/\/[^\s"']*zhipin\.com\/job_detail\/[^\s"']+/i);
+    const jobUrl = match
+      ? match[0].replace(/[?#].*$/, "")
+      : (jobId ? "https://www.zhipin.com/job_detail/" + jobId + ".html" : "");
+    return {
+      jobId,
+      jobUrl,
+      title: f.jobName || f.positionName || f.jobTitle || "",
+      company: f.brandName || f.companyName || "",
+      city: f.jobCity || f.cityName || "",
+      source,
+    };
+  };
+  const jobFromMessage = (m) => {
+    const b = m.body || {};
+    const candidates = [m, b, b.card, b.job, b.jobCard, b.data].filter(Boolean);
+    for (const item of candidates) {
+      const job = jobFrom(item, "conversation_message");
+      if (job.jobUrl || job.jobId) return job;
+      const text = JSON.stringify(item);
+      const match = text.match(/https?:\/\/[^\s"']*zhipin\.com\/job_detail\/[^\s"']+/i);
+      if (match) {
+        return {
+          ...job,
+          jobUrl: match[0].replace(/[?#].*$/, ""),
+          source: "conversation_message",
+        };
+      }
+    }
+    return null;
+  };
   // Header matrix verified against net03 captures of SUCCESSFUL calls:
   //   filterByLabel/historyMsg: zp_token (+XRW for history)
   //   getGeekFriendList: zp_token + form-urlencoded body, NO token/XRW
@@ -155,6 +292,7 @@ async (payload) => {
     }
     securityId = full.securityId;
     bossId = full.encryptBossId || bossId;
+    Object.assign(target, full);
   }
   if (!bossId) return {step: "creds", code: 0, message: "no encryptBossId"};
 
@@ -168,9 +306,17 @@ async (payload) => {
   ).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
   if (hist.code !== 0) return {step: "history", code: hist.code, message: hist.message};
   const msgs = ((hist.zpData || {}).messages) || [];
+  const friendJob = jobFrom(target, "conversation_friend");
+  const messageJobs = msgs.map(jobFromMessage).filter(Boolean);
+  const job = friendJob.jobUrl || friendJob.jobId
+    ? friendJob : (messageJobs[0] || friendJob);
   return {
     step: "done",
     friendId: target.friendId,
+    company: target.brandName || target.companyName || "",
+    title: target.jobName || target.positionName || target.jobTitle || "",
+    job,
+    jobCandidates: messageJobs,
     messages: msgs.map((m) => {
       const b = m.body || {};
       const fromUid = m.fromId || (m.from && m.from.uid) || 0;
@@ -182,6 +328,7 @@ async (payload) => {
         toId: m.toId || (m.to && m.to.uid) || 0,
         time: m.time || m.createTime || 0,
         type: m.type != null ? m.type : m.messageType,
+        job: jobFromMessage(m),
         text: String(b.text || m.text || b.content || m.content || "")
           .slice(0, 500),
       };
@@ -322,6 +469,39 @@ class BossChatReader:
         step = str(raw.get("step", ""))
         if step == "done":
             messages = list(raw.get("messages", []))
+            raw_job = raw.get("job")
+            job_metadata = _normalize_job_metadata(
+                raw_job if isinstance(raw_job, Mapping) else None,
+                source="conversation_friend",
+            )
+            if job_metadata is None:
+                job_metadata = _resolve_registry_job_metadata(
+                    self._settings,
+                    company=str(raw.get("company") or ""),
+                    title=str(raw.get("title") or ""),
+                )
+            raw_candidates = raw.get("jobCandidates", [])
+            job_candidates = (
+                [
+                    candidate
+                    for item in raw_candidates
+                    for candidate in [
+                        _normalize_job_metadata(
+                            item if isinstance(item, Mapping) else None,
+                            source="conversation_message",
+                        )
+                    ]
+                    if candidate is not None
+                ]
+                if isinstance(raw_candidates, list)
+                else []
+            )
+            for message in messages:
+                raw_message_job = message.pop("job", None)
+                if isinstance(raw_message_job, Mapping):
+                    message["job_metadata"] = _normalize_job_metadata(
+                        raw_message_job, source="conversation_message"
+                    )
             logger.info(
                 "Boss chat history: %d messages with %s", len(messages), hr_name
             )
@@ -331,6 +511,8 @@ class BossChatReader:
                 "page": page,
                 "count": len(messages),
                 "friend_id": raw.get("friendId"),
+                "job_metadata": job_metadata,
+                "job_candidates": job_candidates,
                 "messages": messages,
             }
         if step == "match":
@@ -446,6 +628,17 @@ class BossChatReader:
         # Boss system accounts (friendId <= 1000, e.g. job assistant) are
         # not HR greetings - the chat core library filters the same way.
         real = [f for f in friends if int(f.get("friendId") or 0) > 1000]
+        for friend in real:
+            raw_metadata = friend.pop("jobMetadata", None)
+            metadata = _normalize_job_metadata(
+                raw_metadata if isinstance(raw_metadata, Mapping) else None,
+                source="conversation_friend",
+            )
+            friend["job_metadata"] = metadata or _resolve_registry_job_metadata(
+                self._settings,
+                company=str(friend.get("brandName") or ""),
+                title=str(friend.get("jobName") or friend.get("positionName") or ""),
+            )
         logger.info("Boss chat list: %d friends (labelId=%s)", len(real), label_id)
         return {
             "status": "ok",

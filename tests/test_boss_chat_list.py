@@ -8,8 +8,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from jobagent.applier.boss_chat import BossChatReader
+from jobagent.applier.boss_chat import (
+    BossChatReader,
+    _normalize_job_metadata,
+    _resolve_registry_job_metadata,
+)
 from jobagent.config import Settings
+from jobagent.journey.job_registry import SQLiteJobRegistry
 from jobagent.tools.boss_chat import build_boss_chat_list_tool
 
 
@@ -47,6 +52,14 @@ def _chat_page() -> MagicMock:
                     "positionName": "后端",
                     "bossTitle": "招聘者",
                     "jobCity": "上海",
+                    "jobMetadata": {
+                        "jobId": "job-123",
+                        "jobUrl": "https://www.zhipin.com/job_detail/job-123.html?securityId=temporary",
+                        "title": "后端开发",
+                        "company": "字节跳动",
+                        "city": "上海",
+                        "source": "conversation_friend",
+                    },
                     "updateTime": 1787900000,
                     "lastMessage": {"text": "你好，我们团队在招后端", "fromId": 20001},
                 },
@@ -97,6 +110,60 @@ async def test_list_greetings_happy_path(tmp_path: Path) -> None:
     assert hr["brandName"] == "字节跳动"
     assert hr["lastMessage"]["text"].startswith("你好")
     assert hr["encryptFriendId"] == "enc-1"
+    assert hr["job_metadata"] == {
+        "job_id": "job-123",
+        "job_url": "https://www.zhipin.com/job_detail/job-123.html",
+        "title": "后端开发",
+        "company": "字节跳动",
+        "city": "上海",
+        "source": "conversation_friend",
+    }
+
+
+def test_job_metadata_uses_stable_job_url_without_security_id() -> None:
+    result = _normalize_job_metadata(
+        {
+            "jobUrl": "https://www.zhipin.com/job_detail/stable-id.html?securityId=temporary",
+            "title": "AI Agent 工程师",
+        },
+        source="conversation_message",
+    )
+
+    assert result is not None
+    assert result["job_id"] == "stable-id"
+    assert result["job_url"] == "https://www.zhipin.com/job_detail/stable-id.html"
+    assert result["source"] == "conversation_message"
+
+
+def test_job_metadata_rejects_non_boss_urls() -> None:
+    result = _normalize_job_metadata(
+        {"jobUrl": "https://evilzhipin.com/job_detail/not-a-boss-job.html"},
+        source="conversation_message",
+    )
+
+    assert result is None
+
+
+def test_job_metadata_falls_back_only_to_one_exact_registry_match(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with SQLiteJobRegistry(settings.jobagent_state_db) as registry:
+        registry.upsert_discovered(
+            job_id="boss:stable-id",
+            source="boss",
+            company="四川影目",
+            title="AI agent 工程师",
+            location="上海",
+            url="https://www.zhipin.com/job_detail/stable-id.html?securityId=temporary",
+        )
+
+    result = _resolve_registry_job_metadata(
+        settings, company="四川影目", title="AI Agent 工程师"
+    )
+
+    assert result is not None
+    assert result["job_id"] == "stable-id"
+    assert result["job_url"] == "https://www.zhipin.com/job_detail/stable-id.html"
+    assert result["source"] == "job_registry_exact_match"
 
 
 @pytest.mark.asyncio
@@ -215,6 +282,20 @@ async def test_read_conversation_single_evaluate_chain() -> None:
             evaluate_payloads.append(payload)
             return {
                 "step": "done",
+                "job": {
+                    "jobId": "job-123",
+                    "jobUrl": "https://www.zhipin.com/job_detail/job-123.html?securityId=temporary",
+                    "title": "后端开发",
+                    "company": "字节跳动",
+                    "source": "conversation_friend",
+                },
+                "jobCandidates": [
+                    {
+                        "jobId": "card-job-456",
+                        "jobUrl": "https://www.zhipin.com/job_detail/card-job-456.html?securityId=temporary",
+                        "source": "conversation_message",
+                    }
+                ],
                 "messages": [
                     {"fromId": 20001, "toId": 1, "time": 1787900100,
                      "type": 1, "text": "你好，我们团队在招后端"},
@@ -236,6 +317,8 @@ async def test_read_conversation_single_evaluate_chain() -> None:
     assert result["status"] == "ok"
     assert result["count"] == 2
     assert result["messages"][0]["text"].startswith("你好")
+    assert result["job_metadata"]["job_url"] == "https://www.zhipin.com/job_detail/job-123.html"
+    assert result["job_candidates"][0]["job_id"] == "card-job-456"
     # exactly ONE automated fetch round, with the merged script
     assert evaluate_payloads == [{"hrName": "张HR", "page": 1}]
 

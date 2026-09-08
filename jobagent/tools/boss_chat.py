@@ -57,7 +57,8 @@ def build_boss_chat_list_tool(settings: Settings) -> StructuredTool:
         coroutine=_run,
         name="list_boss_greetings",
         description=(
-            "查看 Boss 直聘的聊天会话列表：哪些 HR 打过招呼、公司、职位、最后一条消息。"
+            "查看 Boss 直聘的聊天会话列表：哪些 HR 打过招呼、公司、职位、最后一条消息，"
+            "以及可用时的 job_metadata（稳定 job_id、无 securityId 的职位 URL、来源）。"
             "只读操作。filter_name 目前支持「全部」，其余过滤器待校准。"
             "返回的 friendSource 区分来源（如对方主动打招呼）。"
         ),
@@ -116,7 +117,8 @@ def build_boss_chat_history_tool(settings: Settings) -> StructuredTool:
             "读取与指定 HR 的 Boss 聊天记录（REST，只读）。**直接用 hr_name 调用，"
             "不要先调 list_boss_greetings**——本工具会在页内自行匹配名单，"
             "省下的页面预算能显著降低被反爬拦截的概率。"
-            "返回按时间排列的消息（发送方向/时间/文本）。"
+            "返回按时间排列的消息（发送方向/时间/文本），并从会话对象和职位卡片"
+            "恢复 job_metadata / job_candidates；没有唯一证据时不会猜测职位 URL。"
         ),
         args_schema=BossChatHistoryRequest,
     )
