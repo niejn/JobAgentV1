@@ -422,3 +422,45 @@ pytest -q
 ## 📜 许可证
 
 MIT License — 详见 [LICENSE](./LICENSE)。
+
+
+  后端服务：
+
+  uvicorn jobagent.web:app --reload --port 8008
+
+  后端地址：
+
+  http://127.0.0.1:8008
+
+  前端服务：
+
+  npm install
+  npm run dev
+
+  前端地址通常是：
+
+  http://localhost:5173
+
+  前端会把这些请求代理到后端：
+
+  /api      -> http://127.0.0.1:8008
+  /healthz  -> http://127.0.0.1:8008
+
+  命令行 Agent：
+
+  jobagent chat
+
+  其他已有命令：
+
+  jobagent login --platform xhs
+  jobagent login --platform boss
+  jobagent watch
+  jobagent xhs-search --help
+
+  总结：
+
+  后端：uvicorn jobagent.web:app --reload --port 8008
+  前端：npm run dev
+  Agent：jobagent chat
+
+mitmdump -p 8080 -w .ua\resume_request_accept.mitm

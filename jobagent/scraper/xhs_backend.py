@@ -260,6 +260,8 @@ class SpiderXhsBackend:
         self._settings = settings
         self._bindings = bindings
         self._api: Any | None = None
+        self._closing = False
+        self._inflight: set[asyncio.Task[Any]] = set()
         self._request_lock = asyncio.Lock()
         self._api_limiter = api_limiter or PyrateBlockingRateLimiter(
             requests=settings.xhs_api_rate_requests,
@@ -295,6 +297,7 @@ class SpiderXhsBackend:
 
         if self.started:
             return
+        self._closing = False
 
         bindings = self._bindings or load_spider_xhs_bindings(
             Path(self._settings.spider_xhs_path)
@@ -321,12 +324,36 @@ class SpiderXhsBackend:
     async def close(self) -> None:
         """Close Spider_XHS's reusable curl_cffi session."""
 
-        api = self._api
-        self._api = None
+        self._closing = True
+        async with self._request_lock:
+            pending = tuple(self._inflight)
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            api = self._api
+            self._api = None
         http_client = getattr(api, "http", None) if api is not None else None
         close = getattr(http_client, "close", None)
         if callable(close):
             await asyncio.to_thread(close)
+
+    async def _run_sync(self, function: Callable[..., Any], *args: Any) -> Any:
+        """Run a blocking Spider_XHS call and let shutdown await its thread."""
+
+        if self._closing:
+            raise SpiderXhsError("SpiderXhsBackend is closing")
+        task = asyncio.create_task(asyncio.to_thread(function, *args))
+        self._inflight.add(task)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            task.add_done_callback(self._forget_inflight)
+            raise
+        finally:
+            if task.done():
+                self._inflight.discard(task)
+
+    def _forget_inflight(self, task: asyncio.Task[Any]) -> None:
+        self._inflight.discard(task)
 
     async def search_notes(
         self,
@@ -340,7 +367,7 @@ class SpiderXhsBackend:
         self._ensure_started()
         requested = limit or self._settings.xhs_referral_max_posts
         async with self._request_lock:
-            return await asyncio.to_thread(self._search_notes_sync, query, requested, sort)
+            return await self._run_sync(self._search_notes_sync, query, requested, sort)
 
     async def list_user_notes(
         self,
@@ -353,7 +380,7 @@ class SpiderXhsBackend:
         self._ensure_started()
         requested = limit or self._settings.xhs_referral_max_posts
         async with self._request_lock:
-            return await asyncio.to_thread(
+            return await self._run_sync(
                 self._list_user_notes_sync,
                 user_id.strip(),
                 requested,
@@ -364,7 +391,7 @@ class SpiderXhsBackend:
 
         self._ensure_started()
         async with self._request_lock:
-            return await asyncio.to_thread(self._fetch_note_sync, url)
+            return await self._run_sync(self._fetch_note_sync, url)
 
     async def download_note(
         self,
@@ -380,7 +407,7 @@ class SpiderXhsBackend:
         destination = (output_dir or Path(self._settings.xhs_download_dir)).resolve()
         destination.mkdir(parents=True, exist_ok=True)
         async with self._request_lock:
-            directory = await asyncio.to_thread(
+            directory = await self._run_sync(
                 self._download_note_metadata_sync,
                 note,
                 destination,
@@ -388,7 +415,7 @@ class SpiderXhsBackend:
         for index, image_url in enumerate(note.image_urls):
             await self._media_limiter.acquire()
             async with self._request_lock:
-                await asyncio.to_thread(
+                await self._run_sync(
                     self._download_image_sync,
                     directory,
                     index,

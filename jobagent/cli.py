@@ -805,7 +805,7 @@ def _format_hitl_review(request: dict[str, object]) -> str:
     """Render an actionable, one-to-one HITL review summary."""
 
     actions = _hitl_actions(request)
-    lines = ["⏸ 需要人工批准的外部操作（逐项确认）："]
+    lines = ["⏸ 需要人工批准的操作（逐项确认）："]
     if not actions:
         lines.append("  未能解析具体操作，默认拒绝。")
         return "\n".join(lines)

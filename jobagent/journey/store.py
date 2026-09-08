@@ -67,6 +67,7 @@ class OpportunityJourney:
     updated_at: datetime
     department: str = ""
     recruiting_cycle: str = ""
+    deleted_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,18 +211,119 @@ class SQLiteJourneyStore:
             self._record_job_description_version(journey.id, job_description)
         return journey
 
+    def create_once(
+        self, *, creation_key: str, company: str, role: str, job_description: str = "",
+        department: str = "", recruiting_cycle: str = "",
+    ) -> tuple[OpportunityJourney, bool]:
+        """Atomically resolve a creation key and persist a Journey plus its JD."""
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            existing = self._connection.execute(
+                "SELECT journey_id FROM journey_creation_keys WHERE creation_key = ?",
+                (creation_key,),
+            ).fetchone()
+            if existing:
+                return self.get_journey(str(existing["journey_id"])), False
+            journey_id = str(uuid4())
+            now = _format_time(_now())
+            self._connection.execute(
+                """INSERT INTO journeys
+                (id, company, role, job_description, stage, version, identity_key,
+                 department, recruiting_cycle, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'targeted', 1, '', ?, ?, ?, ?)""",
+                (journey_id, company, role, job_description, department, recruiting_cycle, now, now),
+            )
+            self._connection.execute(
+                "INSERT INTO journey_creation_keys (creation_key, journey_id) VALUES (?, ?)",
+                (creation_key, journey_id),
+            )
+            self._record_job_description_version(journey_id, job_description)
+        return self.get_journey(journey_id), True
+
     def get_journey(self, journey_id: str) -> OpportunityJourney:
         row = self._one("SELECT * FROM journeys WHERE id = ?", (journey_id,))
         return _journey_from_row(row)
 
-    def list_journeys(self, *, limit: int = 100) -> tuple[OpportunityJourney, ...]:
+    def list_journeys(self, *, limit: int = 100, offset: int = 0,
+                      include_deleted: bool = False, company: str = "") -> tuple[OpportunityJourney, ...]:
         """Return the most recently updated opportunity journeys."""
 
         rows = self._connection.execute(
-            "SELECT * FROM journeys ORDER BY updated_at DESC LIMIT ?",
-            (max(1, min(limit, 500)),),
+            """SELECT * FROM journeys WHERE (? OR deleted_at IS NULL)
+            AND instr(lower(company), lower(?)) > 0
+            ORDER BY updated_at DESC, id LIMIT ? OFFSET ?""",
+            (include_deleted, company, max(1, min(limit, 500)), max(0, offset)),
         ).fetchall()
         return tuple(_journey_from_row(row) for row in rows)
+
+    def manage_journey(self, journey_id: str, *, expected_version: int,
+                       expected_company: str, expected_role: str,
+                       action: str, reason: str, changes: dict[str, str]) -> OpportunityJourney:
+        """Version-checked, audited update/soft-delete/restore; never deletes artifacts."""
+        allowed = {"company", "role", "department", "recruiting_cycle", "job_description"}
+        if action not in {"update", "delete", "restore"} or set(changes) - allowed:
+            raise ValueError("invalid Journey operation")
+        if not reason.strip():
+            raise ValueError("reason is required")
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            journey = self.get_journey(journey_id)
+            if (journey.version != expected_version or journey.company != expected_company
+                    or journey.role != expected_role):
+                raise ValueError("Journey 已变化，请重新查询详情并重新审批")
+            if action == "restore" and not journey.deleted_at:
+                raise ValueError("Journey 未删除，无需恢复")
+            if action != "restore" and journey.deleted_at:
+                raise ValueError("Journey 已删除，请先恢复")
+            if action in {"delete", "update"}:
+                running = self._connection.execute(
+                    "SELECT 1 FROM task_runs WHERE journey_id = ? AND status IN ('running','validating')",
+                    (journey_id,),
+                ).fetchone()
+                if running:
+                    raise ValueError("Journey 有运行中的任务，结束后再修改或删除")
+            now = _format_time(_now())
+            fields: dict[str, object] = dict(changes) if action == "update" else {
+                "deleted_at": now if action == "delete" else None,
+            }
+            if action == "update" and not changes:
+                raise ValueError("请至少提供一个修改字段")
+            fields.update(version=journey.version + 1, updated_at=now)
+            if action == "update":
+                fields["identity_key"] = ""  # Legacy identity must not refer to old labels.
+            assignments = ", ".join(f"{name} = ?" for name in fields)
+            self._connection.execute(
+                f"UPDATE journeys SET {assignments} WHERE id = ?", (*fields.values(), journey_id),
+            )
+            self._connection.execute(
+                """INSERT INTO journey_change_events
+                (journey_id, action, reason, before_json, after_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)""",
+                (journey_id, action, reason, _json({
+                    "version": journey.version, "company": journey.company, "role": journey.role,
+                    "department": journey.department, "recruiting_cycle": journey.recruiting_cycle,
+                    "job_description": journey.job_description, "deleted_at": journey.deleted_at,
+                }), _json(fields), now),
+            )
+            if "job_description" in changes:
+                self._record_job_description_version(journey_id, changes["job_description"])
+        return self.get_journey(journey_id)
+
+    def journey_counts(self, journey_id: str) -> dict[str, int]:
+        return {name: int(self._connection.execute(
+            f"SELECT count(*) FROM {table} WHERE journey_id = ?", (journey_id,),
+        ).fetchone()[0]) for name, table in {
+            "task_count": "task_runs", "artifact_count": "artifacts",
+            "jd_version_count": "journey_job_description_versions",
+        }.items()}
+
+    def journey_change_history(self, journey_id: str) -> list[dict]:
+        rows = self._connection.execute(
+            "SELECT * FROM journey_change_events WHERE journey_id = ? ORDER BY id DESC LIMIT 100",
+            (journey_id,),
+        ).fetchall()
+        return [{**dict(row), "before": json.loads(row["before_json"]),
+                 "after": json.loads(row["after_json"])} for row in rows]
 
     def list_tasks(self, journey_id: str, *, limit: int = 100) -> tuple[TaskRun, ...]:
         """Return task runs belonging to one journey."""
@@ -275,7 +377,8 @@ class SQLiteJourneyStore:
         *,
         input_artifact_ids: tuple[str, ...] = (),
     ) -> TaskRun:
-        self.get_journey(journey_id)
+        if self.get_journey(journey_id).deleted_at:
+            raise ValueError("Journey 已删除，请先恢复再启动任务")
         now = _now()
         task = TaskRun(
             id=str(uuid4()),
@@ -436,6 +539,17 @@ class SQLiteJourneyStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS journey_creation_keys (
+                    creation_key TEXT PRIMARY KEY,
+                    journey_id TEXT NOT NULL REFERENCES journeys(id)
+                );
+                CREATE TABLE IF NOT EXISTS journey_change_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    journey_id TEXT NOT NULL REFERENCES journeys(id),
+                    action TEXT NOT NULL, reason TEXT NOT NULL,
+                    before_json TEXT NOT NULL, after_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS journey_job_description_versions (
                     id TEXT PRIMARY KEY,
                     journey_id TEXT NOT NULL REFERENCES journeys(id),
@@ -481,6 +595,8 @@ class SQLiteJourneyStore:
                 self._connection.execute(
                     "ALTER TABLE journeys ADD COLUMN identity_key TEXT NOT NULL DEFAULT ''"
                 )
+            if "deleted_at" not in columns:
+                self._connection.execute("ALTER TABLE journeys ADD COLUMN deleted_at TEXT")
             columns = {
                 row["name"] for row in self._connection.execute("PRAGMA table_info(journeys)")
             }
@@ -549,6 +665,7 @@ def _journey_from_row(row: sqlite3.Row) -> OpportunityJourney:
         updated_at=_parse_time(row["updated_at"]),
         department=str(row["department"] or ""),
         recruiting_cycle=str(row["recruiting_cycle"] or ""),
+        deleted_at=row["deleted_at"],
     )
 
 

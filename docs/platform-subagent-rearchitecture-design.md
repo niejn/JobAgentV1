@@ -1,7 +1,7 @@
 # 平台招聘 Subagent 重构设计
 
-状态：需求设计，尚未实施。该设计优先服务当前单进程、单层 HITL 的 JobAgent；不预先引入
-跨 Agent Proposal 数据库、嵌套 HITL 或第三个 LLM 执行 Agent。
+状态：需求设计，尚未实施。采用 DeepAgents 原生 Subagent HITL：不引入跨 Agent Proposal
+数据库、通用执行 Agent，也不把平台外发绕回主 Agent Tool。
 
 ## 1. 目标
 
@@ -14,7 +14,10 @@ JobAgent Supervisor
   └─ XhsRecruitingAgent
 ```
 
-外发仍由当前主图的一层 HITL 完成，避免嵌套 Graph interrupt 的恢复复杂度。
+每个渠道 Subagent 自己持有渠道写 Tool 和 `interrupt_on`。它触发的暂停会作为根图
+`interrupts` 返回；CLI 使用同一 root `thread_id` 执行 `Command(resume=...)`，框架从
+子图暂停点继续。因此用户仍只看到一套终端批准交互，而外发责任留在渠道内。网页只读看板
+属于低优先级 Future Work，不参与当前 HITL。
 
 ## 2. 最小拓扑
 
@@ -25,30 +28,28 @@ JobAgent Supervisor
 JobAgent Supervisor
  ├─ 匹配判断、Journey、选择渠道
  ├─ Deep Agents 原生 task Tool
- ├─ execute_channel_draft  [HITL]
  │
  ├─────────────┐
  ▼             ▼
 BossAgent    XhsAgent
-  准备 Draft    准备 Draft
-  仅 Boss Tool  仅 XHS/Email 准备 Tool
+  Boss Tool      XHS/Email Tool
+  [HITL]         [HITL]
  │             │
  ▼             ▼
-BossActionHandler   EmailActionHandler
+Boss Adapter         Email Adapter
 ```
 
-`BossActionHandler` 与 `EmailActionHandler` 是普通 Python 处理器，不是第三个 Subagent、
-不是新的 LangGraph node，也不使用模型。
+Boss/Email Adapter 是渠道 Tool 的内部确定性实现，不是第三个 Subagent、不是新的 LangGraph
+node，也不使用模型。
 
 ## 3. 职责与权限
 
 | 模块 | 可以做 | 不可以做 |
 |---|---|---|
-| JobAgent Supervisor | 匹配判断、Journey、选择/调度渠道、解释 Draft | 调 Boss/SMTP 私有接口、直接生成平台凭据 |
-| BossRecruitingAgent | Boss 发现、会话/JD 读取、招呼/回复/简历发送草稿 | SMTP、XHS、最终外发 |
-| XhsRecruitingAgent | 招人帖/JD/邮箱证据、定制邮件草稿 | Boss、最终 SMTP 外发 |
-| BossActionHandler | 消费已批准 Boss Draft，调用 Boss Adapter、写回执 | 选择岗位/简历、生成文案 |
-| EmailActionHandler | 消费已批准 Email Draft，调用 SMTP、写回执 | 选择邮箱/简历、生成文案 |
+| JobAgent Supervisor | 匹配判断、Journey、选择/调度渠道、解释结果 | 调 Boss/SMTP 私有接口、直接生成平台凭据 |
+| BossRecruitingAgent | Boss 发现、会话/JD 读取、招呼/回复/简历发送；每个写 Tool 均 HITL | SMTP、XHS、绕过 HITL |
+| XhsRecruitingAgent | 招人帖/JD/邮箱证据、定制邮件及发送；邮件 Tool HITL | Boss、绕过 HITL |
+| Boss/Email Adapter | 平台传输、回执读取和幂等落库 | 选择岗位/简历、生成文案、跨渠道路由 |
 
 ## 4. 前台跨 Agent 数据传递
 
@@ -81,12 +82,11 @@ class ChannelTaskContext:
     conversation_id: str | None
 ```
 
-渠道 Subagent 返回：
+渠道 Subagent 正常完成时返回：
 
 ```python
 class ChannelTaskResult:
     summary: str
-    action_draft_id: str | None
     discoveries: list[JobRef]
     warnings: list[str]
 ```
@@ -94,9 +94,10 @@ class ChannelTaskResult:
 `channel` 不由模型作为普通参数传递：`subagent_type="boss_recruiting"` 固定为 `boss`，
 `subagent_type="xhs_recruiting"` 固定为 `xhs_email`。平台私有凭据从不进入上述对象。
 
-## 5. Channel Action Draft
+## 5. 渠道内预检（可选）
 
-前台 ActionDraft 是当前进程内、按 session 绑定、5–10 分钟有效的临时记录：
+有些动作需要先展示可选简历或邮件草稿。渠道 Subagent 可以使用当前进程内、按 session
+绑定、5–10 分钟有效的临时 `ChannelActionDraft` 保存已解析的平台字段：
 
 ```python
 class ChannelActionDraft:
@@ -110,20 +111,18 @@ class ChannelActionDraft:
     expires_at: datetime
 ```
 
-`approval_summary` 只包含用户应看到的信息：渠道、HR/邮箱、公司、岗位、简历文件名、
-邮件主题/附件和理由。`prepared_payload` 可能含 Boss `securityId`、`mid`、在线简历 ID 等，
-只能由同渠道 ActionHandler 读取，不返回模型、不写入日志或 Journey。
+`approval_summary` 只包含用户应看到的信息；`prepared_payload` 可能含 Boss `securityId`、
+`mid`、在线简历 ID 等，只能由创建它的同渠道写 Tool 读取。它不是跨 Agent 合同，也不是
+主 Agent 的 `execute_channel_draft` 路由输入。
 
 进程重启、草稿过期或用户拒绝时，Draft 丢弃并重新 prepare；这是安全失败，不自动重放。
 
-## 6. DeepAgent 与 HITL 集成
+## 6. DeepAgent 原生 Subagent HITL 集成
 
-主 DeepAgent 只注册高层 Tool：
+主 DeepAgent 只注册 Journey 等高层 Tool；传入 `subagents` 后 DeepAgents 自动注入 `task`：
 
 ```python
 supervisor_tools = [
-    list_current_action_drafts,
-    execute_channel_draft,
     *journey_tools,
 ]
 
@@ -131,34 +130,32 @@ create_deep_agent(
     model=model,
     tools=supervisor_tools,
     subagents=[boss_recruiting_spec, xhs_recruiting_spec],
-    middleware=[..., build_hitl_middleware()],
+    checkpointer=checkpointer,
 )
 ```
 
 传入 `subagents` 后框架自动注入 `task` Tool。每个 Subagent spec 配置自己的 `tools` 列表；
-Boss spec 只给 Boss 读取/prepare Tool，XHS spec 只给 XHS 读取/prepare Tool。两者都不配置
-最终外发 Tool。`execute_channel_draft` 是主图唯一的外发 Tool，加入现有 `_HITL_TOOLS`。
-
-它不是第三个 Subagent：只从内存 Draft 读取已固定的 `channel`，用 Python 映射调用
-`BossActionHandler` 或 `EmailActionHandler`。模型无法把 Boss Draft 改路由到 Email。
+Boss spec 只给 Boss Tool（含 Boss 写 Tool），XHS spec 只给 XHS/Email Tool（含 SMTP 写 Tool）。
+每个写 Tool 在本 Subagent 的 `interrupt_on` 显式配置；Subagent 配置会覆盖或继承根配置。
 
 ```text
-BossAgent prepare
-  -> DraftStore.put(session_id, draft)
-  -> 主 Agent 展示候选简历或邮件草稿
-  -> execute_channel_draft(draft_id, approval_summary_hash)
-  -> HumanInTheLoopMiddleware interrupt
-  -> BossActionHandler.execute(draft)
-  -> Delivery Receipt 写入 Journey
+Supervisor
+  -> task(subagent_type="boss_recruiting", description=minimal intent + journey_id)
+  -> BossAgent calls send_boss_resume_after_hr_reply(...)
+  -> Boss Subagent HumanInTheLoopMiddleware interrupt
+  -> root graph emits interrupts
+  -> CLI renders action_requests and collects decisions
+  -> root graph Command(resume={"decisions": [...]}) with same thread_id
+  -> DeepAgents resumes Boss Subagent at its paused Tool
+  -> Boss Adapter sends and writes Delivery Receipt to Journey
 ```
 
-HITL 描述不能信任模型回填的 HR 或文件名。`build_hitl_middleware()` 增加 DraftPreviewResolver：
-它按 `draft_id` 从内存 DraftStore 读取真实 `approval_summary`，并校验 `session_id` 与摘要 hash，
-再渲染批准框。
+批准 UI 从框架的 `action_requests` / `review_configs` 渲染完整 Tool 名与参数；敏感字段须在
+渲染前脱敏。平台 Tool 本身仍校验 HR、岗位、简历版本、session 和幂等键，不能信任模型回填。
 
 ## 7. 发送前后确定性校验
 
-`interrupt_on` 只解决“是否得到用户批准”。每个渠道 Handler 在批准后仍必须检查：
+`interrupt_on` 只解决“是否得到用户批准”。每个渠道写 Tool/Adapter 在批准后仍必须检查：
 
 ```text
 Draft 存在且未过期
@@ -195,7 +192,7 @@ DeliveryReceipt
   -> 去重、意图分类、事实检查
   -> 生成 ReplyDraft
   -> 默认进入待审批队列
-  -> 用户在网页/CLI 批准后，转换为前台 ChannelActionDraft 执行
+  -> 用户在 CLI 批准后，调用 BossRecruitingAgent 的回复 Tool 执行
 ```
 
 只有用户明确按问题类别/公司/HR 开启自动回复时，Monitor 才可直接调用 BossActionHandler；
@@ -206,23 +203,23 @@ DeliveryReceipt
 ### Phase A：Boss 先行
 
 1. `ActionDraftStore`：内存 TTL、session/Journey 绑定、摘要 hash；
-2. 将现有 Boss greet/reply/resume 逻辑包装为 `prepare_*` + `execute_channel_draft`；
-3. 主图使用原生 `task` 委派，并移除主图的 Boss 原始写 Tool；
-4. 复用当前 `HumanInTheLoopMiddleware`，增加动态 Draft 审批预览；
+2. 将现有 Boss greet/reply/resume 逻辑作为 Boss 子 Agent 专属 Tool；
+3. 主图使用原生 `task` 委派，并移除主图的 Boss 原始 Tool；
+4. 在 Boss Subagent spec 配置写 Tool 的 `interrupt_on`，复用当前根图的 interrupt 渲染/恢复；
 5. 回执继续写现有 Journey/Delivery 记录。
 
 ### Phase B：BossRecruitingAgent
 
 1. 用专属 tool bundle 构建同步 Boss 子图；
 2. 主 Agent 用原生 `task(subagent_type="boss_recruiting", description=...)` 调用；
-3. 子图只产生 `ChannelTaskResult` 和 ActionDraft，不执行最终外发；
+3. 子图可在用户批准后自行执行 Boss 外发并返回 `ChannelTaskResult`；
 4. 接入后台 HR Message Monitor 与 `BossReplyQueue`。
 
 ### Phase C：XhsRecruitingAgent
 
 1. 完成 XHS 招人帖到邮件草稿闭环；
 2. 用 XHS 专属 tool bundle 构建同步子图；
-3. 添加 `execute_xhs_action`，复用 HITL 和回执规范。
+3. 在 XHS 子图为 SMTP 写 Tool 配置 `interrupt_on`，复用 HITL 和回执规范。
 
 ### Phase D：只在有真实需求时升级持久化 Handoff
 
@@ -234,8 +231,8 @@ ActionDraft 升级为 Journey Artifact/Handoff。当前不预先实现。
 - 主 Agent 看不到 Boss/XHS/SMTP 原始写 Tool；
 - Boss/XHS 子图工具集互斥；
 - 前台 Draft 不落盘、不泄露平台临时凭据；
-- 每次外发只经过当前一层 `interrupt_on`；
-- HITL 展示字段来自 DraftStore，不来自模型自然语言；
+- 每次外发均由所属平台 Subagent 的 `interrupt_on` 暂停，且在根图统一展示/恢复；
+- HITL 展示字段来自框架 `action_requests`，敏感字段经渲染层脱敏；
 - 发送后只有 Delivery Receipt 更新 Journey；
 - 错渠道 Draft、过期 Draft、重复批准、进程重启、Boss 冷却均安全失败；
 - 后台 HR 监控使用持久化队列，不依赖前台 Draft。

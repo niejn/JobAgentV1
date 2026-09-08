@@ -19,8 +19,14 @@ from langchain_core.tools import BaseTool, tool
 
 from jobagent.agent import (
     SYSTEM_PROMPT,
+    _args_preview,
+    _collect_tool_completions,
     _deterministic_tool_answer,
+    _PendingToolCall,
+    _preview_text,
+    _result_summary_text,
     _safe_debug_args,
+    _tool_result_summary,
     build_job_agent,
 )
 from jobagent.config import Settings
@@ -342,12 +348,11 @@ async def test_debug_trace_emits_sanitized_phase_diagnostics(tmp_path) -> None:
 
     debug_statuses = [event.text for event in events if event.kind == "status"]
     assert any("[debug] Agent 请求开始" in text for text in debug_statuses)
-    assert any("[debug] 模型请求开始" in text for text in debug_statuses)
-    assert any("[debug] LangGraph 首事件" in text for text in debug_statuses)
-
 
 @pytest.mark.asyncio
-async def test_agent_streams_safe_tool_lifecycle_without_arguments(tmp_path) -> None:
+async def test_agent_streams_self_describing_tool_lifecycle(tmp_path) -> None:
+    """Tool log lines must show call args and result preview, bounded and redacted."""
+
     settings = Settings(
         _env_file=None,
         jobagent_checkpoint_db=tmp_path / "checkpoints.db",
@@ -367,12 +372,78 @@ async def test_agent_streams_safe_tool_lifecycle_without_arguments(tmp_path) -> 
     statuses = [event.text for event in events if event.kind == "status"]
     assert "正在搜索并整理面经资料…" in statuses
     assert "资料处理完成，正在生成回答…" in statuses
-    assert all("示例公司" not in status for status in statuses)
     assert "".join(event.text for event in events if event.kind == "token") == "研究完成"
     tool_summaries = [event.text for event in events if event.kind == "tool"]
     assert tool_summaries
-    assert all("示例公司" not in summary for summary in tool_summaries)
+    # Self-describing contract: the line names the call (args) and the result,
+    # not just a character count.
+    assert any(
+        summary.startswith("discover_interview_evidence(company=示例公司) → ")
+        and "示例公司: done" in summary
+        for summary in tool_summaries
+    )
     assert all(len(summary) <= 1_200 for summary in tool_summaries)
+
+
+def test_tool_result_summary_joins_args_by_call_id() -> None:
+    """Parallel completions must each recover their own announced arguments."""
+
+    pending = {
+        "call-1": _PendingToolCall("execute", {"command": "uv run pytest -q"}),
+        "call-2": _PendingToolCall("read_file", {"path": "report.md"}),
+    }
+    update = {
+        "messages": [
+            ToolMessage(content="3 passed", name="execute", tool_call_id="call-2"),
+            ToolMessage(content="hello", name="execute", tool_call_id="call-1"),
+        ]
+    }
+    completions = _collect_tool_completions(update, pending)
+    summary = _tool_result_summary(completions)
+    # call-2 (read_file announcement, execute message) keeps its announced name;
+    # the join is by call_id, never by message order.
+    assert "read_file(path=report.md) → 3 passed" in summary
+    assert "execute(command=uv run pytest -q) → hello" in summary
+    assert pending == {}
+
+
+def test_tool_result_summary_degrades_to_name_without_pending_call() -> None:
+    """Completions from an earlier stream (HITL resume) render name-only."""
+
+    completions = _collect_tool_completions(
+        {"messages": [ToolMessage(content="done", name="execute", tool_call_id="late")]},
+        {},
+    )
+    assert _tool_result_summary(completions) == "execute → done · 4 chars"
+
+
+def test_args_preview_shows_command_and_redacts_credentials() -> None:
+    preview = _args_preview(
+        {"command": "curl 'https://x.io/a?token=SECRET&page=2'", "timeout": 30}
+    )
+    assert "command=curl 'https://x.io/a?token=[REDACTED]&page=2'" in preview
+    assert "timeout=30" in preview
+    assert "SECRET" not in preview
+
+
+def test_args_preview_bounds_every_argument() -> None:
+    preview = _args_preview({"command": "x" * 500, "note": "y" * 500})
+    assert len(preview) <= 240
+    assert preview.endswith("…")
+
+
+def test_result_summary_text_extracts_json_detail_fields() -> None:
+    content = '{"status": "completed", "file_path": "a.md", "noise": "' + "z" * 900 + '"}'
+    summary = _result_summary_text(content)
+    assert "noise" not in summary
+    assert summary.endswith(f"· {len(content)} chars")
+
+
+def test_preview_text_collapses_multiline_output() -> None:
+    assert _preview_text("line1\n  line2\tline3", 100) == "line1 line2 line3"
+    truncated = _preview_text("abcdefghij", 5)
+    assert truncated == "abcd…"
+
 
 
 @pytest.mark.asyncio

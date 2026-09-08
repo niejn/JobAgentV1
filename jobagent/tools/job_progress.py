@@ -15,7 +15,7 @@ from jobagent.journey.job_registry import (
 )
 
 _STATUS_DESCRIPTION = (
-    "Journey status: discovered(已发现未推荐), recommended(已推荐), "
+    "Job registry status (not web Journey creation): discovered(已发现未推荐), recommended(已推荐), "
     "greeted(已打招呼), hr_replied(HR已回复), no_response(HR无回应), "
     "interviewing(已安排面试), offer(已拿offer), rejected(被拒), closed(已关闭)"
 )

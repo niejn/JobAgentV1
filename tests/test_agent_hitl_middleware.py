@@ -8,7 +8,7 @@ would run unapproved - this file pins the mapping.
 
 from __future__ import annotations
 
-from jobagent.agent import _HITL_TOOLS, build_hitl_middleware
+from jobagent.agent import _HITL_TOOLS, _ROOT_HITL_TOOLS, build_hitl_middleware
 
 
 def test_hitl_tools_cover_exactly_the_external_writes() -> None:
@@ -17,6 +17,10 @@ def test_hitl_tools_cover_exactly_the_external_writes() -> None:
     nothing more (pointless interrupts on read/local tools)."""
 
     assert set(_HITL_TOOLS) == {
+        "create_opportunity_journey",
+        "update_opportunity_journey",
+        "delete_opportunity_journey",
+        "restore_opportunity_journey",
         "install_skill",
         "send_application_email",
         "boss_greet_jobs",
@@ -30,10 +34,18 @@ def test_hitl_tools_cover_exactly_the_external_writes() -> None:
 def test_build_hitl_middleware_interrupts_on_every_hitl_tool() -> None:
     middleware = build_hitl_middleware()
 
-    assert set(middleware.interrupt_on) == set(_HITL_TOOLS)
+    # Platform writes are gated by their owning declarative Subagent; the
+    # root graph only gates root-owned writes.
+    assert set(middleware.interrupt_on) == set(_ROOT_HITL_TOOLS)
     for name, config in middleware.interrupt_on.items():
         assert config["allowed_decisions"] == ["approve", "reject"], name
         assert config["description"], f"{name} needs a user-facing description"
+
+
+def test_custom_hitl_mapping_supports_subagent_write_tools() -> None:
+    middleware = build_hitl_middleware(_HITL_TOOLS)
+
+    assert set(middleware.interrupt_on) == set(_HITL_TOOLS)
 
 
 def test_hitl_tool_schemas_have_no_user_confirmed_field() -> None:

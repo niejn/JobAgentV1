@@ -24,6 +24,9 @@ from jobagent.config import get_settings
 from jobagent.profile import SQLiteCandidateProfileStore
 from jobagent.agent import build_job_agent
 from jobagent.interview.ocr import TesseractOcrExtractor
+from jobagent.journey.draft import JourneyDraft, draft_response
+from jobagent.journey.creation import CreateJourneyRequest, create_journey as create_shared_journey
+from jobagent.journey import management as journey_management
 
 logger = logging.getLogger(__name__)
 
@@ -46,12 +49,8 @@ UI_DIST = ROOT / "ui" / "dist"
 STATE_DB = get_settings().jobagent_state_db.expanduser().resolve()
 
 
-class JourneyCreate(BaseModel):
-    company: str = Field(min_length=1, max_length=200)
-    role: str = Field(min_length=1, max_length=200)
-    job_description: str = Field(min_length=1)
-    department: str = Field(default="", max_length=200)
-    recruiting_cycle: str = Field(default="", max_length=100)
+class JourneyCreate(CreateJourneyRequest):
+    """The web confirmation button submits the same contract as the CLI tool."""
 
 
 class ConversationCreate(BaseModel):
@@ -69,6 +68,11 @@ class JourneyDraftMatch(BaseModel):
     location: str = ""
 
 
+class JourneyDraftExtract(BaseModel):
+    text: str = Field(min_length=1, max_length=100000)
+    current: JourneyDraft | None = None
+
+
 def _journey_json(journey: Any, store: SQLiteJourneyStore) -> dict[str, Any]:
     tasks = store.list_tasks(journey.id)
     artifacts = store.list_artifacts(journey.id)
@@ -81,6 +85,7 @@ def _journey_json(journey: Any, store: SQLiteJourneyStore) -> dict[str, Any]:
         "job_description": journey.job_description,
         "stage": journey.stage,
         "version": journey.version,
+        "deleted_at": journey.deleted_at,
         "task_count": len(tasks),
         "artifact_count": len(artifacts),
         "created_at": journey.created_at.isoformat(),
@@ -198,22 +203,17 @@ async def send_assistant_message(conversation_id: str, request: MessageCreate) -
 
 
 @app.get("/api/journeys")
-def list_journeys() -> list[dict[str, Any]]:
-    with SQLiteJourneyStore(STATE_DB) as store:
-        return [_journey_json(item, store) for item in store.list_journeys()]
+def list_journeys(company: str = "", include_deleted: bool = False,
+                  limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)) -> list[dict[str, Any]]:
+    return journey_management.list_journeys(STATE_DB, company=company, include_deleted=include_deleted,
+                                           limit=limit, offset=offset)
 
 
 @app.post("/api/journeys", status_code=201)
 def create_journey(request: JourneyCreate) -> dict[str, Any]:
+    journey, created = create_shared_journey(STATE_DB, request)
     with SQLiteJourneyStore(STATE_DB) as store:
-        journey = store.create_journey(
-            company=request.company,
-            role=request.role,
-            job_description=request.job_description,
-            department=request.department,
-            recruiting_cycle=request.recruiting_cycle,
-        )
-        return _journey_json(journey, store)
+        return {**_journey_json(journey, store), "created": created}
 
 
 @app.post("/api/journey-drafts/match")
@@ -255,6 +255,13 @@ async def match_journey_draft(request: JourneyDraftMatch) -> dict[str, Any]:
         return {"score": None, "evaluation_failed": True, "reasoning": [f"暂时无法完成匹配评估：{error}"]}
 
 
+@app.post("/api/journey-drafts/extract")
+def extract_journey_draft(request: JourneyDraftExtract) -> dict[str, Any]:
+    if not request.text.strip():
+        raise HTTPException(status_code=422, detail="请输入岗位文本")
+    return draft_response(request.text, request.current)
+
+
 @app.post("/api/journey-drafts/ocr")
 async def ocr_journey_draft(file: UploadFile = File(...)) -> dict[str, Any]:
     """Read a user-provided JD screenshot before the Journey exists."""
@@ -286,6 +293,7 @@ async def ocr_journey_draft(file: UploadFile = File(...)) -> dict[str, Any]:
         result = await asyncio.to_thread(extractor.extract, temporary_path)
         logger.info("journey JD OCR completed: filename=%s confidence=%.2f engine=%s", file.filename, result.confidence, result.engine)
         return {
+            **draft_response(result.text),
             "text": result.text,
             "confidence": result.confidence,
             "engine": result.engine,
@@ -304,17 +312,35 @@ async def ocr_journey_draft(file: UploadFile = File(...)) -> dict[str, Any]:
 @app.get("/api/journeys/{journey_id}")
 def get_journey(journey_id: str) -> dict[str, Any]:
     try:
-        with SQLiteJourneyStore(STATE_DB) as store:
-            journey = store.get_journey(journey_id)
-            result = _journey_json(journey, store)
-            result["tasks"] = [asdict(task) for task in store.list_tasks(journey_id)]
-            result["artifacts"] = [asdict(artifact) for artifact in store.list_artifacts(journey_id)]
-            result["job_description_versions"] = [
-                asdict(version) for version in store.list_job_description_versions(journey_id)
-            ]
-            return result
+        return journey_management.get_journey(STATE_DB, journey_id)
     except KeyError as error:
         raise HTTPException(status_code=404, detail="Journey not found") from error
+
+
+def _manage_journey(journey_id: str, action: str, request: journey_management.JourneyTarget):
+    if journey_id != request.journey_id:
+        raise HTTPException(status_code=422, detail="Journey ID mismatch")
+    try:
+        return journey_management.change_journey(STATE_DB, action, request)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Journey not found") from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.patch("/api/journeys/{journey_id}")
+def update_journey(journey_id: str, request: journey_management.JourneyUpdate):
+    return _manage_journey(journey_id, "update", request)
+
+
+@app.delete("/api/journeys/{journey_id}")
+def delete_journey(journey_id: str, request: journey_management.JourneyTarget):
+    return _manage_journey(journey_id, "delete", request)
+
+
+@app.post("/api/journeys/{journey_id}/restore")
+def restore_journey(journey_id: str, request: journey_management.JourneyTarget):
+    return _manage_journey(journey_id, "restore", request)
 
 
 @app.get("/api/journeys/{journey_id}/conversations")

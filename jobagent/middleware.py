@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, AgentState, ModelRequest
-from langchain_core.messages import AIMessage, AnyMessage, RemoveMessage, ToolMessage
+from langchain.agents.middleware.types import ModelResponse
+from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, RemoveMessage, ToolMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
@@ -226,3 +227,70 @@ class MessageCompatibilityMiddleware(AgentMiddleware):
             if not _changed(messages, prepared):
                 raise
             return await handler(request.override(messages=prepared))
+
+
+class SingleSubagentTaskMiddleware(AgentMiddleware):
+    """Permit at most one native DeepAgents ``task`` call per model response.
+
+    A subagent may pause at a user-approval interrupt.  Dispatching several
+    tasks in the same ToolNode would make multiple external actions pending at
+    once and complicate a resumed graph.  This middleware makes that unsafe
+    shape deterministic: it preserves the first task and returns error tool
+    results for subsequent task calls, so the model can dispatch them only
+    after the first task has completed.
+    """
+
+    name = "SingleSubagentTaskMiddleware"
+    _REJECTION = (
+        "已拒绝并行子任务：一次只能派发一个平台任务。请等待当前任务完成并取得回执后，"
+        "再发起下一个 task。"
+    )
+
+    @classmethod
+    def _serialize(cls, response: ModelResponse[Any]) -> ModelResponse[Any]:
+        rewritten: list[BaseMessage] = []
+        changed = False
+        for message in response.result:
+            if not isinstance(message, AIMessage):
+                rewritten.append(message)
+                continue
+            task_calls = [call for call in message.tool_calls if call.get("name") == "task"]
+            if len(task_calls) <= 1:
+                rewritten.append(message)
+                continue
+            first_task_seen = False
+            allowed_calls = []
+            for call in message.tool_calls:
+                if call.get("name") != "task":
+                    allowed_calls.append(call)
+                elif not first_task_seen:
+                    allowed_calls.append(call)
+                    first_task_seen = True
+            rewritten.append(message.model_copy(update={"tool_calls": allowed_calls}))
+            rewritten.extend(
+                ToolMessage(
+                    content=cls._REJECTION,
+                    name="task",
+                    tool_call_id=str(call.get("id") or "task-rejected"),
+                    status="error",
+                )
+                for call in task_calls[1:]
+            )
+            changed = True
+        if not changed:
+            return response
+        return ModelResponse(result=rewritten, structured_response=response.structured_response)
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse[Any]],
+    ) -> ModelResponse[Any]:
+        return self._serialize(handler(request))
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse[Any]]],
+    ) -> ModelResponse[Any]:
+        return self._serialize(await handler(request))

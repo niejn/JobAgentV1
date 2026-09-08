@@ -112,18 +112,19 @@ _Avoid_: Opportunity Journey、单一工具、平台网站
 
 **Platform Recruiting Subagent（平台招聘 Subagent）**:
 只服务一个 Recruiting Channel 的受限 Agent，使用该渠道专属工具产生结构化发现、沟通和
-投递提案；它不判断跨渠道优先级，也不能直接绕过用户批准执行外部写操作。
+投递准备，并在该渠道写 Tool 的原生 HITL 批准后执行外部动作；它不判断跨渠道优先级，也不能
+绕过用户批准。
 _Avoid_: 主 JobAgent、平台 Adapter、后台 worker
 
 **Channel Action Draft（渠道行动草稿）**:
 由 Platform Recruiting Subagent 为一个具体 Opportunity Journey 准备、只在当前交互进程短时
 有效的待外发动作，包含渠道、对象、岗位、简历文件名或消息草稿与展示摘要；用户批准后由
-同渠道的执行 Tool 消费。它不是 Journey、不是长期 Artifact，也不是已发送记录。
-_Avoid_: Opportunity Journey、后台待回复队列、Tool call、Delivery Receipt
+创建它的同渠道写 Tool 消费。它不是跨 Agent handoff、Journey、长期 Artifact，也不是已发送记录。
+_Avoid_: Opportunity Journey、后台待回复队列、Tool call、Delivery Receipt、通用执行请求
 
 **Platform Action Handler（平台行动处理器）**:
-渠道私有的确定性实现，消费已批准 Channel Action Draft，执行 Boss 或 Email 外发并写入
-Delivery Receipt；它不使用 LLM 决策，也不跨渠道路由。
+渠道私有写 Tool 的确定性实现，校验批准后的输入或同渠道 Action Draft，执行 Boss 或 Email
+外发并写入 Delivery Receipt；它不使用 LLM 决策，也不跨渠道路由。
 _Avoid_: Subagent、主 Agent、通用执行器、平台 Adapter
 
 **Job Posting（岗位发布）**:

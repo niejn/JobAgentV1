@@ -111,8 +111,17 @@ class BossContactRegistry:
         return self._attempt(row)
 
     def save_conversation(self, *, job_id: str, target: dict[str, Any]) -> str:
+        """Link one job to one HR conversation, idempotently.
+
+        One HR may talk to us about several jobs, so the row - and its id -
+        is the (job_id, friend_id) pair, never the friend alone: a
+        ``boss:{friend_id}`` id collides on the second job, and the upsert's
+        ON CONFLICT(job_id, friend_id) clause does not catch PRIMARY KEY
+        violations. The id is read back after the upsert so rows written by
+        older versions keep being returned under their stored id.
+        """
+
         now = int(time.time() * 1000)
-        conversation_id = f"boss:{target['friend_id']}"
         self._connection.execute(
             """
             INSERT INTO boss_conversations
@@ -125,7 +134,7 @@ class BossContactRegistry:
                 encrypt_boss_id=excluded.encrypt_boss_id
             """,
             (
-                conversation_id,
+                f"{job_id}:{target['friend_id']}",
                 job_id,
                 int(target["friend_id"]),
                 int(target.get("friend_source") or 0),
@@ -138,7 +147,12 @@ class BossContactRegistry:
             ),
         )
         self._connection.commit()
-        return conversation_id
+        row = self._connection.execute(
+            "SELECT id FROM boss_conversations WHERE job_id = ? AND friend_id = ?",
+            (job_id, int(target["friend_id"])),
+        ).fetchone()
+        assert row is not None  # the upsert above guarantees the row exists
+        return str(row[0])
 
     def save_job_transport(self, *, job_id: str, metadata: dict[str, Any]) -> None:
         """Persist only internal fields needed to contact a discovered job."""

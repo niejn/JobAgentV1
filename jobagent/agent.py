@@ -45,7 +45,11 @@ from jobagent.crawl import (
     build_crawl_gate,
 )
 from jobagent.memory.conversation_log import ConversationLog
-from jobagent.middleware import MessageCompatibilityMiddleware, ModelCapabilityRegistry
+from jobagent.middleware import (
+    MessageCompatibilityMiddleware,
+    ModelCapabilityRegistry,
+    SingleSubagentTaskMiddleware,
+)
 from jobagent.models.llm_client import build_agent_model
 from jobagent.observability import (
     NodeTraceMiddleware,
@@ -100,6 +104,8 @@ from jobagent.tools import (
     build_xhs_author_posts_tool,
     build_xhs_note_search_tool,
 )
+from jobagent.tools.journey_creation import build_create_journey_tool
+from jobagent.tools.journey_management import build_journey_management_tools
 from jobagent.tools.xhs_note import XhsNoteSaver
 from jobagent.tools.xhs_search import XhsNoteSearcher
 
@@ -131,6 +137,10 @@ from jobagent.observability import _SENSITIVE_QUERY as _DEBUG_SENSITIVE_QUERY  #
 # call runs (physical interrupt - the model cannot bypass it). This replaces
 # the former per-tool ``user_confirmed`` parameter gates.
 _HITL_TOOLS: dict[str, str] = {
+    "create_opportunity_journey": "创建并保存网页可见的岗位 Journey（不发送消息、不投递）",
+    "update_opportunity_journey": "修改指定 Journey 的字段（请核对 ID、版本和修改内容）",
+    "delete_opportunity_journey": "软删除指定 Journey，保留关联内容，可恢复（请核对具体 ID）",
+    "restore_opportunity_journey": "恢复已软删除的指定 Journey，使其重新显示在网页列表",
     "install_skill": "从本地文件或互联网下载并安装一个 Agent Skill",
     "send_application_email": "发送求职投递邮件（含简历附件）给外部 HR",
     "boss_greet_jobs": "向 Boss 招聘方批量发送打招呼消息",
@@ -140,20 +150,81 @@ _HITL_TOOLS: dict[str, str] = {
     "merge_job_identities": "合并两条岗位身份记录（不可自动撤销）",
 }
 
+# Platform writes belong to their owning declarative DeepAgents Subagent.  Keep
+# the complete map above as the single policy vocabulary, but do not install
+# these approvals on the root graph: a declarative subagent's explicit
+# ``interrupt_on`` configuration owns them.
+_BOSS_TOOL_NAMES = frozenset(
+    {
+        "discover_boss_jobs",
+        "boss_greet_jobs",
+        "upload_boss_resume_pdf",
+        "prepare_boss_resume_after_hr_reply",
+        "send_boss_resume_after_hr_reply",
+        "list_boss_greetings",
+        "read_boss_conversation",
+        "reply_boss_greeting",
+    }
+)
+_XHS_TOOL_NAMES = frozenset(
+    {
+        "save_shared_url",
+        "extract_shared_url",
+        "browse_xhs_author_posts",
+        "search_xhs_notes",
+        "send_application_email",
+    }
+)
+_PLATFORM_WRITE_TOOL_NAMES = frozenset(
+    {
+        "boss_greet_jobs",
+        "upload_boss_resume_pdf",
+        "send_boss_resume_after_hr_reply",
+        "reply_boss_greeting",
+        "send_application_email",
+    }
+)
+_ROOT_HITL_TOOLS = {
+    name: description
+    for name, description in _HITL_TOOLS.items()
+    if name not in _PLATFORM_WRITE_TOOL_NAMES
+}
 
-def build_hitl_middleware() -> Any:
+_BOSS_SUBAGENT_PROMPT = """你是 Boss 直聘招聘渠道专家，只使用已提供的 Boss 工具。
+你不访问小红书、SMTP 或其他渠道。先读取并核对岗位、HR 与会话；外发招呼、回复或简历时，
+调用对应 Boss 写工具。写工具会自动暂停，等待用户在根 JobAgent 界面批准；绝不绕过批准。
+一次任务最多准备和执行一项外发动作。工具返回回执后，如实报告 confirmed、unverified、failed
+或 blocked，并关联用户提供的 Journey。"""
+
+_XHS_SUBAGENT_PROMPT = """你是小红书招聘线索与邮件投递渠道专家，只使用已提供的小红书和邮件工具。
+你不访问 Boss。先提取可追溯的岗位 JD 与公开投递邮箱；发送邮件前核对收件人、岗位、附件简历
+和来源。发送工具会自动暂停，等待用户在根 JobAgent 界面批准；绝不绕过批准。一次任务最多准备
+和执行一项外发动作，并如实返回邮件回执与 Journey 关联结果。"""
+
+
+def _interrupt_on_config(tool_descriptions: dict[str, str]) -> dict[str, dict[str, Any]]:
+    """Build the uniform approve/reject policy for one agent's write tools."""
+
+    return {
+        name: {
+            "allowed_decisions": ["approve", "reject"],
+            "description": why,
+        }
+        for name, why in tool_descriptions.items()
+    }
+
+
+def build_hitl_middleware(tool_descriptions: dict[str, str] | None = None) -> Any:
     """Assemble the framework HITL approval gate for external-write tools."""
 
+    descriptions = _ROOT_HITL_TOOLS if tool_descriptions is None else tool_descriptions
     from langchain.agents.middleware import HumanInTheLoopMiddleware
 
     return HumanInTheLoopMiddleware(
-        interrupt_on={
-            name: {
-                "allowed_decisions": ["approve", "reject"],
-                "description": why,
-            }
-            for name, why in _HITL_TOOLS.items()
-        },
+        interrupt_on=cast(
+            Any,
+            _interrupt_on_config(descriptions),
+        ),
         description_prefix="工具执行需要人工批准",
     )
 
@@ -216,6 +287,8 @@ class JobAgent:
         *,
         model: BaseChatModel,
         tools: Sequence[BaseTool],
+        subagents: Sequence[dict[str, Any]] = (),
+        available_tools: Sequence[BaseTool] | None = None,
         system_prompt: str,
         checkpoint_db: Path,
         conversation_log: ConversationLog | None = None,
@@ -230,7 +303,12 @@ class JobAgent:
         model_capability_key: str = "",
     ) -> None:
         self._model = model
-        self._tools = tuple(tools)
+        # ``_tools`` remains the complete capability inventory for prompt
+        # assembly and diagnostics.  Only ``_root_tools`` are exposed to the
+        # root DeepAgent; platform tools live in their respective subagents.
+        self._tools = tuple(available_tools) if available_tools is not None else tuple(tools)
+        self._root_tools = tuple(tools)
+        self._subagents = tuple(subagents)
         self._system_prompt = system_prompt
         self._checkpoint_db = checkpoint_db
         self._conversation_log = conversation_log
@@ -368,8 +446,10 @@ class JobAgent:
         streamed_text: dict[str, str] = {}
         streamed_reasoning: dict[str, str] = {}
         announced_tool_calls: set[str] = set()
-        latest_tool_name: str = ""
-        latest_tool_args: dict[str, Any] = {}
+        # Announced calls keyed by tool_call_id: completions join their own
+        # arguments back via _collect_tool_completions (parallel-call safe),
+        # replacing the former "latest call wins" guess.
+        pending_tool_calls: dict[str, _PendingToolCall] = {}
         saw_tool_completion = False
         deterministic_tool_answer = ""
         last_finish_reason: str | None = None
@@ -437,8 +517,10 @@ class JobAgent:
                                 if call_id in announced_tool_calls:
                                     continue
                                 announced_tool_calls.add(call_id)
-                                latest_tool_name = str(tool_call.get("name") or "unknown")
-                                latest_tool_args = tool_call.get("args", {}) or {}
+                                call_name = str(tool_call.get("name") or "unknown")
+                                pending_tool_calls[call_id] = _PendingToolCall(
+                                    call_name, tool_call.get("args", {}) or {}
+                                )
                                 tool_started = time.perf_counter()
                                 log_decision(
                                     logger,
@@ -459,31 +541,39 @@ class JobAgent:
                                     )
                                 yield AgentStreamEvent(
                                     "status",
-                                    _tool_start_status(str(tool_call.get("name") or "")),
+                                    _tool_start_status(
+                                        str(tool_call.get("name") or ""),
+                                        tool_call.get("args", {}) or {},
+                                    ),
                                 )
                     elif node == "tools":
                         saw_tool_completion = True
-                        if isinstance(update, dict):
-                            for tool_message in update.get("messages", []):
-                                deterministic_tool_answer = (
-                                    _deterministic_tool_answer(tool_message)
-                                    or deterministic_tool_answer
-                                )
-                        tool_summary = _tool_result_summary(update) if update else ""
-                        if tool_summary:
+                        completions = (
+                            _collect_tool_completions(update, pending_tool_calls)
+                            if isinstance(update, dict)
+                            else []
+                        )
+                        for _call, tool_message in completions:
+                            deterministic_tool_answer = (
+                                _deterministic_tool_answer(tool_message)
+                                or deterministic_tool_answer
+                            )
+                        tool_summary = _tool_result_summary(completions)
+                        for call, _completed in completions:
                             log_decision(
                                 logger,
                                 "agent.tool_completion",
                                 basis={
-                                    "tool_name": latest_tool_name,
-                                    "args": _safe_debug_args(latest_tool_args),
+                                    "tool_name": call.name if call else "unknown",
+                                    "args": _safe_debug_args(call.args) if call else "",
                                     "duration_seconds": round(
                                         time.perf_counter() - tool_started, 3
                                     ),
                                     "result_summary": tool_summary,
                                 },
-                                outcome=latest_tool_name,
+                                outcome=call.name if call else "unknown",
                             )
+                        if tool_summary:
                             yield AgentStreamEvent("tool", tool_summary)
                         yield AgentStreamEvent(
                             "status",
@@ -493,7 +583,7 @@ class JobAgent:
                             yield AgentStreamEvent(
                                 "status",
                                 f"[debug] Tool 完成：{time.perf_counter() - tool_started:.1f}s "
-                                f"{_tool_result_summary(update)}",
+                                f"{tool_summary}",
                             )
                         yield AgentStreamEvent(
                             "status",
@@ -794,8 +884,9 @@ class JobAgent:
                 # not in hand-written graph nodes.
                 deep_agent = create_deep_agent(
                     model=self._model,
-                    tools=list(self._tools),
+                    tools=list(self._root_tools),
                     system_prompt=self._system_prompt,
+                    subagents=cast(Any, list(self._subagents) or None),
                     middleware=[
                         filesystem_middleware,
                         MessageCompatibilityMiddleware(
@@ -803,6 +894,7 @@ class JobAgent:
                             self._model_capability_key,
                         ),
                         build_hitl_middleware(),
+                        SingleSubagentTaskMiddleware(),
                         cast(Any, NodeTraceMiddleware()),
                     ],
                     backend=shell_backend,
@@ -872,52 +964,154 @@ def _deterministic_tool_answer(message: Any) -> str:
     return f"文件已写入：{content.removeprefix('Successfully wrote to ').strip()}"
 
 
+def _scrub_debug(value: Any) -> Any:
+    """Recursively redact credential-like fields; single scrub vocabulary."""
+
+    if isinstance(value, dict):
+        return {
+            str(key): (
+                "[REDACTED]"
+                if any(term in str(key).lower() for term in _DEBUG_SENSITIVE_KEYS)
+                else _scrub_debug(child)
+            )
+            for key, child in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_scrub_debug(child) for child in value[:10]]
+    if isinstance(value, str):
+        return _DEBUG_SENSITIVE_QUERY.sub(r"\1=[REDACTED]", value)
+    return value
+
+
 def _safe_debug_args(value: Any) -> str:
     """Render bounded Tool args with credential-like fields redacted."""
 
-    def scrub(item: Any) -> Any:
-        if isinstance(item, dict):
-            return {
-                str(key): (
-                    "[REDACTED]"
-                    if any(term in str(key).lower() for term in _DEBUG_SENSITIVE_KEYS)
-                    else scrub(child)
-                )
-                for key, child in item.items()
-            }
-        if isinstance(item, (list, tuple)):
-            return [scrub(child) for child in item[:10]]
-        if isinstance(item, str):
-            scrubbed = _DEBUG_SENSITIVE_QUERY.sub(r"\1=[REDACTED]", item)
-            return scrubbed[:300]
-        return item
-
     try:
-        return json.dumps(scrub(value), ensure_ascii=False, default=str)[:800]
+        return json.dumps(_scrub_debug(value), ensure_ascii=False, default=str)[:800]
     except (TypeError, ValueError):
         return "[unserializable]"
 
 
-def _tool_result_summary(update: Any) -> str:
-    messages = update.get("messages", []) if isinstance(update, dict) else []
-    summaries: list[str] = []
-    for message in messages:
-        name = str(getattr(message, "name", "tool"))
-        content = _visible_text(message)
-        try:
-            payload = json.loads(content)
-        except (TypeError, ValueError):
-            payload = None
-        if isinstance(payload, dict):
-            details = {
-                key: payload[key]
-                for key in ("status", "error_type", "image_count", "image_ocr_count", "file_path")
-                if key in payload
-            }
-            summaries.append(f"{name} {_safe_debug_args(details)}")
+def _preview_text(text: Any, limit: int) -> str:
+    """Collapse to one line and truncate with an ellipsis marker."""
+
+    single = " ".join(str(text).split())
+    if len(single) <= limit:
+        return single
+    return single[: max(limit - 1, 0)] + "…"
+
+
+# Args whose value is the action itself (a shell command) get a wider preview
+# so the log line answers "执行了什么命令"; everything else stays terse.
+_ARG_PRIMARY_KEYS = frozenset({"command"})
+_ARG_PREVIEW_DEFAULT = 60
+_ARG_PREVIEW_PRIMARY = 120
+_ARGS_PREVIEW_TOTAL = 240
+_RESULT_PREVIEW_LIMIT = 240
+_RESULT_DETAIL_KEYS = (
+    "status",
+    "error_type",
+    "exit_code",
+    "image_count",
+    "image_ocr_count",
+    "file_path",
+)
+
+
+def _args_preview(args: Any) -> str:
+    """Bounded, redacted ``key=value`` preview of a tool call's arguments."""
+
+    if not isinstance(args, dict) or not args:
+        return ""
+    parts: list[str] = []
+    for key, value in args.items():
+        limit = (
+            _ARG_PREVIEW_PRIMARY
+            if str(key) in _ARG_PRIMARY_KEYS
+            else _ARG_PREVIEW_DEFAULT
+        )
+        scrubbed = _scrub_debug(value)
+        if isinstance(scrubbed, str):
+            rendered = scrubbed
         else:
-            summaries.append(f"{name} ({len(content)} chars)")
-    return "; ".join(summaries)[:1_200]
+            try:
+                rendered = json.dumps(scrubbed, ensure_ascii=False, default=str)
+            except (TypeError, ValueError):
+                rendered = str(scrubbed)
+        parts.append(f"{key}={_preview_text(rendered, limit)}")
+    return ", ".join(parts)[:_ARGS_PREVIEW_TOTAL]
+
+
+def _result_summary_text(content: str) -> str:
+    """Bounded single-line result summary: JSON key fields or raw preview.
+
+    The total character count stays as a suffix so truncation is detectable.
+    """
+
+    try:
+        payload = json.loads(content)
+    except (TypeError, ValueError):
+        payload = None
+    if isinstance(payload, dict):
+        details = {key: payload[key] for key in _RESULT_DETAIL_KEYS if key in payload}
+        if details:
+            rendered = _preview_text(_safe_debug_args(details), _RESULT_PREVIEW_LIMIT)
+        else:
+            rendered = _preview_text(content, _RESULT_PREVIEW_LIMIT)
+        return f"{rendered} · {len(content)} chars"
+    return f"{_preview_text(content, _RESULT_PREVIEW_LIMIT)} · {len(content)} chars"
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingToolCall:
+    """One announced tool call awaiting its ToolMessage completion."""
+
+    name: str
+    args: dict[str, Any]
+
+
+def _collect_tool_completions(
+    update: Any,
+    pending_calls: dict[str, _PendingToolCall],
+) -> list[tuple[_PendingToolCall | None, Any]]:
+    """Match tools-node messages with announced calls by ``tool_call_id``.
+
+    Matched entries are popped from ``pending_calls`` so parallel calls never
+    borrow another call's arguments. Messages completing a call that was
+    announced in an earlier stream (e.g. after a HITL resume) degrade to a
+    name-only record instead of guessing args.
+    """
+
+    messages = update.get("messages", []) if isinstance(update, dict) else []
+    completions: list[tuple[_PendingToolCall | None, Any]] = []
+    for message in messages:
+        call_id = str(getattr(message, "tool_call_id", "") or "")
+        call = pending_calls.pop(call_id, None) if call_id else None
+        if call is None:
+            name = str(getattr(message, "name", "") or "")
+            if name:
+                call = _PendingToolCall(name, {})
+        completions.append((call, message))
+    return completions
+
+
+def _tool_result_summary(
+    completions: list[tuple[_PendingToolCall | None, Any]],
+) -> str:
+    """Render one self-describing log line per completed tool call.
+
+    Format: ``name(key=value, …) → result preview · N chars`` — the line must
+    answer "哪个工具 / 传了什么参数 / 返回了什么" on its own, bounded to
+    1,200 chars with credential-like values redacted.
+    """
+
+    entries: list[str] = []
+    for call, message in completions:
+        name = call.name if call else str(getattr(message, "name", "tool") or "tool")
+        args_preview = _args_preview(call.args) if call else ""
+        prefix = f"{name}({args_preview})" if args_preview else name
+        entries.append(f"{prefix} → {_result_summary_text(_visible_text(message))}")
+    return "; ".join(entries)[:1_200]
 
 
 def _conversation_entry(message: BaseMessage) -> ConversationEntry | None:
@@ -945,7 +1139,14 @@ def _merge_streamed_text(accumulated: str, chunk: str) -> tuple[str, str]:
     return accumulated + novel, novel
 
 
-def _tool_start_status(tool_name: str) -> str:
+def _tool_start_status(tool_name: str, args: Any = None) -> str:
+    if tool_name == "execute":
+        # Show the command up front: a 120s shell call must not sit behind a
+        # generic "正在执行" line with no clue of what is running.
+        command = args.get("command") if isinstance(args, dict) else None
+        if isinstance(command, str) and command.strip():
+            return f"正在执行命令：{_preview_text(_scrub_debug(command), 100)}"
+        return "正在执行本地命令…"
     if tool_name == "save_shared_url":
         return "正在读取并保存分享链接中的资料…"
     if tool_name == "extract_shared_url":
@@ -1068,6 +1269,7 @@ def build_job_agent(
     elif state_db.is_file():
         with SQLiteCandidateProfileStore(state_db) as profile_store:
             effective_context = profile_store.load_context()
+    use_default_tool_bundle = tools is None
     if tools is not None:
         registered_tools = list(tools)
     else:
@@ -1134,6 +1336,7 @@ def build_job_agent(
                 lambda: build_boss_chat_history_tool(settings),
             ),
             ("reply_boss_greeting", lambda: build_boss_chat_reply_tool(settings)),
+            ("create_opportunity_journey", lambda: build_create_journey_tool(state_db)),
             ("update_job_progress", lambda: build_update_job_progress_tool(state_db)),
             ("list_job_records", lambda: build_list_job_records_tool(state_db)),
             ("send_application_email", lambda: build_send_application_email_tool(settings)),
@@ -1214,7 +1417,52 @@ def build_job_agent(
             if (tool := _build_optional_tool(name, build)) is not None
         ]
         registered_tools.extend(build_skill_tools(skill_manager))
+        registered_tools.extend(build_journey_management_tools(state_db))
     effective_model = model or build_agent_model(settings)
+    platform_subagents: list[dict[str, Any]] = []
+    if use_default_tool_bundle:
+        boss_tools = [tool for tool in registered_tools if tool.name in _BOSS_TOOL_NAMES]
+        xhs_tools = [tool for tool in registered_tools if tool.name in _XHS_TOOL_NAMES]
+        all_registered_tools = list(registered_tools)
+        registered_tools = [
+            tool
+            for tool in registered_tools
+            if tool.name not in _BOSS_TOOL_NAMES and tool.name not in _XHS_TOOL_NAMES
+        ]
+        if boss_tools:
+            platform_subagents.append(
+                {
+                    "name": "boss_recruiting",
+                    "description": "处理 Boss 直聘岗位、HR 会话、打招呼、回复和简历发送。",
+                    "system_prompt": _BOSS_SUBAGENT_PROMPT,
+                    "model": effective_model,
+                    "tools": boss_tools,
+                    "interrupt_on": _interrupt_on_config(
+                        {
+                            name: description
+                            for name, description in _HITL_TOOLS.items()
+                            if name in _BOSS_TOOL_NAMES
+                        }
+                    ),
+                }
+            )
+        if xhs_tools:
+            platform_subagents.append(
+                {
+                    "name": "xhs_recruiting",
+                    "description": "处理小红书招人帖、JD/邮箱证据和邮件投递。",
+                    "system_prompt": _XHS_SUBAGENT_PROMPT,
+                    "model": effective_model,
+                    "tools": xhs_tools,
+                    "interrupt_on": _interrupt_on_config(
+                        {
+                            name: description
+                            for name, description in _HITL_TOOLS.items()
+                            if name in _XHS_TOOL_NAMES
+                        }
+                    ),
+                }
+            )
     # PS-1 分层组装：条件注入（段/段落跟随 registered_tools）+ 元数据层
     # （日期冻结于构造时刻）+ candidate_context 不可信块。单一组装点在
     # prompts/builder.py，本处只传事实源。
@@ -1234,9 +1482,20 @@ def build_job_agent(
         model_name=_model_display_name(effective_model),
         memory_markdown=memory_markdown,
     )
+    if platform_subagents:
+        system_prompt += """
+
+<platform_subagent_policy>
+Boss 与小红书/邮件渠道由原生 `task` Tool 调用专属 Subagent：`boss_recruiting` 或
+`xhs_recruiting`。当任务可能外发消息、简历或邮件时，一次只调用一个 task，必须等待该任务
+完成并返回回执后才能派发下一个。不要尝试调用未注册的渠道原始 Tool，也不要并行派发 task。
+</platform_subagent_policy>
+"""
     return JobAgent(
         model=effective_model,
         tools=registered_tools,
+        subagents=platform_subagents,
+        available_tools=all_registered_tools if use_default_tool_bundle else None,
         system_prompt=system_prompt,
         checkpoint_db=settings.jobagent_checkpoint_db,
         conversation_log=conversation_log,

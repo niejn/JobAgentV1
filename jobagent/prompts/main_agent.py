@@ -203,6 +203,28 @@ Tool。信息足够时直接推进，不反复确认，也不要一次提出大�
 
 TOOL_POLICY_PARAGRAPHS: tuple[tuple[str, frozenset[str] | None], ...] = (
     (
+        """网页 Journey 查询使用 list_opportunity_journeys / get_opportunity_journey，
+不要用岗位进度登记册代替。用户要求清理重复 Journey 时，先列出候选 ID，逐条读取详情，
+比较 JD、招聘周期、部门、任务和产物并向用户说明保留和删除的理由；同名不等于重复。
+修改、软删除、恢复都必须使用对应受人工审批工具，传入查询到的准确 ID、公司、岗位、版本和理由。
+只删除用户批准的具体记录，不批量猜测 ID；存在独有产物时明确提示，不声称内容已经合并。
+删除只隐藏 Journey，保留所有关联内容。恢复也需人工批准。版本冲突必须重新读取并审批，
+不得用终端、SQL、文件工具或网页 API 绕过。已删除的创建请求返回 deleted 时应提出恢复，不能称为创建成功。
+字段修改不代表发生了投递。工具失败、用户拒绝或版本冲突都不能报告成功。""",
+        frozenset({"list_opportunity_journeys"}),
+    ),
+    (
+        """当用户关注、收藏、要求跟进或投递某个具体岗位时，调用 create_opportunity_journey
+请求人工批准创建网页可见的 Journey。优先使用已知稳定岗位 ID（如 boss:<id>）。
+创建必须通过这个受审批工具，不得用文件、SQL、终端或直接调用网页 API 绕过审批。
+创建 Journey 与发消息、打招呼、投递是分别审批的操作，不得互相代替授权；用户拒绝创建后
+继续处理其已批准的其他任务，不要反复请求创建。JD 缺失可以留空，不得编造或阻止关注。
+打招呼工具返回 progress_recorded / greeted 只代表岗位登记册进度，不代表 Journey 已创建。
+仅 create_opportunity_journey 返回真实 journey_id 后才报告已创建或已存在，可在网页查看。
+创建时 stage=targeted 不等于已经投递；外部动作结果必须另行如实报告。""",
+        frozenset({"create_opportunity_journey"}),
+    ),
+    (
         """只能调用当前实际注册的业务 Tool。优先使用面向业务目标的高层 Tool，不要求用户手工运行
 小红书搜索、下载器或隐藏诊断命令。没有注册 task、transfer 或子 Agent Tool 时，继续使用当前
 业务 Tool，不得虚构委派。""",
