@@ -73,7 +73,7 @@ BossRecruitingAgent  XhsRecruitingAgent
 
 ```python
 class RecruitingActionProposal:
-    proposal_id: str
+    artifact_id: str                 # Journey Artifact ID，不另建 proposal_id
     journey_id: str
     channel: Literal["boss_chat", "email"]
     action: Literal["greet", "reply", "resume_delivery", "email_delivery"]
@@ -101,7 +101,7 @@ class RecruitingActionProposal:
 ```python
 class DeliveryReceipt:
     receipt_id: str
-    proposal_id: str
+    proposal_artifact_id: str
     channel: Literal["boss_chat", "email"]
     status: Literal["confirmed", "unverified", "failed", "blocked"]
     transport_receipt: dict
@@ -117,7 +117,7 @@ class DeliveryReceipt:
 delegate_boss_recruiting_task(journey_id, intent)
 delegate_xhs_recruiting_task(journey_id, intent)
 list_recruiting_action_proposals(journey_id)
-execute_recruiting_action(proposal_id)
+execute_recruiting_action(journey_id, proposal_artifact_id, expected_version)
 ```
 
 其中 `execute_recruiting_action` 是 HITL Tool。它的批准内容由已验证 Proposal 渲染，不能让
@@ -136,37 +136,42 @@ HR 回复资格预检、Boss 可投递简历列表。
 XHS Subagent 的私有工具集：招人帖搜索/保存、正文/图片/评论证据提取、JD 拆分、公开邮箱
 提取、邮件和定制简历草稿。它不持有 SMTP 发送 Tool。
 
-## 5.1 Proposal 传递与一致性保证
+## 5.1 Journey 下的 Proposal 传递与一致性保证
 
-`proposal_id` 不是模型之间传递可变 JSON 的捷径，而是不可变 Proposal Snapshot 的数据库引用。
-主 Agent、Subagent 和执行器都不信任彼此的自然语言复述；执行器永远重新读取 Snapshot。
+Proposal 不是与 Opportunity Journey 并列的对象，而是其 Application/Communication Workstream
+下的一个版本化 Journey Artifact。`proposal_artifact_id` 不是模型之间传递可变 JSON 的捷径，
+而是不可变 Artifact Snapshot 的数据库引用。主 Agent、Subagent 和执行器都不信任彼此的自然
+语言复述；执行器永远重新读取 Snapshot。
 
 ```text
-Subagent 写 Proposal v1（含 payload_hash）
-  -> 校验通过，状态 READY
-  -> 主 Agent 仅展示 summary + proposal_id
-  -> execute_recruiting_action(proposal_id)
-  -> Executor 原子领取 v1，校验 hash/状态/过期/幂等
-  -> HITL 批准绑定 proposal_id + payload_hash
+Subagent 为 Journey 写 Proposal Artifact v1（含 payload_hash）
+  -> Artifact/Handoff 校验通过，状态 ACCEPTED
+  -> 主 Agent 仅展示 Journey summary + proposal_artifact_id
+  -> execute_recruiting_action(journey_id, proposal_artifact_id, expected_version)
+  -> Executor 创建/领取该 Journey 的 ActionExecution Task Run，校验 hash/版本/过期/幂等
+  -> HITL 批准绑定 journey_id + proposal_artifact_id + payload_hash
   -> Executor 路由并执行，写 Receipt
 ```
 
-Proposal 状态机：
+Proposal Artifact 与执行 Task Run 分别拥有状态，避免把“准备完成”和“已外发”混为一谈：
 
 ```text
-DRAFT -> VALIDATING -> READY -> APPROVAL_PENDING -> EXECUTING -> CONFIRMED
-                                      |                |
-                                      -> REJECTED      -> UNVERIFIED | FAILED | BLOCKED
-READY / APPROVAL_PENDING -> EXPIRED
+Proposal Artifact: DRAFT -> VALIDATING -> ACCEPTED -> SUPERSEDED
+                                   -> REJECTED
+
+ActionExecution Task Run:
+PENDING -> WAITING_USER -> EXECUTING -> CONFIRMED | UNVERIFIED | FAILED | BLOCKED
+WAITING_USER -> REJECTED | EXPIRED
 ```
 
 必须满足以下不变量：
 
-1. `payload_hash` 覆盖渠道、动作、稳定收件人、岗位、简历版本/消息正文和幂等键；Proposal
-   一旦进入 `READY` 不可原地修改，修改只能创建新版本；
-2. HITL 恢复请求包含 `proposal_id + payload_hash`。如果审批前 Proposal 已过期、被替换或 hash
-   不一致，执行器拒绝执行并要求重新准备；
-3. `EXECUTING` 的领取使用 SQLite 事务和乐观版本/租约，同一 Proposal 只能有一个执行者；
+1. `payload_hash` 覆盖渠道、动作、稳定收件人、岗位、简历版本/消息正文和幂等键；Artifact
+   一旦 `ACCEPTED` 不可原地修改，修改只能创建新版本；
+2. HITL 恢复请求包含 `journey_id + proposal_artifact_id + payload_hash`。如果审批前 Artifact
+   已被 supersede、版本不一致或 hash 不一致，执行器拒绝执行并要求重新准备；
+3. `EXECUTING` 的领取使用 SQLite 事务和乐观版本/租约，同一 Journey ActionExecution 只能有
+   一个执行者；
 4. 幂等键在 Receipt 表中唯一。进程重启、重复点击批准或后台 worker 重试都先查询 Receipt；
 5. Adapter 临时凭据不在 Snapshot 中。执行器领取 Proposal 后，由目标渠道 Handler 重新读取
    当前会话/当前简历/当前邮箱配置；读取结果不再满足 Proposal 的稳定事实时，标为 `BLOCKED`；
@@ -215,7 +220,8 @@ Supervisor: “检查 XHS 招人线索”
 
 ### Phase A：先建契约和执行器（建议第一切片）
 
-1. 增加 Proposal/Receipt 表与 Artifact/Handoff 校验；
+1. 在现有 Artifact/Handoff/Task Run 模型中增加 Proposal schema 与 Receipt schema，不另建独立
+   Proposal 根表；
 2. 将现有 Boss `greet`、`reply`、`resume_delivery` 包装为 Proposal 生产与执行两步；
 3. 保持现有 Agent Tool 兼容，但在新路径中隐藏平台写工具；
 4. 测试 HITL 内容、幂等、回执、过期、风控冷却和失败恢复。

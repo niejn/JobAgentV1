@@ -118,8 +118,8 @@ _Avoid_: 主 JobAgent、平台 Adapter、后台 worker
 **Recruiting Action Proposal（招聘渠道行动提案）**:
 由 Platform Recruiting Subagent 为一个具体 Opportunity Journey 生成、经过事实与策略校验的
 待执行外部动作，包含渠道、收件人/会话、岗位、简历版本或消息草稿、幂等键与预期回执；它
-不是已发送记录。
-_Avoid_: Tool call、HITL 中断、Delivery Receipt
+是该 Journey 下的一个版本化 Journey Artifact，不是另一种工作根对象，也不是已发送记录。
+_Avoid_: Opportunity Journey、Tool call、HITL 中断、Delivery Receipt
 
 **Recruiting Action Executor（招聘渠道行动执行器）**:
 唯一可消费已批准 Recruiting Action Proposal、调用对应渠道 Adapter 并写入 Delivery Receipt
