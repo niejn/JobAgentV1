@@ -263,6 +263,7 @@ class BossGreetingsManager:
                             "job_id": job_id,
                             "company": target.company,
                             "title": target.title,
+                            "url": target.url,
                             "status": "submitted",
                             "reason": "already_contacted",
                             "greeting_sent": attempt.result.get("greeting_sent"),
@@ -279,6 +280,7 @@ class BossGreetingsManager:
                         "job_id": job_id,
                         "company": target.company,
                         "title": target.title,
+                        "url": target.url,
                         "status": "failed",
                         "reason": "job_transport_data_missing",
                         "greeting_sent": False,
@@ -329,6 +331,7 @@ class BossGreetingsManager:
                     "job_id": job_id,
                     "company": target.company,
                     "title": target.title,
+                    "url": target.url,
                     "status": status,
                     "reason": (
                         "direct_contact_confirmed"
@@ -337,6 +340,8 @@ class BossGreetingsManager:
                     ),
                     "greeting_sent": custom_sent,
                     "default_greeting_present": created.default_greeting is not None,
+                    "platform_error_code": getattr(created, "platform_code", None),
+                    "platform_error_message": getattr(created, "platform_message", ""),
                 }
                 conversation_id = None
                 if contact_registry is not None and created.target is not None:

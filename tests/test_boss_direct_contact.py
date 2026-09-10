@@ -35,6 +35,15 @@ class MissingTokenClient(FakeClient):
         return type("Response", (), {"status_code": 200, "json": lambda self: {"zpData": {}}})()
 
 
+class RejectedClient(FakeClient):
+    async def post(self, url: str, **kwargs: object) -> object:
+        return type(
+            "Response",
+            (),
+            {"status_code": 200, "json": lambda self: {"code": 1007, "message": "岗位不存在"}},
+        )()
+
+
 @pytest.mark.asyncio
 async def test_direct_contact_enters_and_confirms_new_conversation(tmp_path: Path) -> None:
     target = BossConversationTarget(42, 0, "enc", "叶先生", "际数科技", "标注工程师实习岗")
@@ -166,3 +175,29 @@ async def test_direct_contact_returns_page_token_missing_without_raising() -> No
 
     assert result.status == "failed"
     assert result.error_type == "page_token_missing"
+
+
+@pytest.mark.asyncio
+async def test_direct_contact_preserves_safe_friend_add_rejection_details() -> None:
+    adapter = BossDirectContactAdapter(
+        Settings(_env_file=None),
+        client=RejectedClient(),
+        cookies={"bst": "b", "wt2": "w", "__zp_stoken__": "s"},
+        page_token="page-token",
+    )
+    job = Job(
+        id="boss:job-5",
+        source=JobSource.BOSS,
+        title="Python",
+        company="际数科技",
+        location="上海",
+        url="https://www.zhipin.com/job_detail/job-5.html",
+        description="",
+        metadata={"security_id": "security", "lid": "lid"},
+    )
+
+    result = await adapter.enter(job)
+
+    assert result.error_type == "friend_add_rejected"
+    assert result.platform_code == 1007
+    assert result.platform_message == "岗位不存在"

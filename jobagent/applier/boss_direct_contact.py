@@ -27,6 +27,8 @@ class BossDirectContactResult:
     target: BossConversationTarget | None = None
     chat_status: int | None = None
     error_type: str | None = None
+    platform_code: int | None = None
+    platform_message: str = ""
     default_greeting: str | None = None
     show_greeting: bool = False
 
@@ -82,10 +84,19 @@ class BossDirectContactAdapter:
             cookies=cookies,
         )
         if response.status_code != 200:
-            return BossDirectContactResult("failed", error_type="friend_add_http_error")
+            return BossDirectContactResult(
+                "failed", error_type="friend_add_http_error", platform_code=response.status_code
+            )
         body = response.json()
-        if not isinstance(body, dict) or int(body.get("code") or 0) != 0:
-            return BossDirectContactResult("failed", error_type="friend_add_rejected")
+        code = body.get("code") if isinstance(body, dict) else None
+        if not isinstance(body, dict) or not isinstance(code, int) or code != 0:
+            message = str(body.get("message") or "")[:200] if isinstance(body, dict) else ""
+            return BossDirectContactResult(
+                "failed",
+                error_type="friend_add_rejected",
+                platform_code=code if isinstance(code, int) else None,
+                platform_message=message,
+            )
         data = body.get("zpData") or {}
         response_boss_id = (
             str(data.get("encBossId") or "") if isinstance(data, dict) else ""
