@@ -135,10 +135,6 @@ class Settings(BaseSettings):
         description="16-char SMTP authorization code (NOT the account password).",
     )
     jobagent_email_sender_name: str = Field(default="聂俊能")
-    jobagent_email_default_resume: Path = Field(
-        default=Path("data/journeys/resume/resume.pdf"),
-        description="Resume PDF attached to application emails by default.",
-    )
     # Xiaohongshu referral channel (see docs/referral-design.md)
     xhs_cookie: str | None = None
     xhs_cookie_header: str | None = Field(
@@ -257,6 +253,10 @@ class Settings(BaseSettings):
     jobagent_skills_dir: Path = Field(
         default=Path("data/skills"),
         description="User-installed documentation Skills directory.",
+    )
+    jobagent_resume_dir: Path = Field(
+        default=Path("data/resumes"),
+        description="Controlled directory for user-supplied PDF resume attachments.",
     )
     jobagent_model_capabilities_file: Path = Field(
         default=Path("data/model_capabilities.json"),

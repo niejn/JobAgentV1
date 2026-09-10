@@ -44,6 +44,7 @@ from jobagent.crawl import (
     SyncChannelLimiter,
     build_crawl_gate,
 )
+from jobagent.journey.xhs_email_drafts import XhsEmailDraftService, contact_evidence_line
 from jobagent.memory.conversation_log import ConversationLog
 from jobagent.middleware import (
     MessageCompatibilityMiddleware,
@@ -93,7 +94,6 @@ from jobagent.tools import (
     build_save_job_search_profile_tool,
     build_save_user_fact_tool,
     build_search_history_tool,
-    build_send_application_email_tool,
     build_send_boss_resume_after_hr_reply_tool,
     build_shared_url_extract_tool,
     build_shared_url_save_tool,
@@ -106,7 +106,18 @@ from jobagent.tools import (
 )
 from jobagent.tools.journey_creation import build_create_journey_tool
 from jobagent.tools.journey_management import build_journey_management_tools
+from jobagent.tools.resume_library import ResumeLibrary, build_resume_library_tools
 from jobagent.tools.xhs_note import XhsNoteSaver
+from jobagent.tools.xhs_recruitment import (
+    XhsPositionSelector,
+    XhsRecruitmentAnalyzer,
+    XhsRecruitmentFinder,
+    build_analyze_recruitment_note_tool,
+    build_find_recruitment_posts_tool,
+    build_prepare_recruitment_email_tool,
+    build_select_recruitment_position_tool,
+    build_send_recruitment_email_tool,
+)
 from jobagent.tools.xhs_search import XhsNoteSearcher
 
 # Backward-compatible import for callers that referenced the old constant.
@@ -142,7 +153,7 @@ _HITL_TOOLS: dict[str, str] = {
     "delete_opportunity_journey": "软删除指定 Journey，保留关联内容，可恢复（请核对具体 ID）",
     "restore_opportunity_journey": "恢复已软删除的指定 Journey，使其重新显示在网页列表",
     "install_skill": "从本地文件或互联网下载并安装一个 Agent Skill",
-    "send_application_email": "发送求职投递邮件（含简历附件）给外部 HR",
+    "send_recruitment_email": "发送已确认的 XHS 招聘邮件草稿及用户选定 PDF 简历",
     "boss_greet_jobs": "向 Boss 招聘方批量发送打招呼消息",
     "upload_boss_resume_pdf": "向 Boss 账户上传/替换附件简历",
     "send_boss_resume_after_hr_reply": "向已回复的 Boss HR 发送用户选定的简历",
@@ -172,8 +183,21 @@ _XHS_TOOL_NAMES = frozenset(
         "extract_shared_url",
         "browse_xhs_author_posts",
         "search_xhs_notes",
-        "send_application_email",
+        "analyze_recruitment_note",
+        "find_recruitment_posts",
+        "select_recruitment_position",
+        "prepare_recruitment_email",
+        "send_recruitment_email",
     }
+)
+# Read-only tools that stay on the root agent AND are mirrored into the XHS
+# subagent: resume listing verifies attachments against the exact
+# ResumeLibrary the email draft service reads from; skill access lets the
+# subagent re-read a mid-session updated skill or other skills (the injected
+# copy remains the guarantee — read_skill is a supplement, install_skill
+# stays root-only because it is an HITL write).
+_XHS_SHARED_TOOL_NAMES = frozenset(
+    {"list_available_resume_pdfs", "list_skills", "read_skill"}
 )
 _PLATFORM_WRITE_TOOL_NAMES = frozenset(
     {
@@ -181,7 +205,6 @@ _PLATFORM_WRITE_TOOL_NAMES = frozenset(
         "upload_boss_resume_pdf",
         "send_boss_resume_after_hr_reply",
         "reply_boss_greeting",
-        "send_application_email",
     }
 )
 _ROOT_HITL_TOOLS = {
@@ -197,9 +220,37 @@ _BOSS_SUBAGENT_PROMPT = """你是 Boss 直聘招聘渠道专家，只使用已�
 或 blocked，并关联用户提供的 Journey。"""
 
 _XHS_SUBAGENT_PROMPT = """你是小红书招聘线索与邮件投递渠道专家，只使用已提供的小红书和邮件工具。
-你不访问 Boss。先提取可追溯的岗位 JD 与公开投递邮箱；发送邮件前核对收件人、岗位、附件简历
-和来源。发送工具会自动暂停，等待用户在根 JobAgent 界面批准；绝不绕过批准。一次任务最多准备
-和执行一项外发动作，并如实返回邮件回执与 Journey 关联结果。"""
+你不访问 Boss，也不继承主对话历史：task 任务描述是你唯一的上下文来源。任务描述应携带帖子
+URL 或 note_id、已确认的公司/岗位、Journey ID 和附件简历文件名；已有本地分析时直接复用，
+缺少帖子内容时先用提供的 URL 调用 analyze_recruitment_note 读取，仍无法补齐则返回 blocked
+并列出缺失字段，绝不臆造。核实附件简历只能调用 list_available_resume_pdfs——它与邮件草稿
+服务读取同一个受控简历库，不得扫描本地目录、猜测路径或改用其他文件。用户已逐字确认邮件
+主题/正文时，调用 prepare_recruitment_email 必须原样传入 subject 和 body_text，一字不改；
+未确认时才使用默认模板。发送前核对收件人、岗位、附件简历和来源；发送工具会自动暂停，等待
+用户在根 JobAgent 界面批准；绝不绕过批准。一次任务最多准备和执行一项外发动作，并如实返回
+邮件回执与 Journey 关联结果。"""
+
+# Injected verbatim into the xhs_recruiting subagent's system prompt at
+# assembly time: the SKILL.md stays the single editable content source, but
+# delivery is deterministic (no read_skill round the model could skip).
+_XHS_RECRUITMENT_SKILL = "xhs-recruitment-email"
+
+
+def _load_subagent_skill(skill_manager: SkillManager, name: str) -> str | None:
+    """Load one SKILL.md body for prompt injection; missing/invalid degrades to None."""
+
+    try:
+        content = skill_manager.read_skill(name)
+    except (OSError, UnicodeError, ValueError):
+        logger.warning("subagent skill %s unavailable; falling back to base prompt", name)
+        return None
+    # Frontmatter is discovery metadata, not instructions; drop it before injection.
+    lines = content.splitlines()
+    if lines and lines[0].strip() == "---":
+        for idx in range(1, len(lines)):
+            if lines[idx].strip() == "---":
+                return "\n".join(lines[idx + 1 :]).lstrip("\n")
+    return content
 
 
 def _interrupt_on_config(tool_descriptions: dict[str, str]) -> dict[str, dict[str, Any]]:
@@ -363,6 +414,7 @@ class JobAgent:
 
         from langgraph.types import Command
 
+        deep_agent = await self._ensure_deep_agent()
         decisions = [approved] if isinstance(approved, bool) else list(approved)
         if not decisions:
             decisions = [False]
@@ -373,6 +425,12 @@ class JobAgent:
                 item["args"] = reject_reason
             decision_payloads.append(item)
         resume_input: Any = Command(resume={"decisions": decision_payloads})
+        logger.info(
+            "jobagent.hitl.resume_requested session=%s checkpoint=%s decisions=%s",
+            session_id,
+            await self._hitl_checkpoint_diagnostic(deep_agent, session_id),
+            json.dumps(decision_payloads, ensure_ascii=False, default=str),
+        )
         self._pending_hitl = None
         async for event in self._reply_with_log(
             self._stream_reply_events("", session_id=session_id, resume_input=resume_input),
@@ -410,6 +468,16 @@ class JobAgent:
             summary = await self._graceful_budget_exhaustion(deep_agent, session_id)
             if summary:
                 yield AgentStreamEvent("token", summary)
+            yield AgentStreamEvent("done", "")
+        except Exception as exc:
+            logger.exception("jobagent.agent_turn_failed", extra={"session_id": session_id})
+            reason = _safe_debug_args({"error": str(exc)})[:500]
+            yield AgentStreamEvent(
+                "token",
+                "本轮处理失败。"
+                f"错误类别：{type(exc).__name__}；原因：{reason}。"
+                "详细结构已写入 JobAgent 日志。",
+            )
             yield AgentStreamEvent("done", "")
         finally:
             reset_trace(trace_token)
@@ -498,6 +566,12 @@ class JobAgent:
                             update if isinstance(update, tuple) else (update,)
                         ):
                             value = getattr(interrupt_item, "value", interrupt_item)
+                            logger.info(
+                                "jobagent.hitl.interrupt session=%s checkpoint=%s payload=%s",
+                                session_id,
+                                await self._hitl_checkpoint_diagnostic(deep_agent, session_id),
+                                json.dumps(value, ensure_ascii=False, default=str),
+                            )
                             self._pending_hitl = value
                             yield AgentStreamEvent(
                                 "interrupt",
@@ -638,7 +712,8 @@ class JobAgent:
                                 f"{time.perf_counter() - request_started:.1f}s）",
                             )
                     emitted_visible_token = True
-                    yield AgentStreamEvent("token", novel)
+                yield AgentStreamEvent("token", novel)
+
             elif visible and isinstance(streamed_message, AIMessage):
                 complete_message_fallback = visible
         if not emitted_visible_token and complete_message_fallback:
@@ -675,6 +750,32 @@ class JobAgent:
                 "jobagent.debug_trace.complete",
                 extra={"elapsed_seconds": round(time.perf_counter() - request_started, 3)},
             )
+
+    async def _hitl_checkpoint_diagnostic(self, deep_agent: Any, session_id: str) -> dict[str, Any]:
+        """Read checkpoint identity and pending task metadata for HITL diagnosis."""
+
+        try:
+            state = await deep_agent.aget_state({"configurable": {"thread_id": session_id}})
+            config = getattr(state, "config", {}) or {}
+            configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+            return {
+                "thread_id": session_id,
+                "checkpoint_id": configurable.get("checkpoint_id"),
+                "checkpoint_ns": configurable.get("checkpoint_ns"),
+                "tasks": [
+                    {
+                        "id": getattr(task, "id", None),
+                        "name": getattr(task, "name", None),
+                        "interrupts": [
+                            getattr(item, "value", item)
+                            for item in (getattr(task, "interrupts", ()) or ())
+                        ],
+                    }
+                    for task in (getattr(state, "tasks", ()) or ())
+                ],
+            }
+        except Exception as exc:
+            return {"thread_id": session_id, "diagnostic_error": type(exc).__name__}
 
     async def _graceful_budget_exhaustion(self, deep_agent: Any, session_id: str) -> str:
         """预算耗尽后的收尾：无工具再调一次模型，总结已有进展。
@@ -882,11 +983,22 @@ class JobAgent:
                 # compiled as a LangGraph CompiledStateGraph. Named 'deep_agent'
                 # because orchestration lives in the model (harness mode),
                 # not in hand-written graph nodes.
+                subagents = []
+                for configured in self._subagents:
+                    spec = dict(configured)
+                    spec["middleware"] = [
+                        MessageCompatibilityMiddleware(
+                            self._model_capability_registry,
+                            self._model_capability_key,
+                        ),
+                        *list(spec.get("middleware", [])),
+                    ]
+                    subagents.append(spec)
                 deep_agent = create_deep_agent(
                     model=self._model,
                     tools=list(self._root_tools),
                     system_prompt=self._system_prompt,
-                    subagents=cast(Any, list(self._subagents) or None),
+                    subagents=cast(Any, subagents or None),
                     middleware=[
                         filesystem_middleware,
                         MessageCompatibilityMiddleware(
@@ -1106,12 +1218,52 @@ def _tool_result_summary(
     """
 
     entries: list[str] = []
+    has_full_review = False
     for call, message in completions:
         name = call.name if call else str(getattr(message, "name", "tool") or "tool")
+        if name == "prepare_recruitment_email":
+            review = _recruitment_draft_review(_visible_text(message))
+            if review is not None:
+                entries.append(review)
+                has_full_review = True
+                continue
         args_preview = _args_preview(call.args) if call else ""
         prefix = f"{name}({args_preview})" if args_preview else name
         entries.append(f"{prefix} → {_result_summary_text(_visible_text(message))}")
-    return "; ".join(entries)[:1_200]
+    rendered = "; ".join(entries)
+    return rendered if has_full_review else rendered[:1_200]
+
+
+def _recruitment_draft_review(content: str) -> str | None:
+    """Render a complete XHS email draft for user review; never truncate it."""
+
+    try:
+        draft = json.loads(content)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(draft, dict) or draft.get("status") != "drafted":
+        return None
+    raw_resume = draft.get("resume")
+    resume: dict[str, object] = raw_resume if isinstance(raw_resume, dict) else {}
+    attachment = (
+        f"{resume.get('file_name', '')} | {resume.get('size_bytes', '')} bytes | "
+        f"SHA-256: {resume.get('sha256', '')}"
+    )
+    return "\n".join(
+        (
+            "XHS 邮件草稿（请完整审阅，尚未发送）",
+            f"来源帖子：{draft.get('note_id', '')}",
+            f"帖子链接：{draft.get('source_url', '')}",
+            f"公司 / 岗位：{draft.get('company', '')} / {draft.get('role', '')}",
+            contact_evidence_line(draft),
+            f"收件人：{draft.get('to', '')}",
+            f"主题：{draft.get('subject', '')}",
+            "正文：",
+            str(draft.get("body_text", "")),
+            "附件：",
+            attachment,
+        )
+    )
 
 
 def _conversation_entry(message: BaseMessage) -> ConversationEntry | None:
@@ -1278,21 +1430,31 @@ def build_job_agent(
         # 按请求类别的 jitter。构造点是唯一组装处（build_crawl_gate）。
         crawl_gate = build_crawl_gate(settings)
         backend_factory = _xhs_backend_factory_for(settings, crawl_gate)
+        xhs_note_saver = XhsNoteSaver(settings, backend_factory=backend_factory)
         shared_url_saver = SharedUrlSaver(
             settings,
-            xhs_saver=XhsNoteSaver(settings, backend_factory=backend_factory),
+            xhs_saver=xhs_note_saver,
         )
+        xhs_recruitment_analyzer = XhsRecruitmentAnalyzer(xhs_note_saver, state_db)
         boss_resume_delivery = BossResumeDelivery(settings, crawl_gate=crawl_gate)
         # Job discovery reads the latest persisted context at tool-call time
         # so it refuses to crawl until the Job Search Profile and the resume /
         # confirmed background have been collected and saved by the Agent.
         context_provider = SQLiteCandidateContextProvider(state_db)
+        xhs_recruitment_finder = XhsRecruitmentFinder(
+            context_provider.load,
+            state_db,
+            XhsNoteSearcher(settings, backend_factory=backend_factory),
+        )
+        xhs_position_selector = XhsPositionSelector(state_db)
         profile_manager = CandidateProfileManager(
             workspace_root=settings.jobagent_workspace_root,
             database=settings.jobagent_state_db,
         )
         artifacts_store = LocalOpportunityArtifacts(settings.jobagent_opportunity_dir)
         skill_manager = SkillManager(settings.jobagent_skills_dir)
+        resume_library = ResumeLibrary(settings.jobagent_resume_dir)
+        xhs_email_drafts = XhsEmailDraftService(state_db, resume_library, settings)
         # 声明式能力表：下面 (名字 -> 构造器) 对就是 agent 的能力集。
         # 统一经 _build_optional_tool 装配（Hermes 优雅降级模式：可选依赖
         # 缺失只降级该工具并记 warning，不炸整体构建；见其 docstring）。
@@ -1339,7 +1501,6 @@ def build_job_agent(
             ("create_opportunity_journey", lambda: build_create_journey_tool(state_db)),
             ("update_job_progress", lambda: build_update_job_progress_tool(state_db)),
             ("list_job_records", lambda: build_list_job_records_tool(state_db)),
-            ("send_application_email", lambda: build_send_application_email_tool(settings)),
             ("list_recent_emails", lambda: build_list_recent_emails_tool(settings)),
             ("read_email", lambda: build_read_email_tool(settings)),
             ("get_job_progress", lambda: build_get_job_progress_tool(state_db)),
@@ -1399,6 +1560,26 @@ def build_job_agent(
                 ),
             ),
             (
+                "analyze_recruitment_note",
+                lambda: build_analyze_recruitment_note_tool(xhs_recruitment_analyzer),
+            ),
+            (
+                "find_recruitment_posts",
+                lambda: build_find_recruitment_posts_tool(xhs_recruitment_finder),
+            ),
+            (
+                "select_recruitment_position",
+                lambda: build_select_recruitment_position_tool(xhs_position_selector),
+            ),
+            (
+                "prepare_recruitment_email",
+                lambda: build_prepare_recruitment_email_tool(xhs_email_drafts),
+            ),
+            (
+                "send_recruitment_email",
+                lambda: build_send_recruitment_email_tool(xhs_email_drafts),
+            ),
+            (
                 "read_job_description",
                 lambda: build_job_description_tool(
                     JobDescriptionReader(settings.jobagent_workspace_root)
@@ -1417,12 +1598,17 @@ def build_job_agent(
             if (tool := _build_optional_tool(name, build)) is not None
         ]
         registered_tools.extend(build_skill_tools(skill_manager))
+        registered_tools.extend(build_resume_library_tools(resume_library))
         registered_tools.extend(build_journey_management_tools(state_db))
     effective_model = model or build_agent_model(settings)
     platform_subagents: list[dict[str, Any]] = []
     if use_default_tool_bundle:
         boss_tools = [tool for tool in registered_tools if tool.name in _BOSS_TOOL_NAMES]
-        xhs_tools = [tool for tool in registered_tools if tool.name in _XHS_TOOL_NAMES]
+        xhs_tools = [
+            tool
+            for tool in registered_tools
+            if tool.name in _XHS_TOOL_NAMES or tool.name in _XHS_SHARED_TOOL_NAMES
+        ]
         all_registered_tools = list(registered_tools)
         registered_tools = [
             tool
@@ -1447,20 +1633,35 @@ def build_job_agent(
                 }
             )
         if xhs_tools:
+            xhs_interrupts = _interrupt_on_config(
+                {
+                    name: description
+                    for name, description in _HITL_TOOLS.items()
+                    if name in _XHS_TOOL_NAMES
+                }
+            )
+            xhs_interrupts["send_recruitment_email"]["description"] = (
+                lambda call, _state, _runtime: xhs_email_drafts.approval_preview(
+                    str(call.get("args", {}).get("draft_id", ""))
+                )
+            )
+            xhs_skill = _load_subagent_skill(skill_manager, _XHS_RECRUITMENT_SKILL)
+            xhs_system_prompt = _XHS_SUBAGENT_PROMPT + (
+                "\n\n<xhs_recruitment_skill>\n"
+                f"{xhs_skill}\n</xhs_recruitment_skill>\n"
+                "（以上副本来自装配时刻；若会话中途安装了更新版本或需要其他 skill，"
+                "可调用 read_skill 读取最新内容。）"
+                if xhs_skill
+                else ""
+            )
             platform_subagents.append(
                 {
                     "name": "xhs_recruiting",
                     "description": "处理小红书招人帖、JD/邮箱证据和邮件投递。",
-                    "system_prompt": _XHS_SUBAGENT_PROMPT,
+                    "system_prompt": xhs_system_prompt,
                     "model": effective_model,
                     "tools": xhs_tools,
-                    "interrupt_on": _interrupt_on_config(
-                        {
-                            name: description
-                            for name, description in _HITL_TOOLS.items()
-                            if name in _XHS_TOOL_NAMES
-                        }
-                    ),
+                    "interrupt_on": xhs_interrupts,
                 }
             )
     # PS-1 分层组装：条件注入（段/段落跟随 registered_tools）+ 元数据层
@@ -1487,9 +1688,24 @@ def build_job_agent(
 
 <platform_subagent_policy>
 Boss 与小红书/邮件渠道由原生 `task` Tool 调用专属 Subagent：`boss_recruiting` 或
-`xhs_recruiting`。当任务可能外发消息、简历或邮件时，一次只调用一个 task，必须等待该任务
-完成并返回回执后才能派发下一个。不要尝试调用未注册的渠道原始 Tool，也不要并行派发 task。
+`xhs_recruiting`。Subagent 不继承本对话历史，task 的任务描述必须自包含：写明帖子 URL 或
+note_id、已确认的公司/岗位、Journey ID、附件简历文件名（先用 `list_available_resume_pdfs`
+核对），以及用户已逐字确认的邮件主题/正文；有本地分析结论时一并附上让子代理复用。当任务
+可能外发消息、简历或邮件时，一次只调用一个 task，必须等待该任务完成并返回回执后才能派发
+下一个。不要尝试调用未注册的渠道原始 Tool，也不要并行派发 task。
 </platform_subagent_policy>
+"""
+    if {"register_resume_pdf", "list_available_resume_pdfs"} <= {
+        tool.name for tool in registered_tools
+    }:
+        system_prompt += """
+
+<existing_pdf_resume_policy>
+当用户提供已有 PDF 简历、询问可用简历、选择邮件附件或要求投递已有简历时，只能调用
+`register_resume_pdf` 或 `list_available_resume_pdfs`。第一阶段不需要、也不得尝试解析 PDF
+正文；不得调用 `execute`、`read_file`、Shell、目录扫描或外部 PDF 库寻找/读取简历。用户给出
+明确本地路径时导入；用户未给路径时列出受控 `data/resumes` 库中的文件名、大小和 SHA-256。
+</existing_pdf_resume_policy>
 """
     return JobAgent(
         model=effective_model,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import subprocess
 from collections.abc import Callable
 from typing import Any
@@ -19,6 +20,7 @@ from jobagent.interview.snapshot import (
     SnapshotMaterializer,
     load_snapshot_bundle,
 )
+from jobagent.journey.recruitment_notes import CommentSnapshot
 from jobagent.scraper.xhs_backend import (
     DownloadedXhsNote,
     SpiderXhsBackend,
@@ -28,6 +30,8 @@ from jobagent.scraper.xhs_backend import (
     XhsFetchedNote,
     strip_xsec_token,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class XhsNoteSaveRequest(BaseModel):
@@ -81,6 +85,7 @@ class XhsContentReader:
     async def materialize(self, downloaded: DownloadedXhsNote) -> dict[str, Any]:
         manifest = downloaded.directory / "snapshot.json"
         try:
+            logger.info("xhs.progress [4/4] OCR 图片，共 %s 张", len(downloaded.images))
             bundle = (
                 load_snapshot_bundle(manifest)
                 if manifest.is_file()
@@ -172,6 +177,8 @@ class XhsNoteSaver:
         try:
             async with self._backend_factory(self._settings) as backend:
                 downloaded: DownloadedXhsNote = await backend.download_note(request.url)
+                fetch_comments = getattr(backend, "fetch_note_comments", None)
+                raw_comments = await fetch_comments(request.url) if callable(fetch_comments) else []
         except XhsAuthenticationError:
             return {
                 "status": "blocked",
@@ -202,6 +209,18 @@ class XhsNoteSaver:
             }
 
         extracted = await self._content_reader.materialize(downloaded)
+        logger.info("xhs.progress 评论读取完成，开始过滤帖主评论")
+        author_id = downloaded.note.author_id
+        comments = tuple(
+            CommentSnapshot(
+                comment_id=str(item.get("id") or ""),
+                author_id=str((item.get("user_info") or {}).get("user_id") or ""),
+                author_name=str((item.get("user_info") or {}).get("nickname") or ""),
+                text=str(item.get("content") or ""),
+                is_note_author=str((item.get("user_info") or {}).get("user_id") or "") == author_id,
+            )
+            for item in raw_comments
+        )
         return {
             **extracted,
             "status": extracted["status"],
@@ -212,6 +231,7 @@ class XhsNoteSaver:
             "image_files": [path.name for path in downloaded.images],
             "raw_response_file": downloaded.raw_response_path.name,
             "directory_name": downloaded.directory.name,
+            "author_comments": comments,
         }
 
     async def extract_saved(self, request: XhsNoteSaveRequest) -> dict[str, Any]:

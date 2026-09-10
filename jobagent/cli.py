@@ -376,6 +376,9 @@ async def _chat(
     from jobagent.profile import SQLiteCandidateContextProvider, load_candidate_context
 
     settings = get_settings()
+    log_path = settings.jobagent_log_file.expanduser().resolve()
+    setup_logging(console_level="INFO" if settings.jobagent_debug_trace else None)
+    click.echo(f"JobAgent · 日志文件：{log_path}")
 
     context = load_candidate_context(startup_config) if startup_config else None
     agent = build_job_agent(settings, candidate_context=context, platform_hint="cli")
@@ -623,7 +626,6 @@ async def _render_streaming_reply(
     transcript = TypewriterTranscript(stream=click.get_text_stream("stdout"))
     answer_line_open = False
     emitted_answer = False
-    approved_hitl_requests: set[str] = set()
     reply_stream = agent.stream_reply(message, session_id=session_id)
     try:
         async for event in reply_stream:
@@ -636,7 +638,6 @@ async def _render_streaming_reply(
                     text,
                     session_id,
                     interactive=interactive,
-                    approved_requests=approved_hitl_requests,
                 )
                 return
             if kind == "status" and text:
@@ -675,7 +676,6 @@ async def _handle_hitl_interrupt(
     session_id: str,
     *,
     interactive: bool,
-    approved_requests: set[str] | None = None,
 ) -> None:
     """Show the paused tool call and resume with the human's decision."""
 
@@ -684,8 +684,6 @@ async def _handle_hitl_interrupt(
     except json.JSONDecodeError:
         request = {"actions": [{"name": "unknown", "args": {}}]}
     actions = _hitl_actions(request)
-    approved_requests = approved_requests if approved_requests is not None else set()
-    request_key = _hitl_request_key(actions)
     click.echo()
     if not interactive:
         click.echo(_format_hitl_review(request))
@@ -710,29 +708,23 @@ async def _handle_hitl_interrupt(
         click.echo()
         return
     decisions: list[bool] = []
-    if request_key in approved_requests:
-        click.echo("检测到本轮已批准过的相同操作，自动拒绝重复执行。")
-        decisions = [False] * max(len(actions), 1)
-    else:
-        try:
-            for index, action in enumerate(actions, start=1):
-                click.echo()
-                click.echo(_format_hitl_action(action, index))
-                decisions.append(
-                    click.confirm(
-                        click.style(
-                            "确认批准上面这项操作？",
-                            fg="yellow",
-                        ),
-                        default=False,
-                    )
+    try:
+        for index, action in enumerate(actions, start=1):
+            click.echo()
+            click.echo(_format_hitl_action(action, index))
+            decisions.append(
+                click.confirm(
+                    click.style(
+                        "确认批准上面这项操作？",
+                        fg="yellow",
+                    ),
+                    default=False,
                 )
-        except (EOFError, KeyboardInterrupt):
-            decisions.extend([False] * (len(actions) - len(decisions)))
+            )
+    except (EOFError, KeyboardInterrupt):
+        decisions.extend([False] * (len(actions) - len(decisions)))
     if not decisions:
         decisions = [False]
-    if actions and all(decisions) and request_key:
-        approved_requests.add(request_key)
     resume_decision: bool | Sequence[bool] = (
         decisions[0] if len(decisions) == 1 else decisions
     )
@@ -753,7 +745,6 @@ async def _handle_hitl_interrupt(
                     text,
                     session_id,
                     interactive=interactive,
-                    approved_requests=approved_requests,
                 )
                 return
     finally:
@@ -779,12 +770,6 @@ def _hitl_actions(request: dict[str, object]) -> list[dict[str, object]]:
 
     raw = request.get("action_requests") or request.get("actions") or []
     return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
-
-
-def _hitl_request_key(actions: list[dict[str, object]]) -> str:
-    """Build a stable key for duplicate HITL requests in one chat turn."""
-
-    return json.dumps(actions, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def _redact_hitl_value(value: object) -> object:

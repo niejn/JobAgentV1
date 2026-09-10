@@ -30,7 +30,7 @@ class SendApplicationEmailRequest(BaseModel):
     body_text: str = Field(default="", description="纯文本正文（缺省自动从 HTML 降级）")
     attachment_path: str = Field(
         default="",
-        description="简历 PDF 路径；空则用默认简历，传 none 字符串则不附简历",
+        description="简历 PDF 路径；留空或传 none 字符串则不附简历（不存在隐式默认简历）",
     )
     company: str = Field(default="", description="公司名（用于登记册入册）")
     title: str = Field(default="", description="岗位名（用于登记册入册）")
@@ -96,10 +96,6 @@ def build_send_application_email_tool(settings: Settings) -> BaseTool:
         attachment: Path | None = None
         if request.attachment_path.strip().lower() not in {"", "none"}:
             attachment = Path(request.attachment_path.strip())
-        else:
-            default = settings.jobagent_email_default_resume.expanduser()
-            if default.is_file():
-                attachment = default
 
         def _send() -> dict[str, Any]:
             return sender.send(

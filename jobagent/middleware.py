@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 from collections.abc import Awaitable, Callable, Sequence
@@ -15,6 +16,10 @@ from langchain.agents.middleware.types import ModelResponse
 from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, RemoveMessage, ToolMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
+
+from jobagent.observability import _SENSITIVE_KEY, _SENSITIVE_QUERY
+
+logger = logging.getLogger(__name__)
 
 
 class ModelCapabilityRegistry:
@@ -196,6 +201,11 @@ class MessageCompatibilityMiddleware(AgentMiddleware):
         except Exception as exc:
             if not self._is_unsupported_content_error(exc):
                 raise
+            logger.warning(
+                "jobagent.model_content_rejected model=%s messages=%s",
+                self._model_key,
+                json.dumps(_content_shape(messages), ensure_ascii=False, default=str),
+            )
             self._registry.mark_text_only(self._model_key, reason=str(exc))
             messages = request.state["messages"]
             prepared = sanitize_messages(messages, remove_images=True)
@@ -221,6 +231,11 @@ class MessageCompatibilityMiddleware(AgentMiddleware):
         except Exception as exc:
             if not self._is_unsupported_content_error(exc):
                 raise
+            logger.warning(
+                "jobagent.model_content_rejected model=%s messages=%s",
+                self._model_key,
+                json.dumps(_content_shape(messages), ensure_ascii=False, default=str),
+            )
             self._registry.mark_text_only(self._model_key, reason=str(exc))
             messages = request.state["messages"]
             prepared = sanitize_messages(messages, remove_images=True)
@@ -229,16 +244,40 @@ class MessageCompatibilityMiddleware(AgentMiddleware):
             return await handler(request.override(messages=prepared))
 
 
-class SingleSubagentTaskMiddleware(AgentMiddleware):
-    """Permit at most one native DeepAgents ``task`` call per model response.
+def _content_shape(messages: Sequence[AnyMessage]) -> list[dict[str, object]]:
+    """Detailed provider-payload diagnostic with credential values redacted."""
 
-    A subagent may pause at a user-approval interrupt.  Dispatching several
-    tasks in the same ToolNode would make multiple external actions pending at
-    once and complicate a resumed graph.  This middleware makes that unsafe
-    shape deterministic: it preserves the first task and returns error tool
-    results for subsequent task calls, so the model can dispatch them only
-    after the first task has completed.
-    """
+    def redact(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                str(key): "[REDACTED]" if _SENSITIVE_KEY.search(str(key)) else redact(child)
+                for key, child in value.items()
+            }
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        if isinstance(value, str):
+            return _SENSITIVE_QUERY.sub(r"\1=[REDACTED]", value)
+        return value
+
+    output: list[dict[str, object]] = []
+    for message in messages:
+        output.append(
+            redact(
+                {
+                    "message_type": message.type,
+                    "message_class": type(message).__name__,
+                    "content": getattr(message, "content", None),
+                    "tool_calls": getattr(message, "tool_calls", []),
+                    "tool_call_id": getattr(message, "tool_call_id", None),
+                    "response_metadata": getattr(message, "response_metadata", {}),
+                }
+            )
+        )
+    return output
+
+
+class SingleSubagentTaskMiddleware(AgentMiddleware):
+    """Permit at most one native DeepAgents ``task`` call per model response."""
 
     name = "SingleSubagentTaskMiddleware"
     _REJECTION = (

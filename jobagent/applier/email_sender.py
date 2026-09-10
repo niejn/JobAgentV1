@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import smtplib
 from email.message import EmailMessage
-from email.utils import formataddr
+from email.utils import formataddr, make_msgid
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +68,8 @@ class EmailSender:
         )
         message["To"] = to
         message["Subject"] = subject
+        message_id = make_msgid()
+        message["Message-ID"] = message_id
         message.set_content(body_text or _html_to_text(body_html))
         message.add_alternative(body_html, subtype="html")
 
@@ -116,15 +118,17 @@ class EmailSender:
         except OSError as exc:
             logger.warning("smtp network error: %s", exc)
             return {
-                "status": "failed",
-                "error_type": "network_error",
-                "message": f"网络错误：{exc}",
+                "status": "unverified",
+                "error_type": "network_uncertain",
+                "message": f"网络状态不确定：{exc}",
+                "message_id": message_id,
             }
         return {
             "status": "ok",
             "to": to,
             "subject": subject,
             "attachment": str(attachment) if attachment else "",
+            "message_id": message_id,
         }
 
 

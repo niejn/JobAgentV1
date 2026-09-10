@@ -56,6 +56,23 @@ def test_install_rejects_insecure_url_and_invalid_name(tmp_path: Path) -> None:
         manager.install(str(source))
 
 
+def test_load_subagent_skill_returns_content_or_degrades(tmp_path: Path) -> None:
+    from jobagent.agent import _load_subagent_skill
+
+    builtins = tmp_path / "builtins"
+    (builtins / "xhs-recruitment-email").mkdir(parents=True)
+    (builtins / "xhs-recruitment-email" / "SKILL.md").write_text(
+        SKILL.replace("interview-helper", "xhs-recruitment-email"), encoding="utf-8"
+    )
+    manager = SkillManager(tmp_path / "installed", built_in_dir=builtins)
+
+    content = _load_subagent_skill(manager, "xhs-recruitment-email")
+    assert content is not None
+    assert "# Interview helper" in content
+    assert "---" not in content.splitlines()[0]
+    assert _load_subagent_skill(manager, "missing-skill") is None
+
+
 @pytest.mark.asyncio
 async def test_skill_tools_expose_discovery_read_and_install(tmp_path: Path) -> None:
     source = tmp_path / "SKILL.md"

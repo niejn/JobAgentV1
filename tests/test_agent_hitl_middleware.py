@@ -22,7 +22,7 @@ def test_hitl_tools_cover_exactly_the_external_writes() -> None:
         "delete_opportunity_journey",
         "restore_opportunity_journey",
         "install_skill",
-        "send_application_email",
+        "send_recruitment_email",
         "boss_greet_jobs",
         "upload_boss_resume_pdf",
         "send_boss_resume_after_hr_reply",

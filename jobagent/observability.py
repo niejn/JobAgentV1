@@ -146,7 +146,12 @@ def _file_format(record: Any) -> str:
         suffix = json.dumps(extras, ensure_ascii=False, default=str)
         # The returned template is formatted with the record, so literal
         # braces from the JSON payload must be escaped.
-        escaped = suffix.replace("{", "{{").replace("}", "}}")
+        escaped = (
+            suffix.replace("{", "{{")
+            .replace("}", "}}")
+            .replace("<", "\\<")
+            .replace(">", "\\>")
+        )
         return _FILE_FORMAT + "  " + escaped + "\n"
     return _FILE_FORMAT + "\n"
 

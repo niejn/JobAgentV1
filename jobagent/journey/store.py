@@ -244,6 +244,30 @@ class SQLiteJourneyStore:
         row = self._one("SELECT * FROM journeys WHERE id = ?", (journey_id,))
         return _journey_from_row(row)
 
+    def get_by_creation_key(self, creation_key: str) -> OpportunityJourney | None:
+        row = self._connection.execute(
+            "SELECT journey_id FROM journey_creation_keys WHERE creation_key = ?",
+            (creation_key,),
+        ).fetchone()
+        return self.get_journey(str(row["journey_id"])) if row else None
+
+    def mark_applied_by_creation_key(self, creation_key: str, *, reason: str) -> OpportunityJourney | None:
+        journey = self.get_by_creation_key(creation_key)
+        if journey is None or journey.stage == "applied":
+            return journey
+        now = _format_time(_now())
+        fields = {"stage": "applied", "version": journey.version + 1, "updated_at": now}
+        with self._connection:
+            self._connection.execute(
+                "UPDATE journeys SET stage = ?, version = ?, updated_at = ? WHERE id = ?",
+                ("applied", journey.version + 1, now, journey.id),
+            )
+            self._connection.execute(
+                "INSERT INTO journey_change_events (journey_id, action, reason, before_json, after_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (journey.id, "application_submitted", reason, _json({"stage": journey.stage}), _json(fields), now),
+            )
+        return self.get_journey(journey.id)
+
     def list_journeys(self, *, limit: int = 100, offset: int = 0,
                       include_deleted: bool = False, company: str = "") -> tuple[OpportunityJourney, ...]:
         """Return the most recently updated opportunity journeys."""

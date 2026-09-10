@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Protocol, Self, cast
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 from jobagent.auth.cookie_manager import get_cookies
 from jobagent.config import Settings
@@ -105,6 +105,8 @@ class XhsBackend(Protocol):
         fetched_note: XhsFetchedNote | None = None,
     ) -> DownloadedXhsNote:
         """Fetch and download one note."""
+
+    async def fetch_note_comments(self, url: str) -> list[dict[str, Any]]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -403,16 +405,19 @@ class SpiderXhsBackend:
         """Fetch a note and let Spider_XHS save its body and all images."""
 
         self._ensure_started()
+        logger.info("xhs.progress [1/4] 获取帖子详情")
         note = fetched_note or await self.fetch_note(url)
         destination = (output_dir or Path(self._settings.xhs_download_dir)).resolve()
         destination.mkdir(parents=True, exist_ok=True)
         async with self._request_lock:
+            logger.info("xhs.progress [2/4] 保存帖子元数据")
             directory = await self._run_sync(
                 self._download_note_metadata_sync,
                 note,
                 destination,
             )
         for index, image_url in enumerate(note.image_urls):
+            logger.info("xhs.progress [3/4] 下载图片 %s/%s", index + 1, len(note.image_urls))
             await self._media_limiter.acquire()
             async with self._request_lock:
                 await self._run_sync(
@@ -422,6 +427,26 @@ class SpiderXhsBackend:
                     image_url,
                 )
         return self._build_downloaded_note(note, directory)
+
+    async def fetch_note_comments(self, url: str) -> list[dict[str, Any]]:
+        """Read Spider_XHS's first comment page; never unboundedly crawl comments."""
+
+        self._ensure_started()
+        async with self._request_lock:
+            result = await self._run_sync(self._fetch_note_comments_sync, url)
+            return cast(list[dict[str, Any]], result)
+
+    def _fetch_note_comments_sync(self, url: str) -> list[dict[str, Any]]:
+        api = cast(Any, self._api)
+        parsed = urlsplit(url)
+        note_id = parsed.path.rstrip("/").split("/")[-1]
+        token = (parse_qs(parsed.query).get("xsec_token") or [""])[0]
+        success, message, response = api.get_note_out_comment(note_id, "", token)
+        if not success:
+            raise SpiderXhsError(f"Spider_XHS comment fetch failed: {message}")
+        data = response.get("data", {}) if isinstance(response, dict) else {}
+        comments = data.get("comments", []) if isinstance(data, dict) else []
+        return list(comments) if isinstance(comments, list) else []
 
     async def _load_cookie_header(self) -> str:
         configured = self._settings.xhs_cookie_header

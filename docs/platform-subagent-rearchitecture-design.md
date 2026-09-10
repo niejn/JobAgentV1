@@ -1,7 +1,8 @@
 # 平台招聘 Subagent 重构设计
 
-状态：需求设计，尚未实施。采用 DeepAgents 原生 Subagent HITL：不引入跨 Agent Proposal
-数据库、通用执行 Agent，也不把平台外发绕回主 Agent Tool。
+状态：Phase A/B/C 已实施（Boss 与 XHS 子 Agent 已上线，见代码 `jobagent/agent.py`
+的 `platform_subagents` 装配与本文第 11 节实现补充）。采用 DeepAgents 原生 Subagent HITL：
+不引入跨 Agent Proposal 数据库、通用执行 Agent，也不把平台外发绕回主 Agent Tool。
 
 ## 1. 目标
 
@@ -236,3 +237,47 @@ ActionDraft 升级为 Journey Artifact/Handoff。当前不预先实现。
 - 发送后只有 Delivery Receipt 更新 Journey；
 - 错渠道 Draft、过期 Draft、重复批准、进程重启、Boss 冷却均安全失败；
 - 后台 HR 监控使用持久化队列，不依赖前台 Draft。
+
+## 11. 实现补充（2026-09-10）
+
+Phase A/B/C 落地后，实际实现相对本设计新增了以下机制：
+
+### 11.1 共享只读 Tool 镜像
+
+XHS 子 Agent 除渠道专属 Tool 外，还镜像了根 Agent 的只读共享 Tool
+（`_XHS_SHARED_TOOL_NAMES`）：`list_available_resume_pdfs`、`list_skills`、
+`read_skill`。简历列表 Tool 让子 Agent 与邮件草稿服务读取**同一个**
+`ResumeLibrary` 实例核实附件，杜绝子 Agent 扫描本地目录或报告其他路径的文件列表；
+根 Agent 仍保留全部简历 Tool（含 `register_resume_pdf` 写入口）。
+
+### 11.2 渠道工作流 Skill 确定性注入
+
+`skills/xhs-recruitment-email/SKILL.md`（保存帖→核对岗位邮箱→核对附件→草稿→
+审批的固定流程 + 失败恢复表）在 `build_job_agent` 装配时被读入、剥离 frontmatter、
+拼进 xhs_recruiting 的 system prompt。注入不依赖模型主动读取；Skill 缺失时降级回
+基础 prompt 并记 warning。子 Agent 的 `read_skill` 仅作运行时刷新（会话中途安装的
+新版本）和读取其他 Skill 之用。
+
+### 11.3 委派上下文契约
+
+根 Agent 的 `<platform_subagent_policy>` 明确：Subagent 不继承主对话历史，task
+任务描述必须自包含（帖子 URL 或 note_id、已确认公司/岗位、Journey ID、附件简历
+文件名、用户逐字确认的邮件主题/正文、已有本地分析结论）。XHS 子 Agent prompt
+对应要求：上下文缺失时先用 URL 读取帖子，无法补齐则返回 blocked 并列出缺失字段。
+
+### 11.4 邮件草稿的逐字保存与溯源
+
+`prepare_recruitment_email` 支持可选 `subject`/`body_text`：用户逐字确认的内容
+原样落库不改写（`content_origin: user_confirmed`），未提供时回退默认模板。草稿
+携带 `source_url` 与 `contact_evidence`（邮箱来源 body/图片 OCR 及置信级别），
+HITL 批准预览与会话日志审阅均展示帖子链接与邮箱出处，供审批人核实收件人来源。
+`send_recruitment_email` 只按 `draft_id` 从库重读草稿执行，不接受内容参数。
+
+### 11.5 流程顺序的 fail-closed 保证
+
+顺序不靠图编排硬编码，靠工具链数据依赖：未存帖 → `note_not_saved`，未选岗位 →
+`position_not_selected`（均为结构化失败，非裸异常），无 verified 邮箱 →
+`contact_missing`，简历不在库 → `resume_not_found`，草稿不存在 → `draft_not_found`，
+已投递 → `already_submitted`。回归测试
+`tests/test_xhs_email_drafts.py::test_prepare_draft_requires_note_saved_before_position_selected_before_draft`
+钉住该性质。

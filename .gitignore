@@ -57,7 +57,7 @@ Thumbs.db
 
 # Local runtime data
 data/
-jobagent/jobagent-journey.sqlite3
+jobagent/jobagent-journey.sqlite3*
 
 # Frontend dependencies and local linked repositories
 jobagent/ui/node_modules/

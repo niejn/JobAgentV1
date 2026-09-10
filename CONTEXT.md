@@ -207,13 +207,14 @@ _Avoid_: 简历上传、岗位已投递、发送按钮点击
 _Avoid_: 工具返回成功、输入框清空、Agent 自述完成
 
 **Recruitment Note（招人帖）**:
-小红书等外部来源中表达招聘意图的原始内容快照，包含正文、图片、评论和来源元数据；它可以产生多个 Job Lead，
-但本身不是岗位或投递授权。
+小红书等外部来源中表达招聘意图的原始内容快照，包含正文、图片、评论和来源元数据；它可以包含多个 Candidate Position，
+并可提供后续招人帖搜索使用的岗位与招聘表达特征；但本身不是岗位或投递授权。
 _Avoid_: 招聘线索、Job Posting、评论
 
-**Job Lead（招聘线索）**:
-从一条 Recruitment Note 中抽取出的具体公司/岗位机会，必须引用 JD Evidence 和 Contact Channel，才能进入申请准备。
-_Avoid_: 招人帖、岗位推荐、邮件草稿
+**Candidate Position（候选岗位）**:
+Recruitment Note 内部提取出的一个岗位名称、JD 片段和 JD Evidence；用于从多岗位帖子中选择唯一
+目标岗位进入 Opportunity Journey，不是独立持久化对象，也不能直接投递。
+_Avoid_: Job Posting、Opportunity Journey、投递记录、邮件草稿
 
 **JD Evidence（JD 证据）**:
 支持岗位职责、任职要求、地点或待遇等字段的正文、图片 OCR、视觉解析或评论片段，并记录来源位置和提取可信度。
@@ -224,9 +225,8 @@ _Avoid_: 未溯源 JD、模型猜测、通用岗位描述
 _Avoid_: 猜测邮箱、普通评论者联系方式、已发送邮件
 
 **Application Email Draft（投递邮件草稿）**:
-针对一个 Job Lead、一个 Contact Channel 和一个具体简历版本生成的待确认邮件，包含收件人、主题、正文、附件和事实来源；
-它不表示邮件已经发送。
-_Avoid_: 邮件模板、SMTP 回执、HR 已读
+针对一个选定 Candidate Position、一个 Contact Channel 和一个具体简历版本生成的待确认邮件，包含收件人、主题、正文、附件和事实来源；用户逐字确认的主题/正文必须原样保存（`content_origin: user_confirmed`），草稿记录帖子链接与邮箱出处（body/图片 OCR 及置信级别）供审批时核实；发送只能按已保存草稿内容执行，不接受调用参数改写。它不表示邮件已经发送。
+_Avoid_: 邮件模板、SMTP 回执、HR 已读、可被模型改写的正文
 
 ## 技术约束
 
@@ -237,19 +237,28 @@ _Avoid_: 邮件模板、SMTP 回执、HR 已读
 响应），或通过 CDP 连接用户已登录的 Chrome 实例。这一约束适用于 Boss、小红书及未来可能接入
 的任何平台。
 
-### Skill 系统设计准则：纯文档、跨 Agent 可移植
+### Skill 系统设计准则：纯文档、两级分类
 
 Skill 只包含 `SKILL.md`（纯文档），不使用自定义代码（无 `tool.py` / `get_tools()`）。
+分为两级：
 
-**设计目标**：skill 可以在不同 Agent 之间移植——我们的 skill 可以直接用在 Pi、Claude Code 等
-其他 Agent 上，反之亦然。
+**A. 可移植通用 Skill**（如 `ChromeCDP-setup`）：
+- 设计目标：skill 可以在不同 Agent 之间移植——我们的 skill 可以直接用在 Pi、
+  Claude Code 等其他 Agent 上，反之亦然。
+- 实现方式：SKILL.md 中的步骤只用通用工具（`execute`、`read_file`、`ls`、
+  `write_file`），不依赖任何 Agent 特有的定制工具或代码加载机制。
 
-**实现方式**：
-- SKILL.md 中的步骤只用通用工具（`execute`、`read_file`、`ls`、`write_file`），
-  不依赖任何 Agent 特有的定制工具或代码加载机制
-- Agent 通过 `read_file` 读 SKILL.md 获取说明，通过 `execute` 执行 Shell 命令完成操作
-- 不需要 `load_skill_tools()`、`importlib`、`get_tools()` 等代码层面的集成
+**B. 渠道工作流 Skill**（如 `xhs-recruitment-email`）：
+- 步骤引用 JobAgent 业务 Tool（`analyze_recruitment_note` 等），不可跨 Agent 移植，
+  只服务所属 Platform Recruiting Subagent。
+- 交付方式是**确定性注入**：`build_job_agent` 装配时读取 SKILL.md、剥离 frontmatter、
+  拼进所属 Subagent 的 system prompt——不依赖模型主动读取；Skill 缺失时优雅降级回
+  基础 prompt 并记 warning。
+- Subagent 同时持有只读 `list_skills`/`read_skill`，用于会话中途安装的新版本或读取
+  其他 Skill（注入副本是保证，read_skill 是增益）；`install_skill` 是 HITL 写操作，
+  仅主 Agent 持有。
 
-**验证**：ChromeCDP-setup skill 的工作流程（检查端口→查找 Chrome→启动→轮询）全部使用
-PowerShell 命令描述，在 Pi / Claude Code（有 bash 工具）和我们的 JobAgent（有 execute 工具）
-上均可直接执行。
+**验证**：ChromeCDP-setup 的工作流程全部使用 PowerShell 命令描述，在 Pi / Claude Code
+（有 bash 工具）和我们的 JobAgent（有 execute 工具）上均可直接执行；
+xhs-recruitment-email 已确定性注入 xhs_recruiting 子 Agent（见
+`docs/platform-subagent-rearchitecture-design.md` 实现补充）。

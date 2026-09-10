@@ -305,8 +305,11 @@ async def test_build_job_agent_full_prompt_contains_all_default_gates(
     )
     try:
         prompt = agent._system_prompt
-        assert prompt.startswith(MAIN_AGENT_SYSTEM_PROMPT)
-        for tag in ("<greeting_policy>", "<job_progress_policy>", "<tool_policy>"):
+        # PS-1 分层组装后 policy 段按 registered_tools 条件注入，root prompt 不再
+        # 与 legacy 全量文本字节对齐；断言身份开头 + 门控段存在，不钉死段落顺序。
+        assert prompt.startswith(MAIN_AGENT_SYSTEM_PROMPT.split("\n\n", 1)[0])
+        # greeting 门控在 boss_greet_jobs 上，该工具已下沉 boss 子代理。
+        for tag in ("<job_progress_policy>", "<tool_policy>", "<response_policy>"):
             assert tag in prompt, tag
     finally:
         await agent.close()
