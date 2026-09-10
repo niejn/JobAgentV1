@@ -123,6 +123,9 @@ Boss 页面。系统先检查登录态；未登录则明确提示用户在该 Ch
 
 ### 5.4 HR 请求简历
 
+Boss 渠道不查询或发送 XHS 邮件使用的本地 PDF 简历库。只有 HR 已回复后，系统才通过 Boss
+平台读取当前可用的在线/附件简历选项，用户选择其中一项后再执行 Boss 站内发送。
+
 1. WS Listener 解码入站 Protobuf 消息。
 2. 识别 `body.type = 9` 或等价的简历请求结构。
 3. 以 `conversation_id + request_mid` 去重并写入 `resume_requests`。

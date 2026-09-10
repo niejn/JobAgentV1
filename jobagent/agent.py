@@ -199,6 +199,10 @@ _XHS_TOOL_NAMES = frozenset(
 _XHS_SHARED_TOOL_NAMES = frozenset(
     {"list_available_resume_pdfs", "list_skills", "read_skill"}
 )
+# DeepAgents may expose root tools to a delegated task at runtime.  The local
+# PDF inventory is therefore subagent-only: it is an XHS email attachment
+# selector, never a Boss resume source.
+_XHS_ONLY_TOOL_NAMES = frozenset({"list_available_resume_pdfs"})
 _PLATFORM_WRITE_TOOL_NAMES = frozenset(
     {
         "boss_greet_jobs",
@@ -216,6 +220,8 @@ _ROOT_HITL_TOOLS = {
 _BOSS_SUBAGENT_PROMPT = """你是 Boss 直聘招聘渠道专家，只使用已提供的 Boss 工具。
 你不访问小红书、SMTP 或其他渠道。先读取并核对岗位、HR 与会话；外发招呼、回复或简历时，
 调用对应 Boss 写工具。写工具会自动暂停，等待用户在根 JobAgent 界面批准；绝不绕过批准。
+Boss 简历只能在 HR 已回复后调用 `prepare_boss_resume_after_hr_reply`，从 Boss 平台返回的在线/附件
+简历选项中由用户选择；不得查询、导入或使用本地 PDF 简历库。
 一次任务最多准备和执行一项外发动作。工具返回回执后，如实报告 confirmed、unverified、failed
 或 blocked，并关联用户提供的 Journey。"""
 
@@ -1614,7 +1620,9 @@ def build_job_agent(
         registered_tools = [
             tool
             for tool in registered_tools
-            if tool.name not in _BOSS_TOOL_NAMES and tool.name not in _XHS_TOOL_NAMES
+            if tool.name not in _BOSS_TOOL_NAMES
+            and tool.name not in _XHS_TOOL_NAMES
+            and tool.name not in _XHS_ONLY_TOOL_NAMES
         ]
         if boss_tools:
             platform_subagents.append(
@@ -1690,22 +1698,24 @@ def build_job_agent(
 <platform_subagent_policy>
 Boss 与小红书/邮件渠道由原生 `task` Tool 调用专属 Subagent：`boss_recruiting` 或
 `xhs_recruiting`。Subagent 不继承本对话历史，task 的任务描述必须自包含：写明帖子 URL 或
-note_id、已确认的公司/岗位、Journey ID、附件简历文件名（先用 `list_available_resume_pdfs`
-核对），以及用户已逐字确认的邮件主题/正文；有本地分析结论时一并附上让子代理复用。当任务
+note_id、已确认的公司/岗位、Journey ID。XHS 邮件附件先由 XHS 子 Agent 用
+`list_available_resume_pdfs` 核对；Boss 简历只在 HR 回复后由 Boss 平台预检工具列出。邮件任务
+还须携带用户已逐字确认的主题/正文；有本地分析结论时一并附上让子代理复用。当任务
 可能外发消息、简历或邮件时，一次只调用一个 task，必须等待该任务完成并返回回执后才能派发
 下一个。不要尝试调用未注册的渠道原始 Tool，也不要并行派发 task。
 </platform_subagent_policy>
 """
-    if {"register_resume_pdf", "list_available_resume_pdfs"} <= {
+    if "register_resume_pdf" in {
         tool.name for tool in registered_tools
     }:
         system_prompt += """
 
 <existing_pdf_resume_policy>
-当用户提供已有 PDF 简历、询问可用简历、选择邮件附件或要求投递已有简历时，只能调用
-`register_resume_pdf` 或 `list_available_resume_pdfs`。第一阶段不需要、也不得尝试解析 PDF
+当用户提供已有 PDF 简历时，只能调用 `register_resume_pdf`。XHS 邮件附件的可用简历由 XHS
+子 Agent 调用 `list_available_resume_pdfs` 查询。Boss 简历不使用本地 PDF 库，而是等待 HR 回复
+后从 Boss 平台简历选项中选择。第一阶段不需要、也不得尝试解析 PDF
 正文；不得调用 `execute`、`read_file`、Shell、目录扫描或外部 PDF 库寻找/读取简历。用户给出
-明确本地路径时导入；用户未给路径时列出受控 `data/resumes` 库中的文件名、大小和 SHA-256。
+明确本地路径时导入。
 </existing_pdf_resume_policy>
 """
     return JobAgent(

@@ -120,10 +120,13 @@ async def test_default_agent_exposes_platform_tools_only_to_their_subagents(tmp_
         "select_recruitment_position",
     }
     assert "list_available_resume_pdfs" in xhs_names
+    boss_names = {tool.name for tool in subagents["boss_recruiting"]["tools"]}
+    assert "list_available_resume_pdfs" not in boss_names
     assert {"list_skills", "read_skill"} <= xhs_names
     assert "install_skill" not in xhs_names
     assert "register_resume_pdf" not in xhs_names
-    assert {"list_available_resume_pdfs", "register_resume_pdf"} <= root_names
+    assert "list_available_resume_pdfs" not in root_names
+    assert "register_resume_pdf" in root_names
     assert {"list_skills", "read_skill", "install_skill"} <= root_names
     assert "boss_greet_jobs" in subagents["boss_recruiting"]["interrupt_on"]
     assert "send_recruitment_email" in subagents["xhs_recruiting"]["interrupt_on"]
@@ -132,3 +135,5 @@ async def test_default_agent_exposes_platform_tools_only_to_their_subagents(tmp_
     assert "read_skill 读取最新内容" in xhs_prompt
     assert "失败恢复表" in xhs_prompt
     assert "already_submitted" in xhs_prompt
+    boss_prompt = str(subagents["boss_recruiting"]["system_prompt"])
+    assert "不得查询、导入或使用本地 PDF 简历库" in boss_prompt
