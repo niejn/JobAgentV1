@@ -207,21 +207,20 @@ class Settings(BaseSettings):
         description="Per-account Boss bucket: page loads must not exceed this rate.",
     )
     boss_crawl_rate_period_seconds: float = Field(
-        default=30.0,
+        default=5.0,
         gt=0,
         description=(
-            "Boss bucket period. 1 page load per 30s mirrors a human "
-            "scanning a result list; 1/s got three back-to-back searches "
-            "anti-bot flagged (2026-08-27)."
+            "Boss bucket period. One page load per five seconds with the "
+            "configured reading jitter between permitted requests."
         ),
     )
     boss_crawl_jitter_min_seconds: float = Field(
-        default=8.0,
+        default=5.0,
         ge=0.0,
         description="Min random pause after each Boss page load permit (reading time).",
     )
     boss_crawl_jitter_max_seconds: float = Field(
-        default=25.0,
+        default=10.0,
         ge=0.0,
         description="Max random pause after each Boss page load permit (reading time).",
     )
