@@ -97,8 +97,10 @@ HR 在会话中发出的请求候选人提供简历的卡片。当前已识别�
 `BossDirectContactAdapter` 调用
 `POST /wapi/zpgeek/friend/add.json?securityId=&jobId=&lid=`，表单为 `expectId=0`，
 并通过会话列表确认 `friend_id`。`geekEnter` 仅用于进入已有会话，不作为创建成功证据。
-配置 `BOSS_SEARCH_TRANSPORT=http` 与 `BOSS_CONTACT_TRANSPORT=http` 后，Agent 的
-`boss_greet_jobs` 不再需要职位网页即可创建会话，并在确认后通过 MQTT/WS 发送定制招呼。
+默认组合为 `BOSS_SEARCH_TRANSPORT=cdp` 与 `BOSS_CONTACT_TRANSPORT=http`：岗位发现
+继续复用已登录 Chrome 的 CDP，`boss_greet_jobs` 则不依赖职位网页，直接创建会话并在确认后
+通过 MQTT/WS 发送定制招呼。仅在明确设置 `BOSS_CONTACT_TRANSPORT=cdp` 时，才会走页面
+“立即沟通”按钮路径。
 
 ### 5.3 招呼发送
 

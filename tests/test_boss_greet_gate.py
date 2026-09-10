@@ -42,7 +42,9 @@ def _request() -> BossGreetJobsRequest:
 async def test_greet_reaches_applier_without_confirmation_parameter(tmp_path) -> None:
     """No parameter gate: the call flows into BossApplier; the HITL
     middleware is the approval point (physical interrupt before this body)."""
-    manager = BossGreetingsManager(_settings_stub(tmp_path))
+    settings = _settings_stub(tmp_path)
+    settings.boss_contact_transport = "cdp"
+    manager = BossGreetingsManager(settings)
     profile = SimpleNamespace(name="n", skills=[], years_experience=1, summary="s")
 
     with (
@@ -77,6 +79,15 @@ def test_greet_schema_has_no_user_confirmed_field() -> None:
     so the model cannot bypass-or-satisfy approval through a flag."""
     assert "user_confirmed" not in BossGreetJobsRequest.model_fields
     assert "user_confirmed" not in GreetingTarget.model_fields
+
+
+def test_default_boss_transports_use_cdp_reads_and_direct_contact(tmp_path) -> None:
+    """Job discovery needs the logged-in Chrome; contact must avoid job-page DOM."""
+
+    settings = _settings_stub(tmp_path)
+
+    assert settings.boss_search_transport == "cdp"
+    assert settings.boss_contact_transport == "http"
 
 
 @pytest.mark.asyncio

@@ -99,10 +99,10 @@ class Settings(BaseSettings):
         ),
     )
     boss_contact_transport: Literal["cdp", "http"] = Field(
-        default="cdp",
+        default="http",
         description=(
-            "Boss HR conversation creation transport. HTTP uses friend/add and "
-            "confirms the new conversation before sending a greeting."
+            "Boss HR conversation creation transport. Defaults to HTTP friend/add plus "
+            "WebSocket greeting; Boss job reads remain on the separate CDP transport."
         ),
     )
     boss_greeting: str | None = Field(
