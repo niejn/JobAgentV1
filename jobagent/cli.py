@@ -174,7 +174,16 @@ async def _boss_cdp_login(*, check_only: bool, timeout_minutes: int) -> None:
 
     from playwright.async_api import async_playwright
 
+    from jobagent.auth.boss_debug_chrome import BossDebugChromeError, ensure_boss_debug_chrome
+
     settings = get_settings()
+    try:
+        started = await ensure_boss_debug_chrome(settings)
+    except BossDebugChromeError as exc:
+        click.echo(f"[boss] {exc}")
+        return
+    if started:
+        click.echo("[boss] 已启动专用调试 Chrome，等待你完成 Boss 登录。")
     driver = await async_playwright().start()
     browser = None
     try:

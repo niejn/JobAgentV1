@@ -251,6 +251,15 @@ class Settings(BaseSettings):
             "Legacy env name XHS_CDP_ENDPOINT is accepted for one more version."
         ),
     )
+    boss_debug_chrome_executable: Path | None = Field(
+        default=None,
+        description="Optional Chrome executable for the dedicated visible Boss debug browser.",
+    )
+    boss_debug_chrome_profile_dir: Path = Field(
+        default=Path("data/boss-chrome-small-profile"),
+        description="Dedicated persisted Chrome profile used by Boss CDP login and reads.",
+    )
+    boss_debug_chrome_start_timeout_seconds: int = Field(default=20, ge=5, le=60)
     xhs_cdp_timeout_seconds: int = Field(
         default=30,
         ge=5,

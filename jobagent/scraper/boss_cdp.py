@@ -85,6 +85,18 @@ class BossCdpBackend:
                 return cast("tuple[Any, Any, Any]", self._connection)
             from playwright.async_api import async_playwright
 
+            from jobagent.auth.boss_debug_chrome import (
+                BossDebugChromeError,
+                ensure_boss_debug_chrome,
+            )
+
+            try:
+                started = await ensure_boss_debug_chrome(self._settings)
+                if started:
+                    logger.info("Boss CDP: started dedicated visible debug Chrome")
+            except BossDebugChromeError as exc:
+                raise BossAccessError(str(exc), code="cdp_not_ready") from exc
+
             driver = await async_playwright().start()
             try:
                 browser = await driver.chromium.connect_over_cdp(

@@ -102,6 +102,12 @@ HR 在会话中发出的请求候选人提供简历的卡片。当前已识别�
 通过 MQTT/WS 发送定制招呼。仅在明确设置 `BOSS_CONTACT_TRANSPORT=cdp` 时，才会走页面
 “立即沟通”按钮路径。
 
+首次 Boss 操作若本地 CDP 端口尚未就绪，JobAgent 启动专用、可见的 Chrome profile 并打开
+Boss 页面。系统先检查登录态；未登录则明确提示用户在该 Chrome 手动登录。用户完成后回复
+“已登录”并重新发起 Boss 操作，系统重新验证页面、同步 `.zhipin.com` Cookie 到本地，再允许
+搜索和直连外联。`jobagent login --platform boss` 也执行同一验证和同步流程：已有调试 Chrome
+时复用，端口未就绪时启动专用 profile；不会关闭既有 Chrome，也不会发送消息。
+
 若独立 HTTP 会话无法从用户信息响应取得短期 page token，直连模块会只读连接已登录 Chrome，
 从现有 Boss 页面或一个短生命周期聊天页读取运行时 token；token 只在当前内存流程中传给
 `friend/add` 和 WebSocket 凭证请求，不写入配置、日志或数据库。读取失败返回
