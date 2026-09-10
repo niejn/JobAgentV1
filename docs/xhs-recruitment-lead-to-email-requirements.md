@@ -330,6 +330,24 @@ recruitment_note_id + selected_position_hash + normalized_recipient + tailored_r
 
 ### 11.1 邮件发送职责边界
 
+当前 P0 实现由 `XhsEmailDraftService` 承担：同一 `draft_id` 在 `BEGIN IMMEDIATE` 事务中
+抢占 `sending`，发送前保存 Message-ID。已有 `sending` / `unverified` / `submitted` 时
+不再调用 SMTP。旧版投递表自动补充 `message_id` 与 `sync_status` 列。
+
+JobAgent 默认工具装配时自动扫描 `sending` / `unverified`，通过 IMAP Sent 的 Message-ID
+查询并读取邮件头精确比对。命中恢复为 `submitted`，未命中或无法核验保持 `unverified`；
+后续启动可再次核验，但不会自动重发。恢复结果通过条件更新写入，迟到的未命中结果不会
+覆盖并发 SMTP 成功回执。
+
+`submitted` 回执先落库，再同步登记册与 Journey；独立 `sync_status=pending/done` 记录
+同步进度。失败时保留 `submitted`，启动或再次调用发送工具只补做同步。HITL 预览找不到
+草稿时显示 `draft_not_found`，发送工具安全返回同名错误。
+
+Sent 核验复用 SMTP 用户和授权码；默认将 `smtp.*` 推导为 `imap.*`。可用
+`JOBAGENT_EMAIL_IMAP_HOST`、`JOBAGENT_EMAIL_IMAP_PORT`（默认 993）和
+`JOBAGENT_EMAIL_SENT_FOLDER`（默认 `Sent`）指定邮箱服务设置。SMTP 服务未保存 Sent
+副本时不能靠“未找到”证明未投递，记录保持 `unverified`。
+
 `EmailSender` 是内部 SMTP Adapter，不是 Agent Tool。早期通用 `send_application_email` 不再暴露给
 主 Agent、Boss 子 Agent 或 XHS 子 Agent，因为它允许模型直接给出任意收件人、正文和附件路径，
 并在 Tool 内猜测登记册身份。
@@ -341,15 +359,15 @@ send_recruitment_email(draft_id)
   -> XhsEmailApplicationService.send(draft_id)
   -> EmailSender
   -> DeliveryReceipt
-  -> ApplicationStateProjector
+  -> XHS 邮件服务内部的状态同步步骤
 ```
 
 `XhsEmailApplicationService` 是确定性应用层：读取持久化草稿，校验 XHS `note_id`、选定岗位、
 verified 邮箱、受控 PDF 和幂等键；它不让模型重新提供收件人、正文或附件路径。
 
-`ApplicationStateProjector` 是需要新开发的确定性状态投影模块。它消费 DeliveryReceipt，以
-`xhs:<note_id>` 为唯一 Job 身份，更新 `job_records`、关联 Opportunity Journey 和投递状态事件；
-它不使用 LLM，也不由模型在发送后自行选择下一步 Tool。
+发送服务内部的确定性状态同步步骤消费 DeliveryReceipt，以 `xhs:<note_id>` 为唯一 Job 身份，
+更新 `job_records`、关联 Opportunity Journey 和投递状态事件；它不使用 LLM，也不由模型在发送
+后自行选择下一步 Tool。当前不新增独立 Projector 类。
 
 ```text
 submitted  -> job_records / Journey = applied

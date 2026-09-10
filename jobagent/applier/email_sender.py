@@ -49,6 +49,7 @@ class EmailSender:
         body_text: str = "",
         attachment: Path | None = None,
         attachment_name: str = "",
+        message_id: str = "",
     ) -> dict[str, Any]:
         """Send one email; returns a structured result (never raises for
         delivery problems - the caller surfaces them to the agent)."""
@@ -68,7 +69,7 @@ class EmailSender:
         )
         message["To"] = to
         message["Subject"] = subject
-        message_id = make_msgid()
+        message_id = message_id or make_msgid()
         message["Message-ID"] = message_id
         message.set_content(body_text or _html_to_text(body_html))
         message.add_alternative(body_html, subtype="html")
@@ -97,10 +98,12 @@ class EmailSender:
         host = self._settings.jobagent_email_smtp_host.strip()
         port = self._settings.jobagent_email_smtp_port
         user = self._settings.jobagent_email_smtp_user.strip()
+        accepted = False
         try:
             with _smtp_connection(host, port) as smtp:
                 smtp.login(user, self._settings.jobagent_email_smtp_password)
                 smtp.send_message(message)
+                accepted = True
         except smtplib.SMTPAuthenticationError as exc:
             logger.warning("smtp auth failed for %s: %s", user, exc)
             return {
@@ -108,14 +111,15 @@ class EmailSender:
                 "error_type": "auth_failed",
                 "message": "SMTP 认证失败：请检查授权码是否正确/是否最新生成。",
             }
-        except smtplib.SMTPException as exc:
+        except (smtplib.SMTPResponseException, smtplib.SMTPRecipientsRefused) as exc:
             logger.warning("smtp send failed: %s", exc)
             return {
-                "status": "failed",
+                "status": "unverified" if accepted else "failed",
                 "error_type": "smtp_error",
                 "message": f"发送失败：{exc}",
+                "message_id": message_id,
             }
-        except OSError as exc:
+        except (OSError, smtplib.SMTPException) as exc:
             logger.warning("smtp network error: %s", exc)
             return {
                 "status": "unverified",

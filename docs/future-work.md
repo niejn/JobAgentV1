@@ -1,5 +1,18 @@
 # Future Work
 
+## Known Issue：SMTP 成功后的 Sent 文件夹确认存在延迟或缺失
+
+XHS 邮件发送恢复优先通过发件邮箱的 Sent 文件夹验证 `Message-ID`，但 SMTP 成功并不保证
+邮件已经立即出现在 Sent：
+
+- 邮件可能尚未同步到 Sent；
+- 部分 SMTP 服务不保存已发送邮件；
+- IMAP 可能不可用、过期或暂时延迟；
+- 本地 SMTP 客户端使用的 Sent 文件夹可能与服务器 Sent 不是同一个来源。
+
+因此 `sending` 状态暂时查不到时只能标记为 `unverified` 并等待后续确认，不能自动重发，
+避免 SMTP 已接受但本地没有及时看到 Sent 记录时产生重复投递。
+
 ## 高优先级：Langfuse 执行追踪、LLM 评估与 Prompt 管理
 
 状态：已登记，待开发。按以下三个阶段顺序实施；覆盖主 DeepAgent 和各 Subagent。
@@ -33,6 +46,25 @@
 - 每次模型调用记录所用 Prompt 名称、版本和模型配置，使 trace、评估结果与 Prompt 变更关联。
 - Prompt 更新先运行第二阶段评估，再按明确发布流程启用；支持回滚到已验证版本。
 - 验收：可比较两个 Prompt 版本的任务评分，并能追溯线上调用使用的具体版本。
+
+## XHS 邮件投递可靠性 P0：已实现（2026-09-10）
+
+本轮完成：
+
+- `BEGIN IMMEDIATE` 原子抢占同一 `draft_id`，提交 `sending` 和 Message-ID 后才执行 SMTP；
+- `sending`、`unverified` 和 `submitted` 均禁止再次 SMTP，多进程共享同一 SQLite 状态；
+- JobAgent 默认工具装配时扫描 `sending` / `unverified`，按 Message-ID 核验 Sent；
+- Sent 精确命中后恢复 `submitted`；未命中、IMAP 不可用或旧记录缺少 ID 时保持 `unverified`；
+- 独立保存 `sync_status`，启动和重复调用可补做登记册/Journey 同步，不重发已提交邮件；
+- 缺失草稿的审批预览返回可读 `draft_not_found`，发送工具返回结构化失败；
+- 补充真实子进程并发和崩溃、启动恢复、Sent 命中/未命中、旧表迁移、状态重放与交错竞态测试。
+
+### 后续独立验收
+
+- 真实 SMTP 正常发送已由用户手动验收；本轮 SMTP / IMAP 恢复测试全部使用离线替身。
+- 真实邮箱的 Sent 文件夹名称、同步延迟和保留策略仍由实际邮箱环境决定。
+- 更完整的 `StructuredTool` → 子 Agent `interrupt_on` → CLI `Command(resume)` 端到端验收
+  属于后续渠道验收，不代表本轮已覆盖所有 CLI 交互路径。
 
 ## 待开发：FastAPI lifespan 管理 Boss CDP 调试 Chrome
 

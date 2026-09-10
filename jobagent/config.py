@@ -138,6 +138,11 @@ class Settings(BaseSettings):
         description="16-char SMTP authorization code (NOT the account password).",
     )
     jobagent_email_sender_name: str = Field(default="聂俊能")
+    jobagent_email_imap_host: str = Field(
+        default="", description="Sent verification host; empty infers imap.* from smtp.*."
+    )
+    jobagent_email_imap_port: int = Field(default=993, ge=1, le=65535)
+    jobagent_email_sent_folder: str = Field(default="Sent")
     # Xiaohongshu referral channel (see docs/referral-design.md)
     xhs_cookie: str | None = None
     xhs_cookie_header: str | None = Field(

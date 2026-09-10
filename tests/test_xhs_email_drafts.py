@@ -175,7 +175,7 @@ async def test_submitted_xhs_draft_updates_stable_registry_and_blocks_repeat(tmp
     sent = await service.send(draft["draft_id"])
     repeated = await service.send(draft["draft_id"])
     assert sent["status"] == "submitted"
-    assert sent["receipt"]["message_id"] == "<test@example>"
+    assert sent["receipt"]["message_id"] == sender.calls[0]["message_id"]
     assert repeated["error_type"] == "already_submitted"
     assert len(sender.calls) == 1
     from jobagent.journey.store import SQLiteJourneyStore

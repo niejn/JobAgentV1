@@ -252,12 +252,13 @@ class SQLiteJourneyStore:
         return self.get_journey(str(row["journey_id"])) if row else None
 
     def mark_applied_by_creation_key(self, creation_key: str, *, reason: str) -> OpportunityJourney | None:
-        journey = self.get_by_creation_key(creation_key)
-        if journey is None or journey.stage == "applied":
-            return journey
-        now = _format_time(_now())
-        fields = {"stage": "applied", "version": journey.version + 1, "updated_at": now}
         with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            journey = self.get_by_creation_key(creation_key)
+            if journey is None or journey.stage == "applied":
+                return journey
+            now = _format_time(_now())
+            fields = {"stage": "applied", "version": journey.version + 1, "updated_at": now}
             self._connection.execute(
                 "UPDATE journeys SET stage = ?, version = ?, updated_at = ? WHERE id = ?",
                 ("applied", journey.version + 1, now, journey.id),

@@ -1455,6 +1455,7 @@ def build_job_agent(
         skill_manager = SkillManager(settings.jobagent_skills_dir)
         resume_library = ResumeLibrary(settings.jobagent_resume_dir)
         xhs_email_drafts = XhsEmailDraftService(state_db, resume_library, settings)
+        xhs_email_drafts.recover()
         # 声明式能力表：下面 (名字 -> 构造器) 对就是 agent 的能力集。
         # 统一经 _build_optional_tool 装配（Hermes 优雅降级模式：可选依赖
         # 缺失只降级该工具并记 warning，不炸整体构建；见其 docstring）。
