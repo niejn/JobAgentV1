@@ -1,5 +1,6 @@
 """Offline tests for the conversational JobAgent runtime."""
 
+import json
 from collections.abc import AsyncIterator
 
 import pytest
@@ -414,7 +415,7 @@ def test_tool_result_summary_degrades_to_name_without_pending_call() -> None:
         {"messages": [ToolMessage(content="done", name="execute", tool_call_id="late")]},
         {},
     )
-    assert _tool_result_summary(completions) == "execute → done · 4 chars"
+    assert _tool_result_summary(completions) == "execute → done"
 
 
 def test_args_preview_shows_command_and_redacts_credentials() -> None:
@@ -436,7 +437,29 @@ def test_result_summary_text_extracts_json_detail_fields() -> None:
     content = '{"status": "completed", "file_path": "a.md", "noise": "' + "z" * 900 + '"}'
     summary = _result_summary_text(content)
     assert "noise" not in summary
-    assert summary.endswith(f"· {len(content)} chars")
+    assert "chars" not in summary
+    assert "内容已省略" in summary
+
+
+def test_result_summary_text_summarizes_job_records_semantically() -> None:
+    content = json.dumps(
+        {
+            "status": "completed",
+            "count": 4,
+            "records": [
+                {"company": "甲公司", "title": "后端", "progress_status": "discovered"},
+                {"company": "乙公司", "title": "Agent", "progress_status": "greeted"},
+                {"company": "丙公司", "title": "Python", "progress_status": "discovered"},
+                {"company": "丁公司", "title": "研发", "progress_status": "applied"},
+            ],
+        },
+        ensure_ascii=False,
+    )
+    summary = _result_summary_text(content, "list_job_records")
+    assert "共 4 条" in summary
+    assert "discovered 2" in summary
+    assert "甲公司 / 后端" in summary
+    assert "chars" not in summary
 
 
 def test_preview_text_collapses_multiline_output() -> None:

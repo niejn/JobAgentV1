@@ -1160,10 +1160,11 @@ def _args_preview(args: Any) -> str:
     return ", ".join(parts)[:_ARGS_PREVIEW_TOTAL]
 
 
-def _result_summary_text(content: str) -> str:
+def _result_summary_text(content: str, tool_name: str = "") -> str:
     """Bounded single-line result summary: JSON key fields or raw preview.
 
-    The total character count stays as a suffix so truncation is detectable.
+    Summaries describe the operation; raw payload size is intentionally hidden
+    from the user-facing transcript.
     """
 
     try:
@@ -1171,13 +1172,36 @@ def _result_summary_text(content: str) -> str:
     except (TypeError, ValueError):
         payload = None
     if isinstance(payload, dict):
+        if tool_name == "list_job_records":
+            records = payload.get("records")
+            if isinstance(records, list):
+                statuses: dict[str, int] = {}
+                examples: list[str] = []
+                for record in records:
+                    if not isinstance(record, dict):
+                        continue
+                    status = str(record.get("progress_status") or "unknown")
+                    statuses[status] = statuses.get(status, 0) + 1
+                    if len(examples) < 3:
+                        examples.append(
+                            f"{record.get('company', '')} / {record.get('title', '')} [{status}]"
+                        )
+                status_text = "、".join(f"{key} {value}" for key, value in statuses.items())
+                example_text = "；".join(examples)
+                return _preview_text(
+                    f"完成：共 {payload.get('count', len(records))} 条"
+                    + (f"，状态：{status_text}" if status_text else "")
+                    + (f"，示例：{example_text}" if example_text else ""),
+                    _RESULT_PREVIEW_LIMIT,
+                )
         details = {key: payload[key] for key in _RESULT_DETAIL_KEYS if key in payload}
         if details:
             rendered = _preview_text(_safe_debug_args(details), _RESULT_PREVIEW_LIMIT)
         else:
             rendered = _preview_text(content, _RESULT_PREVIEW_LIMIT)
-        return f"{rendered} · {len(content)} chars"
-    return f"{_preview_text(content, _RESULT_PREVIEW_LIMIT)} · {len(content)} chars"
+        return rendered + ("（内容已省略）" if len(content) > _RESULT_PREVIEW_LIMIT else "")
+    rendered = _preview_text(content, _RESULT_PREVIEW_LIMIT)
+    return rendered + ("（内容已省略）" if len(content) > _RESULT_PREVIEW_LIMIT else "")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1235,7 +1259,7 @@ def _tool_result_summary(
                 continue
         args_preview = _args_preview(call.args) if call else ""
         prefix = f"{name}({args_preview})" if args_preview else name
-        entries.append(f"{prefix} → {_result_summary_text(_visible_text(message))}")
+        entries.append(f"{prefix} → {_result_summary_text(_visible_text(message), name)}")
     rendered = "; ".join(entries)
     return rendered if has_full_review else rendered[:1_200]
 
