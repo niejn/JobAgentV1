@@ -153,14 +153,25 @@ class CdpTabPool:
         self._wake()
 
     async def close(self) -> None:
-        """Close every tab the pool opened except the keeper (it protects
-        the browser lifecycle and is reused by the next pool)."""
+        """Close every tab the pool opened, then prune stray blank tabs.
+
+        Work tabs are pool-owned; stray ``about:blank`` tabs (warlock
+        redirect victims, tabs left by other pool instances on this
+        Chrome) are NOT pool-owned but are still closed here - exactly
+        one blank (the keeper) survives so the browser stays alive.
+        Real user tabs are never touched. Task-end cleanup therefore
+        leaves the debug Chrome with: user tabs + one keeper, nothing
+        else.
+        """
 
         self._closed = True
         for page in self._owned_pages():
             await self._quiet_close(page)
         self._idle.clear()
         self._active.clear()
+        pruned = await self.prune_blank_tabs()
+        if pruned:
+            logger.info("TabPool: close() pruned %d stray blank tab(s)", pruned)
         self._wake()
 
     @property

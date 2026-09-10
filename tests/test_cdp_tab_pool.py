@@ -151,6 +151,30 @@ async def test_close_closes_work_tabs_but_keeps_keeper() -> None:
         await pool.acquire()
 
 
+@pytest.mark.asyncio
+async def test_close_prunes_stray_blanks_not_opened_by_this_pool() -> None:
+    """Task end must leave exactly one blank (the keeper): warlock
+    victims and blanks left by other pool instances are closed too,
+    even though this pool never opened them."""
+    pool, ctx = _make(existing=1, max_tabs=6)
+    work = await pool.acquire()
+    await pool.release(work)
+    keeper = pool._keeper
+    # blanks this pool did NOT open: one from another pool instance,
+    # two warlock redirect victims
+    ctx.pages.append(FakePage(url="about:blank"))
+    ctx.pages.append(FakePage(url="about:blank"))
+    ctx.pages.append(FakePage(url="about:blank"))
+    user_tab = ctx.pages[0]
+
+    await pool.close()
+
+    blanks = [p for p in ctx.pages if p.url == "about:blank"]
+    assert len(blanks) == 1 and blanks[0] is keeper
+    assert not user_tab.closed, "real user tab untouched"
+    assert work.closed, "pool-owned tab closed by close()"
+
+
 
 @pytest.mark.asyncio
 async def test_user_tabs_do_not_deadlock_the_pool() -> None:
