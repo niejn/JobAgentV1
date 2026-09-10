@@ -320,7 +320,7 @@ class BossResumeDelivery:
         pool: CdpTabPool | None = None
         try:
             browser = await playwright.chromium.connect_over_cdp(
-                self._settings.xhs_cdp_endpoint, timeout=10_000
+                self._settings.debug_chrome_cdp_endpoint, timeout=10_000
             )
             context = next((item for item in browser.contexts if item.pages), None)
             if context is None:

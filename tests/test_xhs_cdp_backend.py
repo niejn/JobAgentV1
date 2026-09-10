@@ -41,7 +41,7 @@ CDP_LOGGER = "jobagent.scraper.xhs_cdp"
 def _settings(**overrides: Any) -> Settings:
     values: dict[str, Any] = {
         "xhs_cdp_enabled": True,
-        "xhs_cdp_endpoint": "http://127.0.0.1:9222",
+        "debug_chrome_cdp_endpoint": "http://127.0.0.1:9222",
         "xhs_cdp_timeout_seconds": 5,
     }
     values.update(overrides)
@@ -681,7 +681,7 @@ async def test_author_fallback_returns_bounded_references_without_secrets_in_log
     ],
 )
 def test_settings_accept_loopback_cdp_endpoints(endpoint: str) -> None:
-    assert _settings(xhs_cdp_endpoint=endpoint).xhs_cdp_endpoint == endpoint
+    assert _settings(debug_chrome_cdp_endpoint=endpoint).debug_chrome_cdp_endpoint == endpoint
 
 
 @pytest.mark.parametrize(
@@ -696,8 +696,27 @@ def test_settings_accept_loopback_cdp_endpoints(endpoint: str) -> None:
 )
 def test_settings_reject_non_loopback_or_invalid_cdp_endpoints(endpoint: str) -> None:
     with pytest.raises(ValidationError):
-        _settings(xhs_cdp_endpoint=endpoint)
+        _settings(debug_chrome_cdp_endpoint=endpoint)
 
+
+
+def test_settings_accept_new_and_legacy_cdp_endpoint_env_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("XHS_CDP_ENDPOINT", raising=False)
+    monkeypatch.delenv("DEBUG_CHROME_CDP_ENDPOINT", raising=False)
+    fresh = Settings(_env_file=None)
+
+    monkeypatch.setenv("DEBUG_CHROME_CDP_ENDPOINT", "http://127.0.0.1:9223")
+    assert Settings(_env_file=None).debug_chrome_cdp_endpoint == "http://127.0.0.1:9223"
+
+    monkeypatch.delenv("DEBUG_CHROME_CDP_ENDPOINT")
+    monkeypatch.setenv("XHS_CDP_ENDPOINT", "http://localhost:9224")
+    with pytest.warns(DeprecationWarning, match="DEBUG_CHROME_CDP_ENDPOINT"):
+        legacy = Settings(_env_file=None)
+    assert legacy.debug_chrome_cdp_endpoint == "http://localhost:9224"
+
+    assert fresh.debug_chrome_cdp_endpoint == "http://127.0.0.1:9222"
 
 @pytest.mark.asyncio
 async def test_build_xhs_backend_disabled_returns_plain_spider_backend() -> None:

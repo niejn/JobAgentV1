@@ -276,10 +276,10 @@ class XhsCdpBackend:
         async with self._session_lock:
             if self._session is not None:
                 return self._session
-            basis = {"endpoint": self._settings.xhs_cdp_endpoint}
+            basis = {"endpoint": self._settings.debug_chrome_cdp_endpoint}
             try:
                 session = await self._connect(
-                    self._settings.xhs_cdp_endpoint,
+                    self._settings.debug_chrome_cdp_endpoint,
                     self._settings.xhs_cdp_timeout_seconds,
                 )
             except Exception as exc:

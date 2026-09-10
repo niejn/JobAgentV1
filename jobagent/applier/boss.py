@@ -106,7 +106,7 @@ class BossApplier(BaseApplier):
         self._playwright = await async_playwright().start()
         try:
             browser = await self._playwright.chromium.connect_over_cdp(
-                self._settings.xhs_cdp_endpoint,
+                self._settings.debug_chrome_cdp_endpoint,
                 timeout=10_000,
             )
         except Exception as exc:

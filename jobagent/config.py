@@ -1,12 +1,14 @@
 """Application configuration loaded from environment variables."""
 
 import ipaddress
+import os
+import warnings
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +20,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        populate_by_name=True,
     )
 
     jobagent_env: str = Field(default="development")
@@ -234,11 +237,13 @@ class Settings(BaseSettings):
             "when Spider_XHS fails with a token/access-control error."
         ),
     )
-    xhs_cdp_endpoint: str = Field(
+    debug_chrome_cdp_endpoint: str = Field(
         default="http://127.0.0.1:9222",
+        validation_alias=AliasChoices("debug_chrome_cdp_endpoint", "xhs_cdp_endpoint"),
         description=(
-            "DevTools endpoint of an already-running, logged-in Chrome. "
-            "Loopback hosts only."
+            "DevTools endpoint of the shared, already-running, logged-in debug "
+            "Chrome used by both XHS and Boss CDP backends. Loopback hosts only. "
+            "Legacy env name XHS_CDP_ENDPOINT is accepted for one more version."
         ),
     )
     xhs_cdp_timeout_seconds: int = Field(
@@ -288,8 +293,7 @@ class Settings(BaseSettings):
 
     http_proxy: str | None = None
     https_proxy: str | None = None
-
-    @field_validator("xhs_cdp_endpoint")
+    @field_validator("debug_chrome_cdp_endpoint")
     @classmethod
     def validate_loopback_cdp_endpoint(cls, value: str) -> str:
         """Allow only loopback Chrome DevTools endpoints.
@@ -301,7 +305,9 @@ class Settings(BaseSettings):
         cleaned = value.strip()
         parsed = urlsplit(cleaned)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ValueError("XHS_CDP_ENDPOINT must be an http(s) URL such as http://127.0.0.1:9222")
+            raise ValueError(
+                "DEBUG_CHROME_CDP_ENDPOINT must be an http(s) URL such as http://127.0.0.1:9222"
+            )
         host = parsed.hostname.lower()
         try:
             address = ipaddress.ip_address(host)
@@ -310,13 +316,28 @@ class Settings(BaseSettings):
         if address is None:
             if host != "localhost":
                 raise ValueError(
-                    "XHS_CDP_ENDPOINT must be a loopback address (127.0.0.1, ::1, or localhost)"
+                    "DEBUG_CHROME_CDP_ENDPOINT must be a loopback address "
+                    "(127.0.0.1, ::1, or localhost)"
                 ) from None
         elif not address.is_loopback:
             raise ValueError(
-                "XHS_CDP_ENDPOINT must be a loopback address (127.0.0.1, ::1, or localhost)"
+                "DEBUG_CHROME_CDP_ENDPOINT must be a loopback address "
+                "(127.0.0.1, ::1, or localhost)"
             )
         return cleaned
+
+    @model_validator(mode="after")
+    def warn_legacy_cdp_endpoint_env(self) -> "Settings":
+        """One-version deprecation notice for the old XHS_CDP_ENDPOINT name."""
+
+        if "XHS_CDP_ENDPOINT" in os.environ:
+            warnings.warn(
+                "XHS_CDP_ENDPOINT is deprecated; rename it to DEBUG_CHROME_CDP_ENDPOINT. "
+                "The old name keeps working for one more version.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_boss_apply_delay_order(self) -> "Settings":
