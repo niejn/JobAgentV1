@@ -179,6 +179,11 @@ Artifact 和日志由 JobAgent 管理。
 不要自动从 `BossCdpAdapter` 降级到 `BossHttpAdapter`：一个 Adapter 命中风控后切换传输重试会
 增加风险。降级必须是用户可见的诊断决策，并遵守同一冷却窗口。
 
+搜索页在开始等待岗位 API 前执行只读健康检查，记录 URL、标题、正文长度、真实岗位卡数量、
+登录墙、验证码/风控和空白页状态。SPA 未渲染时最多刷新一次；仍未恢复即停止。执行上下文
+丢失或跳转 `data:` / `about:blank` 返回 `page_lost` 和安全诊断字段。诊断不包含 Cookie、CDP
+端点、HTML 或 API 响应体，并随结构化 Tool 错误记录，供后续人工判断登录、风险和页面问题。
+
 ## 7. Tool 与 MCP 决策
 
 第一阶段使用内部 LangChain Tool，因为 JobAgent 是唯一调用方，额外 MCP Server 只会增加状态、

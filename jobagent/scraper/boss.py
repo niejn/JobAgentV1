@@ -113,9 +113,18 @@ class BossAccessError(RuntimeError):
     - ``boss_access_denied`` - login expired or automation detected -> check the Chrome window
     """
 
-    def __init__(self, message: str, *, code: str = "boss_access_denied") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "boss_access_denied",
+        details: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        # Safe, bounded diagnostics for user-visible tools. Never place CDP
+        # endpoints, cookies, HTML, or response bodies here.
+        self.details = details or {}
 
 
 class BossCooldownManager:

@@ -143,11 +143,15 @@ def build_boss_job_discovery_tool(
             # Pass the real reason through so the Agent can act on it:
             # cdp_not_ready -> follow skills/ChromeCDP-setup/SKILL.md;
             # cooldown_active / boss_risk_control -> stop retrying and wait.
-            return {
+            result: dict[str, Any] = {
                 "status": "blocked",
                 "error_type": getattr(exc, "code", "boss_access_error"),
                 "message": str(exc),
             }
+            details = getattr(exc, "details", None)
+            if isinstance(details, dict):
+                result["diagnostic"] = details
+            return result
         except CookieNotFoundError:
             return {
                 "status": "blocked",

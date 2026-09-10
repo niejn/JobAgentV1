@@ -434,7 +434,11 @@ async def fetch_ws_nodes(
 
 
 async def fetch_ws_credentials(
-    *, cookies: dict[str, str], user_agent: str, base_url: str = "https://www.zhipin.com"
+    *,
+    cookies: dict[str, str],
+    user_agent: str,
+    base_url: str = "https://www.zhipin.com",
+    page_token: str = "",
 ) -> BossWsCredentials:
     """Fetch the same short-lived values used by the web chat client.
 
@@ -470,14 +474,19 @@ async def fetch_ws_credentials(
     if not isinstance(user_data, dict) or not isinstance(wt_data, dict):
         raise ConnectionError("Boss WS credential response was malformed")
     user_id = user_data.get("userId")
-    page_token = user_data.get("token")
+    response_page_token = user_data.get("token")
     ws_password = wt_data.get("wt2")
     nodes = _extract_nodes(ws_response.json())
-    if not isinstance(user_id, int) or not isinstance(page_token, str) or not page_token:
+    effective_page_token = page_token or response_page_token
+    if (
+        not isinstance(user_id, int)
+        or not isinstance(effective_page_token, str)
+        or not effective_page_token
+    ):
         raise ConnectionError("Boss page token was missing")
     if not isinstance(ws_password, str) or not ws_password or not nodes:
         raise ConnectionError("Boss WS credentials or nodes were missing")
-    return BossWsCredentials(user_id, page_token, ws_password, nodes)
+    return BossWsCredentials(user_id, effective_page_token, ws_password, nodes)
 
 
 async def find_conversation_target(
@@ -602,10 +611,13 @@ async def send_text_to_target(
     target: BossConversationTarget,
     text: str,
     user_agent: str = "Mozilla/5.0",
+    page_token: str = "",
 ) -> None:
     """Send text to an already resolved conversation without another lookup."""
 
-    credentials = await fetch_ws_credentials(cookies=cookies, user_agent=user_agent)
+    credentials = await fetch_ws_credentials(
+        cookies=cookies, user_agent=user_agent, page_token=page_token
+    )
     client = BossMqttWsClient(
         node=credentials.nodes[0],
         page_token=credentials.page_token,

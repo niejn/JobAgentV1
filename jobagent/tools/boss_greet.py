@@ -308,6 +308,7 @@ class BossGreetingsManager:
                             cookies=cookies,
                             target=created.target,
                             text=target.greeting,
+                            page_token=contact.page_token,
                         )
                         custom_sent = True
                     except Exception as exc:

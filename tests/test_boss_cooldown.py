@@ -90,6 +90,19 @@ class TestDiscoverRespectsCooldown:
         class FakePage:
             url = "https://www.zhipin.com/web/geek/job"
 
+            async def evaluate(self, _script: str) -> dict:
+                return {
+                    "url": self.url,
+                    "title": "Boss直聘",
+                    "body_chars": 100,
+                    "real_job_cards": 1,
+                    "login_wall": False,
+                    "captcha": False,
+                    "risk_control": False,
+                    "empty_result": False,
+                    "blank_or_data_url": False,
+                }
+
             def is_closed(self) -> bool:
                 return False
 

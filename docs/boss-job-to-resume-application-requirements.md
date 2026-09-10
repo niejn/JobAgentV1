@@ -102,6 +102,11 @@ HR 在会话中发出的请求候选人提供简历的卡片。当前已识别�
 通过 MQTT/WS 发送定制招呼。仅在明确设置 `BOSS_CONTACT_TRANSPORT=cdp` 时，才会走页面
 “立即沟通”按钮路径。
 
+若独立 HTTP 会话无法从用户信息响应取得短期 page token，直连模块会只读连接已登录 Chrome，
+从现有 Boss 页面或一个短生命周期聊天页读取运行时 token；token 只在当前内存流程中传给
+`friend/add` 和 WebSocket 凭证请求，不写入配置、日志或数据库。读取失败返回
+`page_token_missing`，不自动改走职位页 UI。
+
 ### 5.3 招呼发送
 
 1. 生成基于 JD 和候选人事实的定制招呼。

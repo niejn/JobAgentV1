@@ -62,6 +62,29 @@ class RiskBlockedBossDiscovery:
         raise BossAccessError("Boss risk control")
 
 
+class DiagnosedBossFailure:
+    async def discover(self, request: BossDiscoveryRequest) -> list[Job]:
+        raise BossAccessError(
+            "Boss page lost",
+            code="page_lost",
+            details={"url": "data:,", "body_chars": 0, "blank_or_data_url": True},
+        )
+
+
+@pytest.mark.asyncio
+async def test_tool_surfaces_safe_boss_page_diagnostic() -> None:
+    tool = build_boss_job_discovery_tool(DiagnosedBossFailure())
+
+    result = await tool.ainvoke({"query": "AI Agent", "city": "上海"})
+
+    assert result["error_type"] == "page_lost"
+    assert result["diagnostic"] == {
+        "url": "data:,",
+        "body_chars": 0,
+        "blank_or_data_url": True,
+    }
+
+
 class NeverCrawlDiscovery:
     """Fail the test if discovery runs while candidate data is incomplete."""
 

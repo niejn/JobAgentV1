@@ -29,6 +29,37 @@ logger = logging.getLogger(__name__)
 
 _JOB_LIST_PATH = "/wapi/zpgeek/search/joblist.json"
 _BOSS_HOSTS = frozenset({"zhipin.com", "www.zhipin.com"})
+_PAGE_READY_TIMEOUT_S = 10.0
+_PAGE_READY_POLL_S = 0.5
+_HEALTH_SCRIPT = """() => {
+  const text = (document.body?.innerText || '').trim();
+  const visible = (el) => !!el && !!(
+    el.offsetWidth || el.offsetHeight || el.getClientRects().length
+  );
+  const anyVisible = (selectors) => selectors.some(
+    (selector) => visible(document.querySelector(selector))
+  );
+  const cards = Array.from(document.querySelectorAll('.job-card-box'));
+  const realJobCards = cards.filter((card) => (card.innerText || '').trim().length >= 10).length;
+  const loginWall = anyVisible([
+    '[class*="login-dialog"]', '[class*="boss-login"]', '[class*="loginDialog"]',
+    '[class*="login-wrap"]', '.header-login-btn', '[ka="guide_login_btn_click"]'
+  ]);
+  const captcha = anyVisible([
+    '[class*="captcha"]', '[class*="verify"]', 'iframe[src*="captcha"]', 'iframe[src*="verify"]'
+  ]);
+  const lower = text.toLowerCase();
+  const riskControl = /访问受限|操作过于频繁|安全验证|请完成验证|风险控制/.test(text)
+    || lower.includes('captcha') || lower.includes('verify you are human');
+  const emptyResult = /暂无相关职位|没有找到相关职位|未找到相关职位/.test(text);
+  const url = location.href;
+  return {
+    url, title: document.title || '', body_chars: text.length,
+    real_job_cards: realJobCards, login_wall: loginWall, captcha,
+    risk_control: riskControl, empty_result: emptyResult,
+    blank_or_data_url: url === 'about:blank' || url.startsWith('data:')
+  };
+}"""
 
 
 class BossCdpBackend:
@@ -184,7 +215,12 @@ class BossCdpBackend:
             # response fires before the redirect, so continue waiting.
             logger.info("Boss CDP: navigation interrupted (expected): %s", exc)
 
-        await asyncio.sleep(1.0)
+        # A DOMContentLoaded event only proves the shell arrived. Before
+        # trusting the page's network responses, require a usable SPA: real
+        # job text (or an explicit empty result), a live login state, and no
+        # risk/captcha/blank-page signal. One reload is enough to clear a
+        # transient SPA boot failure; repeated reloads feed the risk system.
+        await self._wait_for_search_content(page)
 
         # Poll for the API response (boss-zhipin-scraper pattern)
         deadline = time.monotonic() + 15.0
@@ -192,13 +228,14 @@ class BossCdpBackend:
             await asyncio.sleep(0.3)
 
         if not captured:
-            current_url = str(page.url or "")
-            logger.warning("Boss CDP: no joblist API (URL: %s)", current_url[:100])
+            diagnostic = await self._page_diagnostic(page)
+            logger.warning("Boss CDP: no joblist API: %s", diagnostic)
             raise BossAccessError(
                 "Boss CDP: 页面试图加载但未捕获到 API 响应。\n"
                 "可能原因：Boss 反爬校验或登录态过期。\n"
                 "建议：检查 Chrome 窗口中 Boss 直聘是否已登录，是否触发验证码。",
                 code="boss_access_denied",
+                details=diagnostic,
             )
 
         payload = captured[0]
@@ -233,3 +270,96 @@ class BossCdpBackend:
             if len(jobs) >= request.limit:
                 break
         return jobs
+
+    async def _wait_for_search_content(self, page: Any) -> dict[str, object]:
+        """Wait for a real Boss SPA once, with one bounded reload recovery."""
+
+        for attempt in range(2):
+            deadline = time.monotonic() + _PAGE_READY_TIMEOUT_S
+            latest: dict[str, object] = {}
+            while time.monotonic() < deadline:
+                latest = await self._page_diagnostic(page)
+                failure = self._health_failure(latest)
+                if failure is not None:
+                    raise failure
+                if bool(latest.get("real_job_cards")) or bool(latest.get("empty_result")):
+                    return latest
+                await asyncio.sleep(_PAGE_READY_POLL_S)
+            if attempt == 0:
+                logger.info("Boss CDP: SPA content absent; reloading once")
+                try:
+                    await page.reload(wait_until="domcontentloaded", timeout=30_000)
+                except Exception:
+                    # The next diagnostic distinguishes renderer loss from a
+                    # slow SPA without treating reload itself as success.
+                    logger.info("Boss CDP: reload interrupted", exc_info=True)
+                continue
+            raise BossAccessError(
+                "Boss CDP: 页面壳已加载，但岗位内容没有渲染；已刷新一次后停止。"
+                "请在 Chrome 中检查 Boss 页面、登录态或安全验证，不会自动继续刷新。",
+                code="boss_access_denied",
+                details={**latest, "reason": "spa_content_not_rendered", "reload_attempted": True},
+            )
+        raise AssertionError("two bounded SPA attempts must return or raise")
+
+    async def _page_diagnostic(self, page: Any) -> dict[str, object]:
+        """Return only safe health facts; a lost execution context is diagnostic data."""
+
+        fallback_url = str(getattr(page, "url", "") or "")[:200]
+        try:
+            raw = await page.evaluate(_HEALTH_SCRIPT)
+        except Exception as exc:
+            return {
+                "url": fallback_url,
+                "title": "",
+                "body_chars": 0,
+                "real_job_cards": 0,
+                "login_wall": False,
+                "captcha": False,
+                "risk_control": False,
+                "blank_or_data_url": (
+                    fallback_url == "about:blank" or fallback_url.startswith("data:")
+                ),
+                "probe_error": type(exc).__name__,
+            }
+        if not isinstance(raw, dict):
+            return {"url": fallback_url, "probe_error": "invalid_health_payload"}
+        return {
+            key: value
+            for key, value in raw.items()
+            if key
+            in {
+                "url", "title", "body_chars", "real_job_cards", "login_wall", "captcha",
+                "risk_control", "empty_result", "blank_or_data_url",
+            }
+            and isinstance(value, (str, int, bool))
+        }
+
+    @staticmethod
+    def _health_failure(diagnostic: dict[str, object]) -> BossAccessError | None:
+        if diagnostic.get("probe_error"):
+            return BossAccessError(
+                "Boss CDP: 页面执行上下文已丢失，未继续请求。",
+                code="page_lost",
+                details=diagnostic,
+            )
+        if diagnostic.get("blank_or_data_url"):
+            return BossAccessError(
+                "Boss CDP: 页面被跳转到空白页，未继续请求。",
+                code="page_lost",
+                details=diagnostic,
+            )
+        if diagnostic.get("login_wall"):
+            return BossAccessError(
+                "Boss CDP: 检测到登录墙；请在 Chrome 中重新登录后再试。",
+                code="boss_access_denied",
+                details=diagnostic,
+            )
+        if diagnostic.get("captcha") or diagnostic.get("risk_control"):
+            get_boss_cooldown().trigger("page_risk_control")
+            return BossAccessError(
+                "Boss CDP: 检测到安全验证或风控提示，已停止本次搜索并进入冷却。",
+                code="boss_risk_control",
+                details=diagnostic,
+            )
+        return None

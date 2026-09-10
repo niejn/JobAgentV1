@@ -17,6 +17,10 @@ _ADD_FRIEND_PATH = "/wapi/zpgeek/friend/add.json"
 _USER_INFO_PATH = "/wapi/zpuser/wap/getUserInfo.json"
 
 
+class BossPageTokenError(RuntimeError):
+    """The current logged-in Boss session did not yield an action token."""
+
+
 @dataclass(frozen=True, slots=True)
 class BossDirectContactResult:
     status: str
@@ -47,6 +51,12 @@ class BossDirectContactAdapter:
         self._page_token = page_token
         self._target_finder = target_finder
 
+    @property
+    def page_token(self) -> str:
+        """In-memory only; callers may pass it to the WebSocket credential fetch."""
+
+        return self._page_token or ""
+
     async def enter(self, job: Job) -> BossDirectContactResult:
         security_id = str(job.metadata.get("security_id") or "")
         if not security_id:
@@ -55,7 +65,10 @@ class BossDirectContactAdapter:
         if not lid:
             return BossDirectContactResult("failed", error_type="lid_missing")
         cookies = await self._load_cookies()
-        page_token = self._page_token or await self._fetch_page_token(cookies)
+        try:
+            page_token = self._page_token or await self._fetch_page_token(cookies)
+        except BossPageTokenError:
+            return BossDirectContactResult("failed", error_type="page_token_missing")
         response = await self._post(
             f"https://www.zhipin.com{_ADD_FRIEND_PATH}",
             params={
@@ -165,9 +178,69 @@ class BossDirectContactAdapter:
         body = response.json()
         data = body.get("zpData") if isinstance(body, dict) else None
         token = data.get("token") if isinstance(data, dict) else None
-        if response.status_code != 200 or not isinstance(token, str) or not token:
-            raise ConnectionError("Boss page token was missing")
-        return token
+        if response.status_code == 200 and isinstance(token, str) and token:
+            self._page_token = token
+            return token
+        # Some valid browser sessions no longer expose this short-lived value
+        # to a standalone HTTP call. Read it from an existing Boss page, or a
+        # single short-lived chat page when no Boss page is open, then continue
+        # the direct HTTP + WebSocket contact flow without touching a job page.
+        return await self._fetch_page_token_from_cdp()
+
+    async def _fetch_page_token_from_cdp(self) -> str:
+        from playwright.async_api import async_playwright
+
+        driver = await async_playwright().start()
+        browser: Any | None = None
+        try:
+            browser = await driver.chromium.connect_over_cdp(
+                self._settings.debug_chrome_cdp_endpoint, timeout=10_000
+            )
+            page = next(
+                (
+                    candidate
+                    for context in browser.contexts
+                    for candidate in context.pages
+                    if "zhipin.com" in str(candidate.url or "")
+                ),
+                None,
+            )
+            opened_page = page is None
+            if page is None:
+                context = next((item for item in browser.contexts if item.pages), None)
+                if context is None:
+                    raise BossPageTokenError("Boss page token missing: no Chrome context")
+                page = await context.new_page()
+                await page.goto(
+                    "https://www.zhipin.com/web/geek/chat",
+                    wait_until="domcontentloaded",
+                    timeout=30_000,
+                )
+            try:
+                raw = await page.evaluate(
+                    "() => String((window._PAGE || {}).token || '').split('|')[0]"
+                )
+            finally:
+                if opened_page:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+            if not isinstance(raw, str) or not raw:
+                raise BossPageTokenError("Boss page token missing in current Chrome page")
+            self._page_token = raw
+            return raw
+        except BossPageTokenError:
+            raise
+        except Exception as exc:
+            raise BossPageTokenError("Boss page token unavailable from Chrome") from exc
+        finally:
+            if browser is not None:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            await driver.stop()
 
     @staticmethod
     def _headers(cookies: dict[str, str]) -> dict[str, str]:
