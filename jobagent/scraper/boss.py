@@ -111,6 +111,9 @@ class BossAccessError(RuntimeError):
     - ``cooldown_active`` - rate-limit cooldown running -> wait, do not retry
     - ``boss_risk_control`` - server rejected the request -> cooldown started
     - ``boss_access_denied`` - login expired or automation detected -> check the Chrome window
+    - ``boss_login_required`` - user must log in through the attached debug Chrome
+    - ``boss_cookie_sync_failed`` - browser session could not refresh local
+      direct-contact cookies
     """
 
     def __init__(

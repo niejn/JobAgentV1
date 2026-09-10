@@ -241,6 +241,26 @@ async def interactive_login(platform: str, timeout_minutes: int = 5) -> dict:
     return key_cookies
 
 
+async def sync_boss_cookies_from_cdp_context(context: Any) -> int:
+    """Persist the current Boss Chrome context's cookies without exposing values.
+
+    This is deliberately called only after an authenticated Boss page has
+    passed a page-level login check.  It keeps direct HTTP/WS adapters aligned
+    with the same real Chrome session used for CDP job discovery.
+    """
+
+    all_cookies = cast(list[dict[str, Any]], await context.cookies("https://www.zhipin.com"))
+    boss_cookies = [
+        cookie
+        for cookie in all_cookies
+        if str(cookie.get("domain") or "").lstrip(".").endswith("zhipin.com")
+    ]
+    if not boss_cookies:
+        raise RuntimeError("Boss Chrome context returned no zhipin.com cookies")
+    _save_cookies("boss", boss_cookies)
+    return len(boss_cookies)
+
+
 def _save_cookies(platform: str, cookies: list[dict[str, Any]]) -> Path:
     """Save cookies to ~/.jobagent/cookies/{platform}.json with 0600 permissions."""
     COOKIE_DIR.mkdir(parents=True, exist_ok=True)

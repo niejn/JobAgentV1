@@ -175,13 +175,14 @@ class BossCdpBackend:
         _, context, _ = await self._ensure_connection()
         page = await self._get_page(context)
         try:
-            return await self._discover_on_page(page, request, city_code)
+            return await self._discover_on_page(page, context, request, city_code)
         finally:
             await self._release_page(page)
 
     async def _discover_on_page(
         self,
         page: Any,
+        context: Any,
         request: BossDiscoveryRequest,
         city_code: str,
     ) -> list[Job]:
@@ -221,6 +222,17 @@ class BossCdpBackend:
         # risk/captcha/blank-page signal. One reload is enough to clear a
         # transient SPA boot failure; repeated reloads feed the risk system.
         await self._wait_for_search_content(page)
+        from jobagent.auth.browser_login import sync_boss_cookies_from_cdp_context
+
+        try:
+            saved = await sync_boss_cookies_from_cdp_context(context)
+            logger.info("Boss CDP: synchronized %d session cookies after login check", saved)
+        except Exception as exc:
+            raise BossAccessError(
+                "Boss CDP: 已确认页面登录，但本地 Cookie 同步失败；未继续搜索或联系。",
+                code="boss_cookie_sync_failed",
+                details={"reason": "cookie_sync_failed"},
+            ) from exc
 
         # Poll for the API response (boss-zhipin-scraper pattern)
         deadline = time.monotonic() + 15.0
@@ -351,8 +363,9 @@ class BossCdpBackend:
             )
         if diagnostic.get("login_wall"):
             return BossAccessError(
-                "Boss CDP: 检测到登录墙；请在 Chrome 中重新登录后再试。",
-                code="boss_access_denied",
+                "Boss CDP: 检测到未登录状态。请在已打开的调试 Chrome 中完成 Boss 登录，"
+                "然后回复“已登录”；系统会再次验证并同步本地 Cookie 后继续。",
+                code="boss_login_required",
                 details=diagnostic,
             )
         if diagnostic.get("captcha") or diagnostic.get("risk_control"):

@@ -135,6 +135,9 @@ class TestDiscoverRespectsCooldown:
             async def new_page(self) -> FakePage:
                 return FakePage()
 
+            async def cookies(self, _url: str):
+                return [{"name": "wt2", "value": "x", "domain": ".zhipin.com"}]
+
         async def fake_ensure():
             return (object(), FakeContext(), object())
 

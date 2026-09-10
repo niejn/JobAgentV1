@@ -24,6 +24,7 @@ from jobagent.auth.browser_login import (
     get_cookie_age_hours,
     inspect_cookie_providers,
     interactive_login,
+    sync_boss_cookies_from_cdp_context,
 )
 from jobagent.cli_status import TypewriterTranscript
 from jobagent.config import Settings, get_settings
@@ -151,9 +152,9 @@ def run_command(
 @click.option("--check", is_flag=True, help="Only check if existing cookies are valid.")
 def login_command(platform: str, timeout: int, check: bool) -> None:
     """Interactive browser login to save cookies."""
-    valid = {"xhs", "linkedin", "wechat", "all"}
+    valid = {"boss", "xhs", "linkedin", "wechat", "all"}
     if platform == "boss":
-        click.echo("Boss 直聘使用 CDP 连接真实 Chrome 浏览器，不需要登录。")
+        asyncio.run(_boss_cdp_login(check_only=check, timeout_minutes=timeout))
         return
     if platform not in valid:
         raise click.UsageError(
@@ -166,6 +167,97 @@ def login_command(platform: str, timeout: int, check: bool) -> None:
         p for p in PLATFORM_CONFIG.keys() if p != "boss"
     ] if platform == "all" else [platform]
     asyncio.run(_login(platforms=platforms, timeout=timeout, check_only=check))
+
+
+async def _boss_cdp_login(*, check_only: bool, timeout_minutes: int) -> None:
+    """Verify a manually logged-in debug Chrome session and persist its cookies."""
+
+    from playwright.async_api import async_playwright
+
+    settings = get_settings()
+    driver = await async_playwright().start()
+    browser = None
+    try:
+        try:
+            browser = await driver.chromium.connect_over_cdp(
+                settings.debug_chrome_cdp_endpoint, timeout=10_000
+            )
+        except Exception:
+            click.echo(
+                "[boss] 未连接到调试 Chrome。请先启动带 remote-debugging-port 的 Chrome 后重试。"
+            )
+            return
+        context = next((item for item in browser.contexts if item.pages), None)
+        if context is None:
+            click.echo("[boss] 调试 Chrome 没有可用浏览器上下文。")
+            return
+        page = next(
+            (
+                item
+                for item in context.pages
+                if "zhipin.com" in str(item.url or "")
+            ),
+            None,
+        )
+        if page is None:
+            page = await context.new_page()
+        try:
+            await page.goto(
+                "https://www.zhipin.com/web/geek/job",
+                wait_until="domcontentloaded",
+                timeout=30_000,
+            )
+        except Exception:
+            pass
+        if not check_only:
+            click.echo(
+                "[boss] 请在已打开的调试 Chrome 中手动完成 Boss 登录；登录完成后保持页面打开。"
+            )
+        deadline = asyncio.get_event_loop().time() + (
+            1 if check_only else timeout_minutes * 60
+        )
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                logged_in = await page.evaluate(
+                    """() => {
+                        const visible = (el) => !!el && !!(
+                          el.offsetWidth || el.offsetHeight || el.getClientRects().length
+                        );
+                        const login = [
+                          '[class*="login-dialog"]', '[class*="boss-login"]', '.header-login-btn'
+                        ]
+                          .some((selector) => visible(document.querySelector(selector)));
+                        const user = ['.user-nav', '.nav-figure'].some(
+                          (selector) => visible(document.querySelector(selector))
+                        );
+                        return user && !login;
+                    }"""
+                )
+            except Exception:
+                logged_in = False
+            if logged_in is True:
+                saved = await sync_boss_cookies_from_cdp_context(context)
+                click.echo(
+                    click.style(f"[boss] ✅ 已验证登录并同步 {saved} 个 Boss Cookie。", fg="green")
+                )
+                return
+            if check_only:
+                break
+            await asyncio.sleep(1)
+        click.echo(
+            click.style(
+                "[boss] ❌ 尚未检测到登录；请在调试 Chrome 中完成登录后再次执行本命令，"
+                "或在 Agent 中回复“已登录”。",
+                fg="red",
+            )
+        )
+    finally:
+        if browser is not None:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+        await driver.stop()
 
 
 async def _wechat_login(*, check_only: bool, timeout_minutes: int) -> None:

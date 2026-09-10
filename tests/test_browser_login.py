@@ -15,6 +15,7 @@ from jobagent.auth.browser_login import (
     cookies_valid,
     get_cookie_age_hours,
     load_cookies,
+    sync_boss_cookies_from_cdp_context,
 )
 
 
@@ -90,6 +91,23 @@ class TestSaveLoadCookies:
         f = tmp_cookie_dir / "boss.json"
         mode = f.stat().st_mode & 0o777
         assert mode == 0o600
+
+    @pytest.mark.asyncio
+    async def test_sync_boss_cdp_context_saves_only_boss_cookies(self, tmp_cookie_dir) -> None:
+        class Context:
+            async def cookies(self, url: str):
+                assert url == "https://www.zhipin.com"
+                return [
+                    {"name": "wt2", "value": "x", "domain": ".zhipin.com"},
+                    {"name": "session", "value": "y", "domain": ".example.com"},
+                ]
+
+        saved = await sync_boss_cookies_from_cdp_context(Context())
+
+        assert saved == 1
+        assert await load_cookies("boss") == [
+            {"name": "wt2", "value": "x", "domain": ".zhipin.com"}
+        ]
 
 
 # ---------------------------------------------------------------------------
