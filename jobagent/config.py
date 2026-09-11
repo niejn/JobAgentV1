@@ -105,6 +105,13 @@ class Settings(BaseSettings):
             "WebSocket greeting; Boss job reads remain on the separate CDP transport."
         ),
     )
+    boss_chat_transport: Literal["http", "cdp"] = Field(
+        default="http",
+        description=(
+            "Boss read-only conversation list transport. HTTP uses the logged-in "
+            "session cookies directly; CDP is an explicit compatibility fallback."
+        ),
+    )
     boss_greeting: str | None = Field(
         default=None,
         description="Greeting template for Boss直聘. Supports {company}, {title}, {name}.",

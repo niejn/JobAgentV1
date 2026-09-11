@@ -44,12 +44,24 @@ def build_boss_chat_list_tool(settings: Settings) -> StructuredTool:
         circuit = BossCircuit(boss_circuit_path(settings.jobagent_state_db))
         if (refusal := circuit.check()) is not None:
             return refusal
-        from jobagent.applier.boss_chat import BossChatReader
+        from jobagent.applier.boss_chat import BossChatReader, list_boss_greetings_http
 
-        async with BossChatReader(settings) as reader:
-            result = await reader.list_greetings(
-                filter_name=filter_name, label_id=label_id, limit=limit
+        if settings.boss_chat_transport == "http":
+            resolved_label = 0 if label_id is None and filter_name == "全部" else label_id
+            if resolved_label is None:
+                return {
+                    "status": "failed",
+                    "error_type": "unknown_filter",
+                    "message": f"过滤器「{filter_name}」的 labelId 尚未校准",
+                }
+            result = await list_boss_greetings_http(
+                settings, label_id=resolved_label, limit=limit
             )
+        else:
+            async with BossChatReader(settings) as reader:
+                result = await reader.list_greetings(
+                    filter_name=filter_name, label_id=label_id, limit=limit
+                )
         circuit.record(result)
         return result
 

@@ -99,7 +99,9 @@ HR 在会话中发出的请求候选人提供简历的卡片。当前已识别�
 并通过会话列表确认 `friend_id`。`geekEnter` 仅用于进入已有会话，不作为创建成功证据。
 默认组合为 `BOSS_SEARCH_TRANSPORT=cdp` 与 `BOSS_CONTACT_TRANSPORT=http`：岗位发现
 继续复用已登录 Chrome 的 CDP，`boss_greet_jobs` 则不依赖职位网页，直接创建会话并在确认后
-通过 MQTT/WS 发送定制招呼。仅在明确设置 `BOSS_CONTACT_TRANSPORT=cdp` 时，才会走页面
+通过 MQTT/WS 发送定制招呼。会话列表核实默认直接调用 Boss HTTP relation 接口，不加载聊天 SPA；
+仅在明确设置 `BOSS_CHAT_TRANSPORT=cdp` 时才走聊天页兼容路径。仅在明确设置
+`BOSS_CONTACT_TRANSPORT=cdp` 时，才会走职位页
 “立即沟通”按钮路径。
 
 首次 Boss 操作若本地 CDP 端口尚未就绪，JobAgent 启动专用、可见的 Chrome profile 并打开

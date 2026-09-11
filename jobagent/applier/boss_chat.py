@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
@@ -50,6 +51,100 @@ _LABEL_IDS = {"全部": 0}  # calibration point: remaining tabs' ids unknown
 _NAV_TIMEOUT_MS = 30_000
 _LIST_TIMEOUT_S = 45.0
 _MAX_FRIENDS = 100
+
+
+async def list_boss_greetings_http(
+    settings: Settings,
+    *,
+    label_id: int = 0,
+    limit: int = _MAX_FRIENDS,
+) -> dict[str, Any]:
+    """List Boss conversations through the read-only relation endpoint.
+
+    This adapter deliberately does not attach CDP or load ``/web/geek/chat``;
+    it is safe to use while the chat SPA is blocked or its renderer was killed.
+    """
+
+    from jobagent.auth.cookie_manager import get_cookies
+
+    try:
+        import httpx
+    except ImportError:
+        return {"status": "failed", "error_type": "httpx_unavailable"}
+    items = await get_cookies("boss", settings)
+    cookies = {
+        str(item["name"]): str(item["value"])
+        for item in items
+        if item.get("name") and item.get("value")
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://www.zhipin.com",
+        "Referer": "https://www.zhipin.com/web/geek/chat",
+        "X-Requested-With": "XMLHttpRequest",
+        "zp_token": cookies.get("bst", ""),
+    }
+    try:
+        async with httpx.AsyncClient(
+            cookies=cookies, headers=headers, timeout=20, follow_redirects=True
+        ) as client:
+            response = await client.get(
+                "https://www.zhipin.com/wapi/zprelation/friend/geekFilterByLabel",
+                params={"labelId": label_id, "_": int(time.time() * 1000)},
+            )
+        body = response.json()
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "error_type": "conversation_list_request_failed",
+            "message": type(exc).__name__,
+        }
+    code = body.get("code") if isinstance(body, dict) else None
+    if response.status_code != 200 or code != 0:
+        return {
+            "status": "failed",
+            "error_type": "api_rejected",
+            "code": code,
+            "message": str(body.get("message") or "Boss conversation list rejected")[:200]
+            if isinstance(body, dict)
+            else "Boss conversation list rejected",
+        }
+    friends = ((body.get("zpData") or {}).get("friendList") or []) if isinstance(body, dict) else []
+    real = [
+        friend
+        for friend in friends
+        if isinstance(friend, dict) and int(friend.get("friendId") or 0) > 1000
+    ]
+    greetings: list[dict[str, Any]] = []
+    for friend in real[: max(1, min(limit, _MAX_FRIENDS))]:
+        metadata = _normalize_job_metadata(
+            {
+                "jobId": friend.get("encryptJobId") or friend.get("jobId"),
+                "jobUrl": friend.get("jobUrl") or friend.get("jobDetailUrl"),
+                "title": friend.get("jobName") or friend.get("positionName"),
+                "company": friend.get("brandName"),
+                "city": friend.get("jobCity"),
+                "source": "conversation_friend_http",
+            },
+            source="conversation_friend_http",
+        )
+        metadata = metadata or _resolve_registry_job_metadata(
+            settings,
+            company=str(friend.get("brandName") or ""),
+            title=str(friend.get("jobName") or friend.get("positionName") or ""),
+        )
+        friend = dict(friend)
+        friend["job_metadata"] = metadata
+        greetings.append(friend)
+    logger.info("Boss HTTP chat list: %d friends (labelId=%s)", len(greetings), label_id)
+    return {
+        "status": "ok",
+        "transport": "http",
+        "filter_label_id": label_id,
+        "count": len(greetings),
+        "greetings": greetings,
+    }
 
 
 def _normalize_job_metadata(

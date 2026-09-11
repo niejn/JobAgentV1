@@ -12,6 +12,7 @@ from jobagent.applier.boss_chat import (
     BossChatReader,
     _normalize_job_metadata,
     _resolve_registry_job_metadata,
+    list_boss_greetings_http,
 )
 from jobagent.config import Settings
 from jobagent.journey.job_registry import SQLiteJobRegistry
@@ -23,6 +24,7 @@ def _settings(tmp_path: Path) -> Settings:
         _env_file=None,
         jobagent_state_db=tmp_path / "state.db",
         jobagent_checkpoint_db=tmp_path / "checkpoints.db",
+        boss_chat_transport="cdp",
     )
 
 
@@ -220,6 +222,44 @@ async def test_tool_runs_read_only(tmp_path: Path) -> None:
         result = await tool.coroutine(filter_name="全部")
 
     assert result["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_http_list_does_not_require_chat_page(tmp_path: Path) -> None:
+    response = MagicMock(status_code=200)
+    response.json.return_value = {
+        "code": 0,
+        "zpData": {
+            "friendList": [
+                {
+                    "friendId": 20001,
+                    "friendSource": 1,
+                    "encryptFriendId": "enc-1",
+                    "name": "张HR",
+                    "brandName": "字节跳动",
+                    "jobName": "后端开发",
+                    "jobCity": "上海",
+                },
+                {"friendId": 100, "name": "职位助理"},
+            ]
+        },
+    }
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    client.get = AsyncMock(return_value=response)
+    settings = _settings(tmp_path)
+    with (
+        patch("jobagent.auth.cookie_manager.get_cookies", new=AsyncMock(return_value=[
+            {"name": "bst", "value": "b"}
+        ])),
+        patch("httpx.AsyncClient", return_value=client),
+    ):
+        result = await list_boss_greetings_http(settings)
+    assert result["status"] == "ok"
+    assert result["transport"] == "http"
+    assert result["count"] == 1
+    assert result["greetings"][0]["name"] == "张HR"
 
 
 @pytest.mark.asyncio
