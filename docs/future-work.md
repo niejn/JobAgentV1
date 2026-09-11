@@ -84,6 +84,30 @@ XHS 邮件发送恢复优先通过发件邮箱的 Sent 文件夹验证 `Message-
 验收：连续执行多个 Boss 任务复用同一浏览器进程；服务退出能回收自建实例；
 复用外部实例时只断开连接；启动失败、热重载及端口占用均有明确日志。
 
+## 高优先级：Boss Subagent 会话预检 Middleware
+
+在 `boss_recruiting` Subagent 内增加专用的 `BossSessionPreflightMiddleware`，不加载到 root、
+XHS Subagent 或全局 Agent。它必须在 Boss Subagent 的任何工具执行前读取实时状态，禁止模型
+仅凭历史对话中的“熔断截止时间”或“登录已恢复”做判断。
+
+- 首次进入 Boss Subagent 时执行 `boss_session_status`：检查调试 Chrome/CDP、Boss 登录墙、
+  验证码/风控、空白页和本地 Cookie 同步；状态不为 `ready` 时直接阻止所有 Boss 工具。
+- `ready` 状态只在 middleware 进程内缓存 3–5 分钟；缓存不写入 checkpoint 或对话历史。
+- 在 `awrap_model_call` 中可将状态作为本次请求的临时 system context 投影，但不能把动态状态
+  永久追加到 `messages`，避免 reset 后模型继续复述旧熔断信息。
+- 在 `awrap_tool_call` 中设置硬门，即使模型忽略临时上下文，也不能执行搜索、读取、建会话、
+  打招呼、回复或简历发送。
+- 遇到 `boss_login_required`、`code=7`、`page_lost`、`page_token_missing`、
+  `boss_cookie_sync_failed` 时立即清除缓存；下一次 Boss 操作重新预检。`friend_add_rejected`
+  属于岗位/平台业务拒绝，不能自动当作登录失效。
+- `circuit_open` 必须每次从共享状态文件读取，不能由模型根据历史任务描述推导；reset 后下一次
+  预检必须看到 `closed`。
+- 预检只读，不创建会话、不发送消息、不触发 HITL；真正的 Boss 外部写 Tool 仍必须独立 HITL。
+
+验收：reset 熔断后 Boss Subagent 不得继续报告旧截止时间；未登录时不会调用任何 Boss Tool；
+用户登录并重新发起任务后只检查一次并同步 Cookie；同一缓存窗口内不会重复检查；缓存失效或
+认证异常后会重新检查；root 和 XHS Subagent 的工具与行为不受影响。
+
 ## 高优先级：ResumeCraftingAgent（定制简历制作子 Agent）
 
 新增不属于任何招聘渠道的 `resume_crafting` Subagent，使用 `resume-optimizer` 与 `kami` Skill，
