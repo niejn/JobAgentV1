@@ -106,6 +106,32 @@ async def test_publish_waits_past_inbound_packet_for_puback() -> None:
 
 
 @pytest.mark.asyncio
+async def test_publish_accepts_matching_outgoing_echo_before_puback() -> None:
+    socket = MagicMock()
+    socket.send = AsyncMock()
+    echoed = encode_mqtt_publish(
+        topic="chat",
+        payload=encode_text_protocol(
+            from_uid=1, to_uid=2, friend_source=0, encrypt_uid="boss", text="测试"
+        ),
+        packet_id=77,
+    )
+    socket.recv = AsyncMock(return_value=echoed)
+    client = BossMqttWsClient(node="ws.zhipin.com", page_token="p", ws_password="w")
+    client._socket = socket
+
+    await client.publish_text(
+        from_uid=1,
+        to_uid=2,
+        friend_source=0,
+        encrypt_uid="boss",
+        text="测试",
+    )
+
+    assert socket.recv.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_fetch_ws_nodes_redacts_url_parameters() -> None:
     response = MagicMock(status_code=200)
     response.json.return_value = {

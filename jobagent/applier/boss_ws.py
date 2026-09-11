@@ -304,6 +304,7 @@ class BossMqttWsClient:
         self._cookies = cookies or {}
         self._user_agent = user_agent
         self._socket: Any | None = None
+        self._next_packet_id = 0
 
     async def connect(self) -> None:
         try:
@@ -353,7 +354,11 @@ class BossMqttWsClient:
             encrypt_uid=encrypt_uid,
             text=text,
         )
-        await self._socket.send(encode_mqtt_publish(topic="chat", payload=payload))
+        self._next_packet_id = (self._next_packet_id % 0xFFFF) + 1
+        packet_id = self._next_packet_id
+        await self._socket.send(
+            encode_mqtt_publish(topic="chat", payload=payload, packet_id=packet_id)
+        )
         deadline = time.monotonic() + 10
         while True:
             remaining = deadline - time.monotonic()
@@ -361,8 +366,18 @@ class BossMqttWsClient:
                 raise TimeoutError("Boss MQTT publish acknowledgement timed out")
             packet = await asyncio.wait_for(self._recv_bytes(), timeout=remaining)
             packet_type = mqtt_packet_type(packet)
-            if packet_type == 4 and mqtt_puback_packet_id(packet) == 1:
+            if packet_type == 4 and mqtt_puback_packet_id(packet) == packet_id:
                 return
+            if packet_type == 3:
+                # Some Boss nodes echo the accepted outgoing message before
+                # the QoS-1 PUBACK. That echo is positive delivery evidence;
+                # do not wait 10 seconds for an ACK that may be delayed.
+                try:
+                    echoed = decode_chat_protocol(mqtt_publish_payload(packet))
+                    if any(item.get("text") == text for item in echoed["messages"]):
+                        return
+                except (TypeError, ValueError, KeyError):
+                    pass
             # The broker can deliver an inbound chat/event packet before the
             # PUBACK.  It is not evidence of failure; keep reading within the
             # bounded acknowledgement window.
