@@ -53,6 +53,34 @@ _LIST_TIMEOUT_S = 45.0
 _MAX_FRIENDS = 100
 
 
+async def _sync_live_boss_cookies(settings: Settings) -> int:
+    """Refresh the HTTP session from the same debug Chrome used for login."""
+
+    from playwright.async_api import async_playwright
+
+    from jobagent.auth.boss_debug_chrome import ensure_boss_debug_chrome
+    from jobagent.auth.browser_login import sync_boss_cookies_from_cdp_context
+
+    await ensure_boss_debug_chrome(settings)
+    driver = await async_playwright().start()
+    browser: Any | None = None
+    try:
+        browser = await driver.chromium.connect_over_cdp(
+            settings.debug_chrome_cdp_endpoint, timeout=10_000
+        )
+        context = next((item for item in browser.contexts if item.pages), None)
+        if context is None:
+            raise RuntimeError("Boss debug Chrome has no browser context")
+        return await sync_boss_cookies_from_cdp_context(context)
+    finally:
+        if browser is not None:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+        await driver.stop()
+
+
 async def list_boss_greetings_http(
     settings: Settings,
     *,
@@ -61,8 +89,9 @@ async def list_boss_greetings_http(
 ) -> dict[str, Any]:
     """List Boss conversations through the read-only relation endpoint.
 
-    This adapter deliberately does not attach CDP or load ``/web/geek/chat``;
-    it is safe to use while the chat SPA is blocked or its renderer was killed.
+    This adapter does not load or evaluate ``/web/geek/chat``. It only briefly
+    attaches to the logged-in CDP context to refresh cookies, then uses the
+    relation endpoint; it remains safe when the chat SPA renderer is blocked.
     """
 
     from jobagent.auth.cookie_manager import get_cookies
@@ -71,6 +100,16 @@ async def list_boss_greetings_http(
         import httpx
     except ImportError:
         return {"status": "failed", "error_type": "httpx_unavailable"}
+    try:
+        saved = await _sync_live_boss_cookies(settings)
+        logger.info("Boss HTTP chat list: synchronized %d live cookies", saved)
+    except Exception:
+        logger.warning("Boss HTTP chat list: live cookie sync unavailable", exc_info=True)
+        return {
+            "status": "failed",
+            "error_type": "boss_login_required",
+            "message": "无法从调试 Chrome 同步 Boss Cookie；请在该 Chrome 登录后重试。",
+        }
     items = await get_cookies("boss", settings)
     cookies = {
         str(item["name"]): str(item["value"])
@@ -104,7 +143,7 @@ async def list_boss_greetings_http(
     if response.status_code != 200 or code != 0:
         return {
             "status": "failed",
-            "error_type": "api_rejected",
+            "error_type": "boss_login_required" if code == 7 else "api_rejected",
             "code": code,
             "message": str(body.get("message") or "Boss conversation list rejected")[:200]
             if isinstance(body, dict)

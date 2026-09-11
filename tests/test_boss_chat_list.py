@@ -250,6 +250,7 @@ async def test_http_list_does_not_require_chat_page(tmp_path: Path) -> None:
     client.get = AsyncMock(return_value=response)
     settings = _settings(tmp_path)
     with (
+        patch("jobagent.applier.boss_chat._sync_live_boss_cookies", new=AsyncMock(return_value=1)),
         patch("jobagent.auth.cookie_manager.get_cookies", new=AsyncMock(return_value=[
             {"name": "bst", "value": "b"}
         ])),
