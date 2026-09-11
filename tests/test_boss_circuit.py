@@ -28,6 +28,47 @@ def test_three_consecutive_kills_trip_the_breaker(tmp_path: Path) -> None:
     assert "熔断" in refusal["message"]
 
 
+def test_first_trip_uses_three_minute_cooldown(tmp_path: Path) -> None:
+    circuit = _circuit(tmp_path)
+    for _ in range(3):
+        circuit.record(PAGE_KILLED)
+    state = json.loads(circuit._path.read_text(encoding="utf-8"))
+    until = datetime.fromisoformat(state["until"])
+    remaining = until - datetime.now().astimezone()
+    assert timedelta(minutes=2, seconds=59) < remaining <= timedelta(minutes=3)
+    assert state["trip_count"] == 1
+
+
+def test_repeated_trips_exponentially_back_off_and_success_resets(tmp_path: Path) -> None:
+    circuit = _circuit(tmp_path)
+    for _ in range(3):
+        circuit.record(PAGE_KILLED)
+    state = json.loads(circuit._path.read_text(encoding="utf-8"))
+    state["until"] = (datetime.now().astimezone() - timedelta(seconds=1)).isoformat()
+    circuit._path.write_text(json.dumps(state), encoding="utf-8")
+    circuit.check()
+    for _ in range(3):
+        circuit.record(PAGE_KILLED)
+    state = json.loads(circuit._path.read_text(encoding="utf-8"))
+    assert state["trip_count"] == 2
+    assert state["cooldown_seconds"] == 360
+    circuit.record({"status": "ok"})
+    assert "trip_count" not in json.loads(circuit._path.read_text(encoding="utf-8"))
+
+
+def test_legacy_four_hour_open_state_is_migrated_to_short_window(tmp_path: Path) -> None:
+    circuit = _circuit(tmp_path)
+    circuit._path.write_text(json.dumps({
+        "failures": 3,
+        "until": (datetime.now().astimezone() + timedelta(hours=4)).isoformat(),
+    }), encoding="utf-8")
+    refusal = circuit.check()
+    assert refusal is not None
+    state = json.loads(circuit._path.read_text(encoding="utf-8"))
+    until = datetime.fromisoformat(state["until"])
+    assert until - datetime.now().astimezone() <= timedelta(minutes=3)
+
+
 def test_two_kills_do_not_trip_and_success_resets(tmp_path: Path) -> None:
     circuit = _circuit(tmp_path)
     circuit.record(PAGE_KILLED)

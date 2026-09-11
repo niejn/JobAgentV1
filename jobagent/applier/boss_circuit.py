@@ -33,14 +33,23 @@ _TRIP_ERRORS = frozenset(
     }
 )
 _THRESHOLD = 3
-_COOLDOWN = timedelta(hours=4)
+_BASE_COOLDOWN_SECONDS = 180
+_MAX_COOLDOWN_SECONDS = 3_600
 
 
 class BossCircuit:
     """File-backed consecutive-failure breaker shared across processes."""
 
-    def __init__(self, state_path: Path) -> None:
+    def __init__(
+        self,
+        state_path: Path,
+        *,
+        cooldown_seconds: int = _BASE_COOLDOWN_SECONDS,
+        max_cooldown_seconds: int = _MAX_COOLDOWN_SECONDS,
+    ) -> None:
         self._path = state_path
+        self._cooldown_seconds = max(1, cooldown_seconds)
+        self._max_cooldown_seconds = max(self._cooldown_seconds, max_cooldown_seconds)
 
     # -- public API ---------------------------------------------------------
 
@@ -70,9 +79,24 @@ class BossCircuit:
             until_dt = datetime.fromisoformat(until)
         except ValueError:
             return None
-        if datetime.now().astimezone() >= until_dt:
-            self._save({})  # cooldown over: reset
+        now = datetime.now().astimezone()
+        if now >= until_dt:
+            # Keep the trip count for exponential backoff across repeated
+            # cooldown windows; a successful Boss operation resets it.
+            trip_count = int(state.get("trip_count", 0))
+            self._save({"failures": 0, "trip_count": trip_count} if trip_count else {})
             return None
+        # Migrate an old fixed four-hour open circuit immediately. It was
+        # written before the short, exponential policy existed and should not
+        # strand local testing until the historical deadline.
+        if "trip_count" not in state and until_dt - now > timedelta(
+            seconds=self._max_cooldown_seconds
+        ):
+            until_dt = now + timedelta(seconds=self._cooldown_seconds)
+            state = {"failures": int(state.get("failures", _THRESHOLD)), "trip_count": 1,
+                     "until": until_dt.isoformat()}
+            self._save(state)
+            until = until_dt.isoformat()
         return {
             "status": "failed",
             "error_type": "circuit_open",
@@ -95,15 +119,25 @@ class BossCircuit:
         state = self._load()
         failures = int(state.get("failures", 0)) + 1
         if failures >= _THRESHOLD:
-            until = datetime.now().astimezone() + _COOLDOWN
-            self._save({"failures": failures, "until": until.isoformat()})
+            trip_count = int(state.get("trip_count", 0)) + 1
+            cooldown = min(
+                self._cooldown_seconds * (2 ** (trip_count - 1)),
+                self._max_cooldown_seconds,
+            )
+            until = datetime.now().astimezone() + timedelta(seconds=cooldown)
+            self._save({
+                "failures": failures,
+                "trip_count": trip_count,
+                "cooldown_seconds": cooldown,
+                "until": until.isoformat(),
+            })
             logger.warning(
                 "Boss circuit OPEN until %s after %d failures",
                 until,
                 failures,
             )
         else:
-            self._save({"failures": failures})
+            self._save({"failures": failures, "trip_count": int(state.get("trip_count", 0))})
 
     # -- storage -------------------------------------------------------------
 
