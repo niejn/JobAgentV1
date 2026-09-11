@@ -150,6 +150,22 @@ async def test_http_contact_creates_conversation_then_sends_greeting(tmp_path) -
 
 
 @pytest.mark.asyncio
+async def test_ack_timeout_history_check_is_bounded_and_never_resends(monkeypatch) -> None:
+    history = AsyncMock(side_effect=[False, False, True])
+    monkeypatch.setattr("jobagent.applier.boss_ws.verify_text_in_conversation", history)
+    monkeypatch.setattr("jobagent.tools.boss_greet.asyncio.sleep", AsyncMock())
+
+    result = await BossGreetingsManager._verify_with_retry(
+        cookies={},
+        target=BossConversationTarget(42, 0, "enc", "王媛", "际数科技", "岗位"),
+        text="定制招呼",
+    )
+
+    assert result is True
+    assert history.await_count == 3
+
+
+@pytest.mark.asyncio
 async def test_tool_accepts_schema_parsed_greeting_targets(tmp_path) -> None:
     manager = SimpleNamespace(greet=AsyncMock(return_value={"status": "completed"}))
     tool = build_boss_greet_jobs_tool(manager)

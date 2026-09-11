@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -219,10 +220,7 @@ class BossGreetingsManager:
         """Create conversations with friend/add and greet through MQTT/WS."""
 
         from jobagent.applier.boss_direct_contact import BossDirectContactAdapter
-        from jobagent.applier.boss_ws import (
-            send_text_to_target,
-            verify_text_in_conversation,
-        )
+        from jobagent.applier.boss_ws import send_text_to_target
         from jobagent.auth.cookie_manager import get_cookies
         from jobagent.journey.boss_contact import BossContactRegistry
 
@@ -304,6 +302,7 @@ class BossGreetingsManager:
                 created = await contact.enter(job)
                 custom_sent = False
                 send_error = ""
+                delivery_unverified = False
                 if created.status == "confirmed" and created.target and target.greeting:
                     try:
                         await send_text_to_target(
@@ -313,18 +312,31 @@ class BossGreetingsManager:
                             page_token=contact.page_token,
                         )
                         custom_sent = True
-                    except Exception as exc:
-                        send_error = type(exc).__name__
-                        if await verify_text_in_conversation(
+                    except TimeoutError:
+                        if await self._verify_with_retry(
                             cookies=cookies, target=created.target, text=target.greeting
                         ):
                             custom_sent = True
                             send_error = "ack_timeout_but_history_confirmed"
                         else:
+                            delivery_unverified = True
+                            send_error = "ack_timeout_history_not_visible"
+                    except Exception as exc:
+                        send_error = type(exc).__name__
+                        if await self._verify_with_retry(
+                            cookies=cookies, target=created.target, text=target.greeting
+                        ):
+                            custom_sent = True
+                            send_error = "ack_timeout_but_history_confirmed"
+                        elif isinstance(exc, (ConnectionError, OSError)):
+                            delivery_unverified = True
+                        else:
                             logger.warning("Direct Boss greeting failed: %s", send_error)
                 status = (
                     "submitted"
                     if created.status == "confirmed" and custom_sent
+                    else "unverified"
+                    if created.status == "confirmed" and delivery_unverified
                     else "failed"
                 )
                 entry = {
@@ -333,11 +345,11 @@ class BossGreetingsManager:
                     "title": target.title,
                     "url": target.url,
                     "status": status,
-                    "reason": (
-                        "direct_contact_confirmed"
-                        if status == "submitted"
-                        else created.error_type or send_error or "greeting_unconfirmed"
-                    ),
+                    "reason": "direct_contact_confirmed"
+                    if status == "submitted"
+                    else "greeting_unverified"
+                    if status == "unverified"
+                    else created.error_type or send_error or "greeting_unconfirmed",
                     "greeting_sent": custom_sent,
                     "default_greeting_present": created.default_greeting is not None,
                     "platform_error_code": getattr(created, "platform_code", None),
@@ -372,12 +384,28 @@ class BossGreetingsManager:
             if contact_registry is not None:
                 contact_registry.close()
         succeeded = sum(1 for item in results if item["status"] == "submitted")
+        has_unverified = any(item["status"] == "unverified" for item in results)
         return {
-            "status": "completed" if succeeded else "failed",
+            "status": "completed" if succeeded else "unverified" if has_unverified else "failed",
             "total": len(targets),
             "succeeded": succeeded,
             "results": results,
         }
+
+    @staticmethod
+    async def _verify_with_retry(*, cookies: dict[str, str], target: Any, text: str) -> bool:
+        """Poll Boss history after an ACK timeout; never send a second message."""
+        from jobagent.applier.boss_ws import verify_text_in_conversation
+
+        for attempt in range(3):
+            try:
+                if await verify_text_in_conversation(cookies=cookies, target=target, text=text):
+                    return True
+            except Exception:
+                logger.info("Boss greeting history check failed (attempt %d)", attempt + 1)
+            if attempt < 2:
+                await asyncio.sleep(2.0)
+        return False
 
     def _record_greeted(
         self, registry: SQLiteJobRegistry, target: GreetingTarget
