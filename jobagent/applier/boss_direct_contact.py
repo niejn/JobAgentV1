@@ -69,8 +69,12 @@ class BossDirectContactAdapter:
         cookies = await self._load_cookies()
         try:
             page_token = self._page_token or await self._fetch_page_token(cookies)
-        except BossPageTokenError:
-            return BossDirectContactResult("failed", error_type="page_token_missing")
+        except BossPageTokenError as exc:
+            return BossDirectContactResult(
+                "failed",
+                error_type="page_token_missing",
+                platform_message=str(exc)[:200],
+            )
         response = await self._post(
             f"https://www.zhipin.com{_ADD_FRIEND_PATH}",
             params={
@@ -207,40 +211,32 @@ class BossDirectContactAdapter:
             browser = await driver.chromium.connect_over_cdp(
                 self._settings.debug_chrome_cdp_endpoint, timeout=10_000
             )
-            page = next(
-                (
-                    candidate
-                    for context in browser.contexts
-                    for candidate in context.pages
-                    if "zhipin.com" in str(candidate.url or "")
-                ),
-                None,
-            )
-            opened_page = page is None
-            if page is None:
-                context = next((item for item in browser.contexts if item.pages), None)
-                if context is None:
-                    raise BossPageTokenError("Boss page token missing: no Chrome context")
-                page = await context.new_page()
+            context = next((item for item in browser.contexts if item.pages), None)
+            if context is None:
+                raise BossPageTokenError("Boss page token missing: no Chrome context")
+            pages = [
+                candidate
+                for candidate in context.pages
+                if not candidate.is_closed() and "zhipin.com" in str(candidate.url or "")
+            ]
+            for page in pages:
+                try:
+                    return await self._wait_page_token(page, "existing Boss page")
+                except BossPageTokenError:
+                    continue
+            page = await context.new_page()
+            try:
                 await page.goto(
                     "https://www.zhipin.com/web/geek/chat",
                     wait_until="domcontentloaded",
                     timeout=30_000,
                 )
-            try:
-                raw = await page.evaluate(
-                    "() => String((window._PAGE || {}).token || '').split('|')[0]"
-                )
+                return await self._wait_page_token(page, "new Boss chat page")
             finally:
-                if opened_page:
-                    try:
-                        await page.close()
-                    except Exception:
-                        pass
-            if not isinstance(raw, str) or not raw:
-                raise BossPageTokenError("Boss page token missing in current Chrome page")
-            self._page_token = raw
-            return raw
+                try:
+                    await page.close()
+                except Exception:
+                    pass
         except BossPageTokenError:
             raise
         except Exception as exc:
@@ -252,6 +248,23 @@ class BossDirectContactAdapter:
                 except Exception:
                     pass
             await driver.stop()
+
+    async def _wait_page_token(self, page: Any, source: str) -> str:
+        deadline = time.monotonic() + 15.0
+        last_error = ""
+        while time.monotonic() < deadline:
+            try:
+                raw = await page.evaluate(
+                    "() => String((window._PAGE || {}).token || '').split('|')[0]"
+                )
+                if isinstance(raw, str) and raw:
+                    self._page_token = raw
+                    return raw
+                last_error = "window._PAGE.token_empty"
+            except Exception as exc:
+                last_error = type(exc).__name__
+            await asyncio.sleep(0.5)
+        raise BossPageTokenError(f"{source}: page token unavailable ({last_error})")
 
     @staticmethod
     def _headers(cookies: dict[str, str]) -> dict[str, str]:
