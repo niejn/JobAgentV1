@@ -79,10 +79,24 @@ class BossCdpBackend:
 
     async def _ensure_connection(self) -> tuple[Any, Any, Any]:
         if self._connection is not None:
-            return cast("tuple[Any, Any, Any]", self._connection)
+            try:
+                context = self._connection[1]
+                if any(not page.is_closed() for page in context.pages):
+                    return cast("tuple[Any, Any, Any]", self._connection)
+            except Exception:
+                pass
+            # The browser may have been closed and restarted between tool
+            # calls. Do not hand out stale Playwright Page/Context objects.
+            self._connection = None
         async with self._connection_lock:
             if self._connection is not None:
-                return cast("tuple[Any, Any, Any]", self._connection)
+                try:
+                    context = self._connection[1]
+                    if any(not page.is_closed() for page in context.pages):
+                        return cast("tuple[Any, Any, Any]", self._connection)
+                except Exception:
+                    pass
+                self._connection = None
             from playwright.async_api import async_playwright
 
             from jobagent.auth.boss_debug_chrome import (
@@ -130,13 +144,35 @@ class BossCdpBackend:
                     code="boss_access_denied",
                 )
 
+            # A freshly launched debug Chrome can briefly expose a page target
+            # that is already closing. Wait for a live target before caching
+            # this connection; otherwise the first navigation fails with
+            # ``Target page, context or browser has been closed``.
+            live_deadline = time.monotonic() + 5.0
+            while time.monotonic() < live_deadline:
+                try:
+                    if any(not page.is_closed() for page in context.pages):
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(0.2)
+            else:
+                try:
+                    await browser.close()
+                finally:
+                    await driver.stop()
+                raise BossAccessError(
+                    "Boss CDP: Chrome 页面目标启动后立即关闭，请重试。",
+                    code="cdp_target_closed",
+                )
+
             self._connection = (browser, context, driver)
             return cast("tuple[Any, Any, Any]", self._connection)
 
     async def _get_page(self, context: Any) -> Any:
         """Acquire a tab from the bounded pool (keeper + cap + recycling)."""
         if self._tab_pool is None:
-            self._tab_pool = CdpTabPool(context)
+            self._tab_pool = CdpTabPool(context, max_reuses=10_000)
         return await self._tab_pool.acquire()
 
     async def _release_page(self, page: Any) -> None:
@@ -154,7 +190,10 @@ class BossCdpBackend:
         """
         connection, self._connection = self._connection, None
         if self._tab_pool is not None:
-            await self._tab_pool.close()
+            # Discovery is a short-lived tool scope, but its Boss page belongs
+            # to the long-lived debug Chrome session. Park it for reuse;
+            # JobAgent.close() performs the final tab cleanup.
+            await self._tab_pool.park_all()
             self._tab_pool = None
         if connection is None:
             return
@@ -184,12 +223,28 @@ class BossCdpBackend:
         if city_code is None:
             raise ValueError(f"Unsupported Boss city: {request.city}")
 
-        _, context, _ = await self._ensure_connection()
-        page = await self._get_page(context)
-        try:
-            return await self._discover_on_page(page, context, request, city_code)
-        finally:
-            await self._release_page(page)
+        for attempt in range(3):
+            _, context, _ = await self._ensure_connection()
+            page = await self._get_page(context)
+            try:
+                return await self._discover_on_page(page, context, request, city_code)
+            except BossAccessError as exc:
+                if exc.code in {"page_lost", "cdp_target_closed"} and attempt < 2:
+                    logger.warning(
+                        "Boss CDP: page target lost; %s recovery attempt",
+                        "restarting Chrome" if attempt == 1 else "reconnecting",
+                    )
+                    await self.dispose()
+                    if attempt == 1:
+                        from jobagent.auth.boss_debug_chrome import ensure_boss_debug_chrome
+
+                        await ensure_boss_debug_chrome(self._settings, force_restart=True)
+                    await asyncio.sleep(0.5)
+                    continue
+                raise
+            finally:
+                await self._release_page(page)
+        raise BossAccessError("Boss CDP: 页面重启后仍不可用。", code="page_lost")
 
     async def _discover_on_page(
         self,
@@ -224,6 +279,11 @@ class BossCdpBackend:
         try:
             await page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
         except Exception as exc:
+            if "Target page" in str(exc) or "context or browser has been closed" in str(exc):
+                raise BossAccessError(
+                    "Boss CDP: 当前页面已关闭，正在重新打开 Boss 页面。",
+                    code="page_lost",
+                ) from exc
             # Boss redirects to about:blank after the page loads; the API
             # response fires before the redirect, so continue waiting.
             logger.info("Boss CDP: navigation interrupted (expected): %s", exc)
@@ -268,7 +328,7 @@ class BossCdpBackend:
             # subsequent tool calls fail fast without hitting Boss again.
             get_boss_cooldown().trigger("risk_control")
             raise BossAccessError(
-                "Boss 反爬拒绝了本次请求，已进入 60 分钟冷却期。"
+                "Boss 反爬拒绝了本次请求，已进入最多 60 秒冷却期。"
                 "冷却期内所有 Boss 请求会被直接拒绝，请稍后再试或改用其他渠道。",
                 code="boss_risk_control",
             )

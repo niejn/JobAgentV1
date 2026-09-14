@@ -16,6 +16,11 @@ from jobagent.models import Job
 _ADD_FRIEND_PATH = "/wapi/zpgeek/friend/add.json"
 _USER_INFO_PATH = "/wapi/zpuser/wap/getUserInfo.json"
 
+# Keep the CDP attachment and the chat page alive across tool invocations.
+# Boss's page token is owned by the live page; closing it after every greeting
+# forces the next invocation through a fresh, fragile navigation.
+_CDP_RUNTIMES: dict[str, tuple[Any, Any, Any, Any]] = {}
+
 
 class BossPageTokenError(RuntimeError):
     """The current logged-in Boss session did not yield an action token."""
@@ -204,16 +209,45 @@ class BossDirectContactAdapter:
 
     async def _fetch_page_token_from_cdp(self) -> str:
         from playwright.async_api import async_playwright
+        from jobagent.auth.boss_debug_chrome import BossDebugChromeError, ensure_boss_debug_chrome
 
-        driver = await async_playwright().start()
-        browser: Any | None = None
+        endpoint = str(self._settings.debug_chrome_cdp_endpoint)
         try:
-            browser = await driver.chromium.connect_over_cdp(
-                self._settings.debug_chrome_cdp_endpoint, timeout=10_000
-            )
+            await ensure_boss_debug_chrome(self._settings)
+        except BossDebugChromeError as exc:
+            raise BossPageTokenError(str(exc)) from exc
+        runtime = _CDP_RUNTIMES.get(endpoint)
+        if runtime is not None:
+            try:
+                _ = runtime[2].pages
+            except Exception:
+                _CDP_RUNTIMES.pop(endpoint, None)
+                try:
+                    await runtime[1].close()
+                except Exception:
+                    pass
+                try:
+                    await runtime[0].stop()
+                except Exception:
+                    pass
+                runtime = None
+        if runtime is None:
+            driver = await async_playwright().start()
+            browser = await driver.chromium.connect_over_cdp(endpoint, timeout=10_000)
             context = next((item for item in browser.contexts if item.pages), None)
             if context is None:
+                await browser.close()
+                await driver.stop()
                 raise BossPageTokenError("Boss page token missing: no Chrome context")
+            runtime = (driver, browser, context, None)
+            _CDP_RUNTIMES[endpoint] = runtime
+        driver, browser, context, cached_page = runtime
+        try:
+            if cached_page is not None and not cached_page.is_closed():
+                try:
+                    return await self._wait_page_token(cached_page, "cached Boss page")
+                except BossPageTokenError:
+                    pass
             pages = [
                 candidate
                 for candidate in context.pages
@@ -221,34 +255,24 @@ class BossDirectContactAdapter:
             ]
             for page in pages:
                 try:
-                    return await self._wait_page_token(page, "existing Boss page")
+                    token = await self._wait_page_token(page, "existing Boss page")
+                    _CDP_RUNTIMES[endpoint] = (driver, browser, context, page)
+                    return token
                 except BossPageTokenError:
                     continue
             page = await context.new_page()
-            try:
-                await page.goto(
-                    "https://www.zhipin.com/web/geek/chat",
-                    wait_until="domcontentloaded",
-                    timeout=30_000,
-                )
-                return await self._wait_page_token(page, "new Boss chat page")
-            finally:
-                try:
-                    await page.close()
-                except Exception:
-                    pass
-        except BossPageTokenError:
-            raise
+            await page.goto(
+                "https://www.zhipin.com/web/geek/chat",
+                wait_until="domcontentloaded",
+                timeout=30_000,
+            )
+            token = await self._wait_page_token(page, "new Boss chat page")
+            _CDP_RUNTIMES[endpoint] = (driver, browser, context, page)
+            return token
         except Exception as exc:
+            if isinstance(exc, BossPageTokenError):
+                raise
             raise BossPageTokenError("Boss page token unavailable from Chrome") from exc
-        finally:
-            if browser is not None:
-                try:
-                    await browser.close()
-                except Exception:
-                    pass
-            await driver.stop()
-
     async def _wait_page_token(self, page: Any, source: str) -> str:
         deadline = time.monotonic() + 15.0
         last_error = ""
@@ -278,3 +302,19 @@ class BossDirectContactAdapter:
             "traceId": f"F-{int(time.time() * 1000)}",
             "zp_token": cookies.get("bst", ""),
         }
+
+
+async def close_boss_cdp_runtimes() -> None:
+    """Close retained Boss CDP pages/connections during JobAgent shutdown."""
+
+    runtimes = list(_CDP_RUNTIMES.values())
+    _CDP_RUNTIMES.clear()
+    for driver, browser, _context, _page in runtimes:
+        try:
+            await browser.close()
+        except Exception:
+            pass
+        try:
+            await driver.stop()
+        except Exception:
+            pass

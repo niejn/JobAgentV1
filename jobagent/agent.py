@@ -934,6 +934,19 @@ class JobAgent:
     async def close(self) -> None:
         """Flush and close the local checkpoint database connection."""
 
+        try:
+            from jobagent.applier.boss_direct_contact import close_boss_cdp_runtimes
+
+            await close_boss_cdp_runtimes()
+        except Exception:
+            logger.debug("Boss CDP runtime cleanup failed", exc_info=True)
+        try:
+            from jobagent.scraper.cdp_tab_pool import close_all_managed_debug_tabs
+
+            await close_all_managed_debug_tabs()
+        except Exception:
+            logger.debug("Managed debug tab cleanup failed", exc_info=True)
+
         async with self._init_lock:
             connection = self._connection
             self._connection = None
@@ -1226,8 +1239,17 @@ def _collect_tool_completions(
 
     messages = update.get("messages", []) if isinstance(update, dict) else []
     completions: list[tuple[_PendingToolCall | None, Any]] = []
+    seen_call_ids: set[str] = set()
     for message in messages:
         call_id = str(getattr(message, "tool_call_id", "") or "")
+        # LangGraph can replay the same ToolMessage in a node update (notably
+        # around subagent/HITL resumes).  Rendering it twice makes one tool
+        # execution look like multiple executions.  A real repeated call has
+        # a different tool_call_id and is intentionally kept.
+        if call_id and call_id in seen_call_ids:
+            continue
+        if call_id:
+            seen_call_ids.add(call_id)
         call = pending_calls.pop(call_id, None) if call_id else None
         if call is None:
             name = str(getattr(message, "name", "") or "")

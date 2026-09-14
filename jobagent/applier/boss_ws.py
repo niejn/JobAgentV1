@@ -364,7 +364,19 @@ class BossMqttWsClient:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("Boss MQTT publish acknowledgement timed out")
-            packet = await asyncio.wait_for(self._recv_bytes(), timeout=remaining)
+            try:
+                packet = await asyncio.wait_for(self._recv_bytes(), timeout=remaining)
+            except Exception as exc:
+                # A broker may close the WebSocket cleanly immediately after
+                # accepting the publish, before the PUBACK reaches us. Keep
+                # this as an ambiguous transport result so callers perform
+                # history verification instead of treating it as a hard
+                # send failure.
+                if type(exc).__name__.startswith("ConnectionClosed"):
+                    raise ConnectionError(
+                        "Boss WebSocket closed before PUBACK; delivery requires verification"
+                    ) from exc
+                raise
             packet_type = mqtt_packet_type(packet)
             if packet_type == 4 and mqtt_puback_packet_id(packet) == packet_id:
                 return
@@ -650,7 +662,7 @@ async def send_text_to_target(
             text=text,
         )
     finally:
-            await client.close()
+        await client.close()
 
 
 async def verify_text_in_conversation(

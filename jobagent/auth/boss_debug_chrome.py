@@ -18,6 +18,9 @@ class BossDebugChromeError(RuntimeError):
     """The local debug Chrome endpoint could not be made available."""
 
 
+_LAUNCHED_PROCESS: subprocess.Popen[bytes] | None = None
+
+
 def _endpoint_ready(endpoint: str) -> bool:
     try:
         with urlopen(f"{endpoint.rstrip('/')}/json/version", timeout=1) as response:  # noqa: S310
@@ -44,11 +47,20 @@ def _chrome_executable(settings: Settings) -> str:
     return str(executable)
 
 
-async def ensure_boss_debug_chrome(settings: Settings) -> bool:
+async def ensure_boss_debug_chrome(settings: Settings, *, force_restart: bool = False) -> bool:
     """Return whether this call launched Chrome; never close an existing instance."""
 
     endpoint = settings.debug_chrome_cdp_endpoint
-    if await asyncio.to_thread(_endpoint_ready, endpoint):
+    global _LAUNCHED_PROCESS
+    if force_restart and _LAUNCHED_PROCESS is not None:
+        if _LAUNCHED_PROCESS.poll() is None:
+            _LAUNCHED_PROCESS.terminate()
+            try:
+                await asyncio.to_thread(_LAUNCHED_PROCESS.wait, 5)
+            except Exception:
+                _LAUNCHED_PROCESS.kill()
+        _LAUNCHED_PROCESS = None
+    if not force_restart and await asyncio.to_thread(_endpoint_ready, endpoint):
         return False
     parsed = urlsplit(endpoint)
     port = parsed.port
@@ -66,7 +78,7 @@ async def ensure_boss_debug_chrome(settings: Settings) -> bool:
         "https://www.zhipin.com/web/geek/job",
     ]
     try:
-        subprocess.Popen(command)  # noqa: S603 - fixed executable and argument list
+        _LAUNCHED_PROCESS = subprocess.Popen(command)  # noqa: S603 - fixed executable and argument list
     except OSError as exc:
         raise BossDebugChromeError("无法启动 Boss 调试 Chrome。") from exc
     deadline = time.monotonic() + settings.boss_debug_chrome_start_timeout_seconds

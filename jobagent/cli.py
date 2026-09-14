@@ -72,6 +72,106 @@ def main() -> None:
     """Root CLI group."""
 
 
+@main.group("boss")
+def boss_command() -> None:
+    """Boss 专用工具，不启动通用 jobagent chat。"""
+
+
+@boss_command.command("reply")
+@click.option("--limit", default=20, show_default=True, type=click.IntRange(1, 100))
+def boss_reply_command(limit: int) -> None:
+    """交互处理 Boss HR 回复队列（批准、编辑或跳过）。"""
+
+    from jobagent.boss_reply_queue import BossReplyQueue
+
+    queue = BossReplyQueue(get_settings().jobagent_state_db)
+    try:
+        items = queue.pending(limit)
+        if not items:
+            click.echo("Boss 暂无待人工处理的回复。")
+            return
+        click.echo(f"Boss 待处理回复：{len(items)} 条")
+        for index, item in enumerate(items, 1):
+            risk = str(item["risk_level"] or "high").lower()
+            click.echo(
+                f"\n[{index}/{len(items)}] {item['company']} / "
+                f"{item['title']} / HR {item['hr_name']}"
+            )
+            click.echo(f"风险：{risk} · {item['intent']} · 置信度 {float(item['confidence']):.2f}")
+            click.echo(f"HR：{item['hr_message']}")
+            click.echo(f"草稿：{item['draft_text']}")
+            action = click.prompt(
+                "操作 (a=批准, e=编辑, s=跳过, q=退出)", default="a"
+            ).strip().lower()
+            if action == "q":
+                break
+            if action == "e":
+                edited = click.prompt("请输入修改后的回复", default=item["draft_text"])
+                ok = queue.decide(
+                    item["reply_id"],
+                    "approve",
+                    draft_version=int(item["draft_version"]),
+                    draft_text=edited,
+                )
+            elif action == "a":
+                ok = queue.decide(
+                    item["reply_id"],
+                    "approve",
+                    draft_version=int(item["draft_version"]),
+                )
+            elif action == "s":
+                ok = queue.decide(
+                    item["reply_id"],
+                    "skip",
+                    draft_version=int(item["draft_version"]),
+                )
+            else:
+                click.echo("无效操作，保留在队列中。")
+                continue
+            if action in {"a", "e"} and ok:
+                click.echo("已加入发送队列。")
+            elif ok:
+                click.echo("已跳过。")
+            else:
+                click.echo("状态已变化，未执行。")
+    finally:
+        queue.close()
+
+
+@boss_command.command("daemon")
+@click.option("--once", "run_once", is_flag=True, help="执行一轮扫描后退出。")
+@click.option("--interval", default=30.0, show_default=True, type=click.FloatRange(min=5.0))
+def boss_daemon_command(run_once: bool, interval: float) -> None:
+    """常驻扫描 Boss HR 会话，把新入站消息写入本地队列。"""
+
+    asyncio.run(_run_boss_daemon(run_once=run_once, interval=interval))
+
+
+async def _run_boss_daemon(*, run_once: bool, interval: float) -> None:
+    from jobagent.boss_daemon import (
+        BossConversationDaemon,
+        BossMonitorStore,
+        LiveBossConversationAdapter,
+    )
+
+    settings = get_settings()
+    daemon = BossConversationDaemon(
+        LiveBossConversationAdapter(settings),
+        BossMonitorStore(settings.jobagent_state_db),
+        poll_interval_seconds=interval,
+    )
+    if run_once:
+        result = await daemon.run_once()
+        click.echo(json.dumps(result, ensure_ascii=False))
+        await daemon.close()
+        return
+    click.echo(f"Boss conversation daemon started (interval={interval:g}s). Ctrl+C to stop.")
+    try:
+        await daemon.run()
+    except asyncio.CancelledError:
+        daemon.stop()
+
+
 @main.command("validate-profile", hidden=True)
 @click.option(
     "--profile",

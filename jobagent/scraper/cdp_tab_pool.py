@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import Any, cast
 
 from playwright.async_api import Page
@@ -30,6 +31,9 @@ logger = logging.getLogger(__name__)
 
 _KEEPER_URL = "about:blank"
 _ACQUIRE_TIMEOUT_S = 30.0
+_KEEPER_LOCKS: dict[int, asyncio.Lock] = {}
+_KEEPER_LOCKS_GUARD = threading.Lock()
+_MANAGED_CONTEXTS: dict[int, Any] = {}
 
 
 class CdpTabPool:
@@ -43,6 +47,7 @@ class CdpTabPool:
         max_reuses: int = 2,
     ) -> None:
         self._context = context
+        _MANAGED_CONTEXTS[id(context)] = context
         self._max_tabs = max_tabs
         self._max_reuses = max_reuses
         self._keeper: Page | None = None
@@ -59,26 +64,29 @@ class CdpTabPool:
 
         if self._keeper is not None and not self._keeper.is_closed():
             return
-        # Adopt any existing blank tab first: Boss's anti-bot redirect
-        # produces about:blank tabs routinely, and one of them serves the
-        # keeper purpose just as well. Adopting keeps multiple pool
-        # instances (backend + applier, or sequential runs) from each
-        # creating - and never closing - their own keeper (verified leak:
-        # tabs grew 1 -> 2 -> 3 across three discover calls).
-        tracked = {*self._idle, *self._active}
-        for page in cast("list[Page]", self._context.pages):
-            if id(page) in tracked or page.is_closed():
-                continue
-            if str(page.url or "") == _KEEPER_URL:
-                self._keeper = page
+        context_key = id(self._context)
+        with _KEEPER_LOCKS_GUARD:
+            lock = _KEEPER_LOCKS.setdefault(context_key, asyncio.Lock())
+        async with lock:
+            # Another pool sharing this context may have created/adopted the
+            # keeper while we waited.  Re-scan before opening anything.
+            if self._keeper is not None and not self._keeper.is_closed():
                 return
-        self._keeper = await self._context.new_page()
-        try:
-            # about:blank issues no network request; the keeper never
-            # navigates to a target site afterwards.
-            await self._keeper.goto(_KEEPER_URL, timeout=5_000)
-        except Exception:
-            logger.debug("TabPool: keeper goto failed (already blank?)", exc_info=True)
+            tracked = {*self._idle, *self._active}
+            for page in cast("list[Page]", self._context.pages):
+                if id(page) in tracked or page.is_closed():
+                    continue
+                if str(page.url or "") == _KEEPER_URL:
+                    self._keeper = page
+                    return
+            # No existing blank page is available, so create exactly one.
+            # The subsequent acquire creates the work page; this is the only
+            # intentional two-tab startup shape for a pool.
+            self._keeper = await self._context.new_page()
+            try:
+                await self._keeper.goto(_KEEPER_URL, timeout=5_000)
+            except Exception:
+                logger.debug("TabPool: keeper goto failed (already blank?)", exc_info=True)
 
     # -- pool API --------------------------------------------------------------
 
@@ -111,6 +119,24 @@ class CdpTabPool:
                 await self._quiet_close(page)
             if reused is not None:
                 return reused
+            # Reuse an already-open Boss page, including one left by a
+            # previous short-lived tool context. All tabs in the debug Chrome
+            # are JobAgent-managed, so adopting it is intentional.
+            tracked = {*self._idle, *self._active}
+            for candidate in cast("list[Page]", self._context.pages):
+                if (
+                    id(candidate) in tracked
+                    or candidate.is_closed()
+                    or candidate is self._keeper
+                ):
+                    continue
+                if (
+                    "zhipin.com" in str(candidate.url or "")
+                    and callable(getattr(candidate, "goto", None))
+                    and callable(getattr(candidate, "on", None))
+                ):
+                    self._active[id(candidate)] = 1
+                    return candidate
             # 2) Room for a fresh tab? Count ONLY pool-owned tabs (idle +
             #    active + keeper). Chrome-wide pages include the user's own
             #    tabs, and waiting on those deadlocks a serial caller: the
@@ -155,13 +181,9 @@ class CdpTabPool:
     async def close(self) -> None:
         """Close every tab the pool opened, then prune stray blank tabs.
 
-        Work tabs are pool-owned; stray ``about:blank`` tabs (warlock
-        redirect victims, tabs left by other pool instances on this
-        Chrome) are NOT pool-owned but are still closed here - exactly
-        one blank (the keeper) survives so the browser stays alive.
-        Real user tabs are never touched. Task-end cleanup therefore
-        leaves the debug Chrome with: user tabs + one keeper, nothing
-        else.
+        Only tabs opened by this pool are closed here. The process-level
+        ``close_all_managed_debug_tabs`` hook closes every debug-Chrome tab
+        at JobAgent shutdown, with blank pages handled first.
         """
 
         self._closed = True
@@ -169,10 +191,35 @@ class CdpTabPool:
             await self._quiet_close(page)
         self._idle.clear()
         self._active.clear()
+        # Process-lifetime cleanup is the only unconditional blank-tab sweep.
         pruned = await self.prune_blank_tabs()
         if pruned:
             logger.info("TabPool: close() pruned %d stray blank tab(s)", pruned)
         self._wake()
+
+    async def park_all(self) -> None:
+        """Return active pages to idle without closing them."""
+
+        for page_id, uses in list(self._active.items()):
+            page = self._page_by_id(page_id)
+            if page is not None and not page.is_closed():
+                self._idle[page_id] = uses
+        self._active.clear()
+        self._wake()
+
+    async def close_all_tabs(self) -> int:
+        """Close every tab in this debug context, blank pages first."""
+
+        pages = [p for p in cast("list[Page]", self._context.pages) if not p.is_closed()]
+        pages.sort(key=lambda p: str(p.url or "") != _KEEPER_URL)
+        closed = 0
+        for page in pages:
+            try:
+                await page.close()
+                closed += 1
+            except Exception:
+                logger.debug("TabPool: tab already gone during shutdown", exc_info=True)
+        return closed
 
     @property
     def keeper(self) -> Page | None:
@@ -207,6 +254,21 @@ class CdpTabPool:
             logger.info("TabPool: pruned %d blank tab(s)", closed)
         return closed
 
+    async def prune_excess_blank_tabs(self, *, max_pages: int = 10) -> int:
+        """Trim blank tabs only when Chrome has accumulated too many pages.
+
+        Normal operation deliberately leaves blank tabs alone: a blank page
+        can be the user's/debug session keeper, and removing it while a CDP
+        operation is starting can turn a transient page loss into
+        ``TargetClosedError``.  Callers may use this bounded guard during a
+        long-running process; unconditional cleanup remains owned by
+        :meth:`close`.
+        """
+
+        if len(cast("list[Page]", self._context.pages)) <= max_pages:
+            return 0
+        return await self.prune_blank_tabs()
+
     async def detach(self, page: Page) -> None:
         """Stop tracking a tab: it stays open, outside pool management.
 
@@ -240,3 +302,27 @@ class CdpTabPool:
             await page.close()
         except Exception:
             logger.debug("TabPool: tab already gone", exc_info=True)
+
+
+async def close_all_managed_debug_tabs() -> int:
+    """Close all tabs in every debug context used by JobAgent.
+
+    This is intentionally a process-lifetime operation. During normal tool
+    calls tabs remain open and reusable; JobAgent shutdown owns the final
+    cleanup and does not distinguish user-created from automation-created
+    tabs.
+    """
+
+    contexts = list(_MANAGED_CONTEXTS.values())
+    _MANAGED_CONTEXTS.clear()
+    closed = 0
+    for context in contexts:
+        pages = [p for p in cast("list[Page]", context.pages) if not p.is_closed()]
+        pages.sort(key=lambda p: str(p.url or "") != _KEEPER_URL)
+        for page in pages:
+            try:
+                await page.close()
+                closed += 1
+            except Exception:
+                logger.debug("TabPool: tab already gone during global shutdown", exc_info=True)
+    return closed

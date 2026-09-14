@@ -159,6 +159,10 @@ Subagent，主 JobAgent 只负责岗位匹配判断、Opportunity Journey 和跨
 
 ## 高优先级：Boss HR 消息后台监控与受控自动回复
 
+详细设计见 `docs/boss-hr-conversation-auto-reply-design.md`。其中补充了对 Hermes Agent
+Gateway/Adapter/Watcher 架构的借鉴，以及 Boss 常驻监控 daemon 的生命周期设计。本节保留
+交付优先级和范围摘要。
+
 目标：JobAgent 常驻后台定时读取 Boss HR 新消息，识别需要候选人回应的问题，并在严格
 事实边界内处理简单、低风险问答；复杂或未确认信息必须进入人工审批队列。
 
@@ -195,7 +199,8 @@ Subagent，主 JobAgent 只负责岗位匹配判断、Opportunity Journey 和跨
 
 建议实现切片：
 
-1. `BossMessageMonitor` 增量轮询、消息归档和去重；
+1. ✅ `BossMessageMonitor` 第一阶段：常驻轮询、单实例租约、首次基线、末条消息增量归档和去重；
+   完整历史补偿仍待实现；
 2. `HrQuestionClassifier` 和只读事实解析；
 3. `HrReplyPolicy`（默认草稿、按类别/公司/HR 的自动回复授权）；
 4. `BossReplyQueue` 持久化待回复、审批、发送、回执和失败状态；

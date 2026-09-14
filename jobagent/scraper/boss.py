@@ -184,6 +184,9 @@ def _normalize_job(raw: dict[str, Any]) -> Job:
     skills = _string_list(raw.get("skills"))
     tags = list(dict.fromkeys([*labels, *skills]))
     title = str(raw.get("jobName") or "Unknown").strip()
+    job_updated_at = _first_value(raw, "jobUpdateTime", "updateTime", "lastUpdateTime")
+    hr_active_at = _first_value(raw, "bossActiveTime", "lastActiveTime", "activeTime")
+    hr_active_status = _first_value(raw, "bossActiveStatus", "activeStatus", "bossOnline")
     return Job(
         id=f"boss:{external_id}",
         source=JobSource.BOSS,
@@ -212,8 +215,21 @@ def _normalize_job(raw: dict[str, Any]) -> Job:
             "boss_title": raw.get("bossTitle"),
             "lid": raw.get("lid"),
             "job_source": raw.get("jobSource") or 0,
+            "job_updated_at": job_updated_at,
+            "hr_active_at": hr_active_at,
+            "hr_active_status": hr_active_status,
         },
     )
+
+
+def _first_value(raw: dict[str, Any], *keys: str) -> Any:
+    """Return the first non-empty activity field across Boss API variants."""
+
+    for key in keys:
+        value = raw.get(key)
+        if value not in (None, "", 0, False):
+            return value
+    return None
 
 
 def _string_list(value: object) -> list[str]:

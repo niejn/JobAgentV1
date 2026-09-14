@@ -418,6 +418,21 @@ def test_tool_result_summary_degrades_to_name_without_pending_call() -> None:
     assert _tool_result_summary(completions) == "execute → done"
 
 
+def test_collect_tool_completions_deduplicates_replayed_tool_message() -> None:
+    pending = {"call-1": _PendingToolCall("list_job_records", {"company": "安子私募"})}
+    message = ToolMessage(
+        content='{"status":"completed","count":1,"records":[]}',
+        name="list_job_records",
+        tool_call_id="call-1",
+    )
+    completions = _collect_tool_completions(
+        {"messages": [message, message]},
+        pending,
+    )
+    assert len(completions) == 1
+    assert _tool_result_summary(completions).count("list_job_records") == 1
+
+
 def test_args_preview_shows_command_and_redacts_credentials() -> None:
     preview = _args_preview(
         {"command": "curl 'https://x.io/a?token=SECRET&page=2'", "timeout": 30}

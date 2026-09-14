@@ -19,6 +19,7 @@ left open for the process lifetime - the user can keep chatting in it.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -33,7 +34,9 @@ async def get_chat_page(pool: CdpTabPool) -> tuple[Any, bool]:
     """Return the parked chat tab, acquiring a fresh one only if needed."""
 
     global _parked
-    await pool.prune_blank_tabs()  # warlock victims pile up otherwise
+    pruning = pool.prune_excess_blank_tabs()
+    if inspect.isawaitable(pruning):
+        await pruning
     if _parked is not None and not _parked.is_closed():
         try:
             if urlsplit(str(_parked.url or "")).path == _CHAT_PAGE_PATH:

@@ -328,10 +328,18 @@ class BossGreetingsManager:
                         ):
                             custom_sent = True
                             send_error = "ack_timeout_but_history_confirmed"
-                        elif isinstance(exc, (ConnectionError, OSError)):
-                            delivery_unverified = True
                         else:
-                            logger.warning("Direct Boss greeting failed: %s", send_error)
+                            # WebSocket libraries use their own close/error
+                            # classes (for example ConnectionClosedOK),
+                            # which are not ConnectionError/OSError. Once the
+                            # publish may have been accepted, any transport
+                            # exception is ambiguous and must not be recorded
+                            # as a definite failure or retried blindly.
+                            delivery_unverified = True
+                            logger.warning(
+                                "Direct Boss greeting delivery unverified: %s",
+                                send_error,
+                            )
                 status = (
                     "submitted"
                     if created.status == "confirmed" and custom_sent

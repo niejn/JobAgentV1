@@ -21,6 +21,7 @@ before this sender runs; the message text itself is the approved artefact.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from typing import Any
 from urllib.parse import urlsplit
@@ -67,13 +68,18 @@ class BossChatSender:
 
     async def __aenter__(self) -> BossChatSender:
         from playwright.async_api import async_playwright
+        from jobagent.auth.boss_debug_chrome import BossDebugChromeError, ensure_boss_debug_chrome
 
         self._playwright = await async_playwright().start()
         try:
+            await ensure_boss_debug_chrome(self._settings)
             browser = await self._playwright.chromium.connect_over_cdp(
                 self._settings.debug_chrome_cdp_endpoint,
                 timeout=10_000,
             )
+        except BossDebugChromeError as exc:
+            await self._playwright.stop()
+            raise ConnectionError(str(exc)) from exc
         except Exception as exc:
             await self._playwright.stop()
             raise ConnectionError(
@@ -83,12 +89,14 @@ class BossChatSender:
         if self._context is None:
             await self._playwright.stop()
             raise ConnectionError("调试 Chrome 中没有可用的浏览器上下文。")
-        self._tab_pool = CdpTabPool(self._context)
+        # Keep the chat work page parked for reuse across replies.  The pool
+        # owns its lifetime and closes it when the JobAgent shuts down.
+        self._tab_pool = CdpTabPool(self._context, max_reuses=10_000)
         return self
 
     async def __aexit__(self, *exc: object) -> None:
-        if self._tab_pool is not None:
-            await self._tab_pool.close()
+        # The debug Chrome page is intentionally left open for the next
+        # operation; JobAgent.close() owns final tab cleanup.
         self._context = None
         if self._playwright is not None:
             await self._playwright.stop()
@@ -128,23 +136,15 @@ class BossChatSender:
     async def _send_on_page(
         self, pool: Any, *, hr_name: str, message: str
     ) -> dict[str, Any]:
-        # One-shot tab, NOT the parked page: the parked tab persists
-        # across processes (by design, for the read tools) and collects
-        # editor residue + diverges from the tab the user chats in
-        # manually. Live case (2026-08-28 22:32): the previous draft
-        # 「你好」 was still sitting in the parked editor and the new send
-        # shipped it together with (or instead of) the fresh text. A
-        # fresh tab per send starts clean and closes after - residue can
-        # never accumulate or leak between sends.
-        await pool.prune_blank_tabs()  # warlock victims pile up otherwise
+        # Park the page after sending. The next reply reuses this live chat
+        # page, avoiding another navigation and preserving Boss session state.
+        pruning = pool.prune_excess_blank_tabs()
+        if inspect.isawaitable(pruning):
+            await pruning
         page = await pool.acquire()
         try:
             result = await self._send_flow(page, hr_name=hr_name, message=message)
         finally:
-            try:
-                await page.close()
-            except Exception:
-                pass
             await pool.release(page)
         return result
 

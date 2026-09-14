@@ -247,4 +247,21 @@ def _job_payload(job: Job) -> dict[str, Any]:
         "salary": job.salary.model_dump(mode="json") if job.salary else None,
         "company_size": job.metadata.get("company_size"),
         "company_tags": job.metadata.get("company_tags", []),
+        "job_updated_at": job.metadata.get("job_updated_at"),
+        "hr_active_at": job.metadata.get("hr_active_at"),
+        "hr_active_status": job.metadata.get("hr_active_status"),
+        "activity_quality": _activity_quality(job.metadata),
     }
+
+
+def _activity_quality(metadata: dict[str, Any]) -> str:
+    """Conservative activity label; unknown data is never treated as fresh."""
+
+    status = str(metadata.get("hr_active_status") or "").lower()
+    if status in {"1", "true", "online", "active", "刚刚活跃", "今日活跃"}:
+        return "active"
+    if status in {"0", "false", "offline", "inactive", "长期未活跃"}:
+        return "inactive"
+    if metadata.get("hr_active_at") or metadata.get("job_updated_at"):
+        return "reported"
+    return "unknown"
