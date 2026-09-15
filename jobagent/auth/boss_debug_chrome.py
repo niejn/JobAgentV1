@@ -52,14 +52,28 @@ async def ensure_boss_debug_chrome(settings: Settings, *, force_restart: bool = 
 
     endpoint = settings.debug_chrome_cdp_endpoint
     global _LAUNCHED_PROCESS
-    if force_restart and _LAUNCHED_PROCESS is not None:
-        if _LAUNCHED_PROCESS.poll() is None:
-            _LAUNCHED_PROCESS.terminate()
-            try:
-                await asyncio.to_thread(_LAUNCHED_PROCESS.wait, 5)
-            except Exception:
-                _LAUNCHED_PROCESS.kill()
-        _LAUNCHED_PROCESS = None
+    if force_restart:
+        if _LAUNCHED_PROCESS is None:
+            if await asyncio.to_thread(_endpoint_ready, endpoint):
+                raise BossDebugChromeError(
+                    "现有调试 Chrome 不是本进程启动的，无法安全强制关闭；"
+                    "请关闭该专用 Chrome 后重试。"
+                )
+        else:
+            if _LAUNCHED_PROCESS.poll() is None:
+                _LAUNCHED_PROCESS.terminate()
+                try:
+                    await asyncio.to_thread(_LAUNCHED_PROCESS.wait, 5)
+                except Exception:
+                    _LAUNCHED_PROCESS.kill()
+            _LAUNCHED_PROCESS = None
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if not await asyncio.to_thread(_endpoint_ready, endpoint):
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                raise BossDebugChromeError("旧 Boss 调试 Chrome 未能完全退出。")
     if not force_restart and await asyncio.to_thread(_endpoint_ready, endpoint):
         return False
     parsed = urlsplit(endpoint)

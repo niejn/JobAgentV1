@@ -48,8 +48,8 @@ class BossCircuit:
         max_cooldown_seconds: int = _MAX_COOLDOWN_SECONDS,
     ) -> None:
         self._path = state_path
-        self._cooldown_seconds = max(1, cooldown_seconds)
-        self._max_cooldown_seconds = max(self._cooldown_seconds, max_cooldown_seconds)
+        self._max_cooldown_seconds = max(1, min(max_cooldown_seconds, 60))
+        self._cooldown_seconds = min(max(1, cooldown_seconds), self._max_cooldown_seconds)
 
     # -- public API ---------------------------------------------------------
 
@@ -86,15 +86,16 @@ class BossCircuit:
             trip_count = int(state.get("trip_count", 0))
             self._save({"failures": 0, "trip_count": trip_count} if trip_count else {})
             return None
-        # Migrate an old fixed four-hour open circuit immediately. It was
-        # written before the short, exponential policy existed and should not
-        # strand local testing until the historical deadline.
-        if "trip_count" not in state and until_dt - now > timedelta(
-            seconds=self._max_cooldown_seconds
-        ):
-            until_dt = now + timedelta(seconds=self._cooldown_seconds)
-            state = {"failures": int(state.get("failures", _THRESHOLD)), "trip_count": 1,
-                     "until": until_dt.isoformat()}
+        # Clamp every persisted legacy deadline, including states that already
+        # contain trip_count from the former 60-minute exponential policy.
+        if until_dt - now > timedelta(seconds=self._max_cooldown_seconds):
+            until_dt = now + timedelta(seconds=self._max_cooldown_seconds)
+            state = {
+                "failures": int(state.get("failures", _THRESHOLD)),
+                "trip_count": int(state.get("trip_count", 1)),
+                "cooldown_seconds": self._max_cooldown_seconds,
+                "until": until_dt.isoformat(),
+            }
             self._save(state)
             until = until_dt.isoformat()
         return {

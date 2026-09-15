@@ -31,9 +31,10 @@ logger = logging.getLogger(__name__)
 
 _KEEPER_URL = "about:blank"
 _ACQUIRE_TIMEOUT_S = 30.0
-_KEEPER_LOCKS: dict[int, asyncio.Lock] = {}
+_KEEPER_LOCKS: dict[int, tuple[Any, asyncio.Lock]] = {}
 _KEEPER_LOCKS_GUARD = threading.Lock()
 _MANAGED_CONTEXTS: dict[int, Any] = {}
+_CLAIMED_PAGES: dict[int, set[int]] = {}
 
 
 class CdpTabPool:
@@ -65,8 +66,13 @@ class CdpTabPool:
         if self._keeper is not None and not self._keeper.is_closed():
             return
         context_key = id(self._context)
+        loop = asyncio.get_running_loop()
         with _KEEPER_LOCKS_GUARD:
-            lock = _KEEPER_LOCKS.setdefault(context_key, asyncio.Lock())
+            entry = _KEEPER_LOCKS.get(context_key)
+            if entry is None or entry[0] is not loop:
+                entry = (loop, asyncio.Lock())
+                _KEEPER_LOCKS[context_key] = entry
+            lock = entry[1]
         async with lock:
             # Another pool sharing this context may have created/adopted the
             # keeper while we waited.  Re-scan before opening anything.
@@ -117,15 +123,19 @@ class CdpTabPool:
                 break
             for page in retired:
                 await self._quiet_close(page)
+                self._unclaim(page)
             if reused is not None:
                 return reused
             # Reuse an already-open Boss page, including one left by a
             # previous short-lived tool context. All tabs in the debug Chrome
             # are JobAgent-managed, so adopting it is intentional.
             tracked = {*self._idle, *self._active}
+            with _KEEPER_LOCKS_GUARD:
+                globally_claimed = set(_CLAIMED_PAGES.get(id(self._context), set()))
             for candidate in cast("list[Page]", self._context.pages):
                 if (
                     id(candidate) in tracked
+                    or id(candidate) in globally_claimed
                     or candidate.is_closed()
                     or candidate is self._keeper
                 ):
@@ -136,6 +146,7 @@ class CdpTabPool:
                     and callable(getattr(candidate, "on", None))
                 ):
                     self._active[id(candidate)] = 1
+                    self._claim(candidate)
                     return candidate
             # 2) Room for a fresh tab? Count ONLY pool-owned tabs (idle +
             #    active + keeper). Chrome-wide pages include the user's own
@@ -146,6 +157,7 @@ class CdpTabPool:
             if owned < self._max_tabs:
                 page = cast("Page", await self._context.new_page())
                 self._active[id(page)] = 1
+                self._claim(page)
                 return page
             # 3) Cap reached: a concurrent holder must release. Bound the
             #    wait so a serial caller fails loudly instead of hanging.
@@ -169,11 +181,13 @@ class CdpTabPool:
 
         if page.is_closed():
             self._active.pop(id(page), None)
+            self._unclaim(page)
             self._wake()
             return
         uses = self._active.pop(id(page), 1)
         if uses >= self._max_reuses:
             await self._quiet_close(page)
+            self._unclaim(page)
         else:
             self._idle[id(page)] = uses
         self._wake()
@@ -189,6 +203,7 @@ class CdpTabPool:
         self._closed = True
         for page in self._owned_pages():
             await self._quiet_close(page)
+            self._unclaim(page)
         self._idle.clear()
         self._active.clear()
         # Process-lifetime cleanup is the only unconditional blank-tab sweep.
@@ -198,13 +213,14 @@ class CdpTabPool:
         self._wake()
 
     async def park_all(self) -> None:
-        """Return active pages to idle without closing them."""
+        """Leave pages open and release ownership for another short-lived pool."""
 
-        for page_id, uses in list(self._active.items()):
+        for page_id in {*self._active, *self._idle}:
             page = self._page_by_id(page_id)
             if page is not None and not page.is_closed():
-                self._idle[page_id] = uses
+                self._unclaim(page)
         self._active.clear()
+        self._idle.clear()
         self._wake()
 
     async def close_all_tabs(self) -> int:
@@ -279,12 +295,26 @@ class CdpTabPool:
 
         self._active.pop(id(page), None)
         self._idle.pop(id(page), None)
+        self._unclaim(page)
         self._wake()
 
     # -- helpers -----------------------------------------------------------------
 
     def _wake(self) -> None:
         self._released.set()
+
+    def _claim(self, page: Page) -> None:
+        with _KEEPER_LOCKS_GUARD:
+            _CLAIMED_PAGES.setdefault(id(self._context), set()).add(id(page))
+
+    def _unclaim(self, page: Page) -> None:
+        with _KEEPER_LOCKS_GUARD:
+            claimed = _CLAIMED_PAGES.get(id(self._context))
+            if claimed is None:
+                return
+            claimed.discard(id(page))
+            if not claimed:
+                _CLAIMED_PAGES.pop(id(self._context), None)
 
     def _owned_pages(self) -> list[Page]:
         known = {*self._idle, *self._active}
@@ -315,6 +345,9 @@ async def close_all_managed_debug_tabs() -> int:
 
     contexts = list(_MANAGED_CONTEXTS.values())
     _MANAGED_CONTEXTS.clear()
+    with _KEEPER_LOCKS_GUARD:
+        _CLAIMED_PAGES.clear()
+        _KEEPER_LOCKS.clear()
     closed = 0
     for context in contexts:
         pages = [p for p in cast("list[Page]", context.pages) if not p.is_closed()]

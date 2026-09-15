@@ -172,6 +172,36 @@ async def _run_boss_daemon(*, run_once: bool, interval: float) -> None:
         daemon.stop()
 
 
+@boss_command.command("reply-worker")
+@click.option("--once", "run_once", is_flag=True, help="发送一条已批准回复后退出。")
+def boss_reply_worker_command(run_once: bool) -> None:
+    """发送 ReplyQueue 中 approved/auto_ready 状态的 Boss 回复。"""
+
+    asyncio.run(_run_boss_reply_worker(run_once=run_once))
+
+
+async def _run_boss_reply_worker(*, run_once: bool) -> None:
+    from jobagent.boss_reply_queue import BossReplyQueue
+    from jobagent.boss_reply_worker import BossReplyWorker, LiveBossReplySender
+
+    settings = get_settings()
+    queue = BossReplyQueue(settings.jobagent_state_db)
+    worker = BossReplyWorker(
+        queue,
+        LiveBossReplySender(settings),
+        daily_limit=settings.boss_daily_limit,
+    )
+    try:
+        if run_once:
+            click.echo(json.dumps(await worker.run_once(), ensure_ascii=False))
+            return
+        click.echo("Boss reply worker started. Ctrl+C to stop.")
+        await worker.run()
+    finally:
+        worker.stop()
+        queue.close()
+
+
 @main.command("validate-profile", hidden=True)
 @click.option(
     "--profile",

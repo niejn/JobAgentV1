@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -304,6 +305,7 @@ class BossGreetingsManager:
                 send_error = ""
                 delivery_unverified = False
                 if created.status == "confirmed" and created.target and target.greeting:
+                    attempt_started_ms = int(time.time() * 1000)
                     try:
                         await send_text_to_target(
                             cookies=cookies,
@@ -314,7 +316,10 @@ class BossGreetingsManager:
                         custom_sent = True
                     except TimeoutError:
                         if await self._verify_with_retry(
-                            cookies=cookies, target=created.target, text=target.greeting
+                            cookies=cookies,
+                            target=created.target,
+                            text=target.greeting,
+                            not_before_ms=attempt_started_ms,
                         ):
                             custom_sent = True
                             send_error = "ack_timeout_but_history_confirmed"
@@ -324,7 +329,10 @@ class BossGreetingsManager:
                     except Exception as exc:
                         send_error = type(exc).__name__
                         if await self._verify_with_retry(
-                            cookies=cookies, target=created.target, text=target.greeting
+                            cookies=cookies,
+                            target=created.target,
+                            text=target.greeting,
+                            not_before_ms=attempt_started_ms,
                         ):
                             custom_sent = True
                             send_error = "ack_timeout_but_history_confirmed"
@@ -401,13 +409,20 @@ class BossGreetingsManager:
         }
 
     @staticmethod
-    async def _verify_with_retry(*, cookies: dict[str, str], target: Any, text: str) -> bool:
+    async def _verify_with_retry(
+        *, cookies: dict[str, str], target: Any, text: str, not_before_ms: int = 0
+    ) -> bool:
         """Poll Boss history after an ACK timeout; never send a second message."""
         from jobagent.applier.boss_ws import verify_text_in_conversation
 
         for attempt in range(3):
             try:
-                if await verify_text_in_conversation(cookies=cookies, target=target, text=text):
+                if await verify_text_in_conversation(
+                    cookies=cookies,
+                    target=target,
+                    text=text,
+                    not_before_ms=not_before_ms,
+                ):
                     return True
             except Exception:
                 logger.info("Boss greeting history check failed (attempt %d)", attempt + 1)

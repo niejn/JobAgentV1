@@ -671,6 +671,7 @@ async def verify_text_in_conversation(
     target: BossConversationTarget,
     text: str,
     user_agent: str = "Mozilla/5.0",
+    not_before_ms: int = 0,
 ) -> bool:
     """Confirm an outgoing text through Boss history after an ACK ambiguity."""
 
@@ -726,10 +727,28 @@ async def verify_text_in_conversation(
         )
         history_body = history_response.json()
         messages = ((history_body.get("zpData") or {}).get("messages") or [])
-    return any(
-        str((message.get("body") or {}).get("text") or message.get("text") or "") == text
-        for message in messages
-    )
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        body = message.get("body")
+        body_text = body.get("text") if isinstance(body, dict) else ""
+        if str(body_text or message.get("text") or "") != text:
+            continue
+        try:
+            sent_at = int(message.get("time") or message.get("createTime") or 0)
+            from_id = int(message.get("fromId") or 0)
+        except (TypeError, ValueError):
+            continue
+        sent_at_ms = sent_at if sent_at >= 1_000_000_000_000 else sent_at * 1000
+        if from_id == target.friend_id:
+            continue
+        # Boss history timestamps can be second-precision while the local
+        # attempt clock is milliseconds. Allow one timestamp bucket plus a
+        # small clock-skew margin without matching genuinely old messages.
+        if not_before_ms and sent_at_ms < not_before_ms - 2_000:
+            continue
+        return True
+    return False
 
 
 async def probe_ws_handshake(

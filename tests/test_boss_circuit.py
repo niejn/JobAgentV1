@@ -66,7 +66,27 @@ def test_legacy_four_hour_open_state_is_migrated_to_short_window(tmp_path: Path)
     assert refusal is not None
     state = json.loads(circuit._path.read_text(encoding="utf-8"))
     until = datetime.fromisoformat(state["until"])
-    assert until - datetime.now().astimezone() <= timedelta(seconds=30)
+    assert until - datetime.now().astimezone() <= timedelta(seconds=60)
+
+
+def test_old_exponential_state_with_trip_count_is_also_clamped(tmp_path: Path) -> None:
+    circuit = _circuit(tmp_path)
+    circuit._path.write_text(
+        json.dumps(
+            {
+                "failures": 6,
+                "trip_count": 5,
+                "until": (
+                    datetime.now().astimezone() + timedelta(minutes=58)
+                ).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert circuit.check() is not None
+    state = json.loads(circuit._path.read_text(encoding="utf-8"))
+    until = datetime.fromisoformat(state["until"])
+    assert until - datetime.now().astimezone() <= timedelta(seconds=60)
 
 
 def test_two_kills_do_not_trip_and_success_resets(tmp_path: Path) -> None:

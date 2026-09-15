@@ -397,8 +397,11 @@ async (payload) => {
   ).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
   if (list.code !== 0) return {step: "list", code: list.code, message: list.message};
   const friends = ((list.zpData || {}).friendList) || [];
-  const target = friends.find(
-    (f) => f.name === payload.hrName && Number(f.friendId) > 1000);
+  const target = friends.find((f) =>
+    Number(f.friendId) > 1000 &&
+    (payload.friendId
+      ? String(f.friendId) === String(payload.friendId)
+      : f.name === payload.hrName));
   if (!target) return {step: "match", code: 0, message: "conversation not found"};
 
   // 2) credentials (securityId rides in getGeekFriendList's result)
@@ -542,7 +545,7 @@ class BossChatReader:
             }
 
     async def read_conversation(
-        self, *, hr_name: str, page: int = 1
+        self, *, hr_name: str, friend_id: int | None = None, page: int = 1
     ) -> dict[str, Any]:
         """Read the chat history with one HR in a SINGLE page evaluate.
 
@@ -563,10 +566,13 @@ class BossChatReader:
                     prepared = await self._prepare_parked_page(page_obj)
                     if prepared is not None:
                         return prepared
+                payload: dict[str, Any] = {"hrName": hr_name, "page": page}
+                if friend_id is not None:
+                    payload["friendId"] = friend_id
                 raw = await asyncio.wait_for(
                     page_obj.evaluate(
                         _FETCH_CONVERSATION_JS,
-                        {"hrName": hr_name, "page": page},
+                        payload,
                     ),
                     timeout=_LIST_TIMEOUT_S,
                 )

@@ -935,17 +935,17 @@ class JobAgent:
         """Flush and close the local checkpoint database connection."""
 
         try:
-            from jobagent.applier.boss_direct_contact import close_boss_cdp_runtimes
-
-            await close_boss_cdp_runtimes()
-        except Exception:
-            logger.debug("Boss CDP runtime cleanup failed", exc_info=True)
-        try:
             from jobagent.scraper.cdp_tab_pool import close_all_managed_debug_tabs
 
             await close_all_managed_debug_tabs()
         except Exception:
             logger.debug("Managed debug tab cleanup failed", exc_info=True)
+        try:
+            from jobagent.applier.boss_direct_contact import close_boss_cdp_runtimes
+
+            await close_boss_cdp_runtimes()
+        except Exception:
+            logger.debug("Boss CDP runtime cleanup failed", exc_info=True)
 
         async with self._init_lock:
             connection = self._connection

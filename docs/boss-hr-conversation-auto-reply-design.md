@@ -1,16 +1,26 @@
 # Boss HR 对话扫描与受控自动回复设计
 
-状态：第一阶段 daemon/adapter 已实现；LLM 分类、自动回复和发送 worker 待开发。
+状态：daemon/adapter、持久化审批队列和发送 worker 已实现；LLM 分类和 CandidateFact
+策略生成仍待开发。
 
 已实现入口：
 
 ```bash
 jobagent boss daemon
 jobagent boss daemon --once
+jobagent boss reply
+jobagent boss reply-worker
+jobagent boss reply-worker --once
 ```
 
-当前 daemon 使用会话列表的 `lastMessage` 做低请求量增量探测，首次运行建立历史基线，后续
-新入站消息写入 `boss_inbound_messages`。完整历史补偿、分类和回复仍由后续阶段实现。
+当前 daemon 使用会话列表的 `lastMessage` 做低请求量变更探测，首次运行建立历史基线；后续
+发生变化的会话通过稳定 `friend_id` 拉取历史增量，新入站消息写入
+`boss_inbound_messages`。发送 worker 使用稳定的 `friend_id + friend_source + encrypt_boss_id`
+定位会话，并要求 `approved` 或带有效策略凭证的 `auto_ready` 状态。发送采用 owner、generation
+和到期 lease 原子抢占，在途任务持续续租；只恢复已过期发送。跨进程共享全局/单会话发送间隔
+和每日上限，常驻 worker 额外执行 5–10 秒随机停顿。自动授权来自独立
+`boss_reply_policies` 权威表，禁用、过期或版本不一致都会阻止发送。LLM 分类和 CandidateFact
+策略生成仍由后续阶段实现。
 
 ## 借鉴 Hermes Agent 的 Adapter / Gateway 设计
 

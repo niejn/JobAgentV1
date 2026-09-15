@@ -199,11 +199,12 @@ Gateway/Adapter/Watcher 架构的借鉴，以及 Boss 常驻监控 daemon 的生
 
 建议实现切片：
 
-1. ✅ `BossMessageMonitor` 第一阶段：常驻轮询、单实例租约、首次基线、末条消息增量归档和去重；
-   完整历史补偿仍待实现；
+1. ✅ `BossMessageMonitor`：常驻轮询、fencing 单实例租约、首次基线、会话变化探测、完整历史
+   增量补偿和去重；
 2. `HrQuestionClassifier` 和只读事实解析；
 3. `HrReplyPolicy`（默认草稿、按类别/公司/HR 的自动回复授权）；
-4. `BossReplyQueue` 持久化待回复、审批、发送、回执和失败状态；
+4. ✅ `BossReplyQueue` 与发送 worker：持久化待回复、审批、稳定会话寻址、原子发送抢占、
+   回执和失败恢复；自动策略生产仍待第 2、3 项完成；
 5. Agent/网页工具：查看待回复、批准草稿、修改后发送、配置自动回复策略；
 6. 后台 worker 生命周期、限流、冷却、告警与可观测性。
 

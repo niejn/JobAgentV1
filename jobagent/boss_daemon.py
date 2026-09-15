@@ -22,16 +22,24 @@ CREATE TABLE IF NOT EXISTS boss_monitor_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS boss_monitor_cursors (
+    conversation_id TEXT PRIMARY KEY,
+    head_key TEXT NOT NULL,
+    sent_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS boss_monitor_leases (
     name TEXT PRIMARY KEY,
     owner TEXT NOT NULL,
-    expires_at REAL NOT NULL
+    expires_at REAL NOT NULL,
+    generation INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS boss_inbound_messages (
     message_key TEXT PRIMARY KEY,
     conversation_id TEXT NOT NULL,
     platform_message_id TEXT,
     friend_id INTEGER NOT NULL,
+    friend_source INTEGER NOT NULL DEFAULT 0,
+    encrypt_boss_id TEXT NOT NULL DEFAULT '',
     hr_name TEXT NOT NULL,
     company TEXT NOT NULL,
     title TEXT NOT NULL,
@@ -52,6 +60,8 @@ class BossInboundMessage:
     conversation_id: str
     platform_message_id: str
     friend_id: int
+    friend_source: int
+    encrypt_boss_id: str
     hr_name: str
     company: str
     title: str
@@ -69,8 +79,25 @@ class BossInboundMessage:
         return "boss:fallback:" + hashlib.sha256(material).hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class BossConversationCursor:
+    head_key: str
+    sent_at: int
+
+
+@dataclass(frozen=True, slots=True)
+class BossPollBatch:
+    messages: list[BossInboundMessage]
+    cursors: dict[str, BossConversationCursor]
+
+
 class BossConversationAdapter(Protocol):
-    async def poll(self) -> list[BossInboundMessage]: ...
+    async def poll(
+        self,
+        cursors: dict[str, BossConversationCursor],
+        *,
+        baseline: bool,
+    ) -> BossPollBatch: ...
 
     async def close(self) -> None: ...
 
@@ -82,8 +109,13 @@ class LiveBossConversationAdapter:
         self._settings = settings
         self._conversation_limit = conversation_limit
 
-    async def poll(self) -> list[BossInboundMessage]:
-        from jobagent.applier.boss_chat import list_boss_greetings_http
+    async def poll(
+        self,
+        cursors: dict[str, BossConversationCursor],
+        *,
+        baseline: bool,
+    ) -> BossPollBatch:
+        from jobagent.applier.boss_chat import BossChatReader, list_boss_greetings_http
 
         listing = await list_boss_greetings_http(
             self._settings, label_id=0, limit=self._conversation_limit
@@ -93,45 +125,183 @@ class LiveBossConversationAdapter:
                 f"Boss conversation list failed: {listing.get('error_type', 'unknown')}"
             )
         inbound: list[BossInboundMessage] = []
+        cursor_updates: dict[str, BossConversationCursor] = {}
+        changed: list[tuple[dict[str, Any], str, int, str, int, str]] = []
         for friend in listing.get("greetings", []):
             if not isinstance(friend, dict):
                 continue
             hr_name = str(friend.get("name") or friend.get("bossName") or "").strip()
-            friend_id = int(friend.get("friendId") or 0)
+            try:
+                friend_id = int(friend.get("friendId") or 0)
+            except (TypeError, ValueError):
+                continue
+            try:
+                friend_source = int(friend.get("friendSource") or 0)
+            except (TypeError, ValueError):
+                friend_source = 0
+            encrypt_boss_id = str(
+                friend.get("encryptBossId") or friend.get("encryptFriendId") or ""
+            )
             message = friend.get("lastMessage")
             if not hr_name or not friend_id or not isinstance(message, dict):
                 continue
-            from_id = int(message.get("fromId") or 0)
-            if from_id and from_id != friend_id:
-                continue
-            text = str((message.get("body") or {}).get("text") or message.get("text") or "").strip()
-            if not text:
-                continue
-            job = friend.get("job_metadata") or {}
+            try:
+                from_id = int(message.get("fromId") or 0)
+            except (TypeError, ValueError):
+                from_id = 0
+            direction = str(message.get("direction") or "").lower()
+            body = message.get("body")
+            body_text = body.get("text") if isinstance(body, dict) else ""
+            text = str(body_text or message.get("text") or "").strip()
+            raw_job = friend.get("job_metadata")
+            job = raw_job if isinstance(raw_job, dict) else {}
             conversation_id = str(friend.get("conversationId") or friend_id)
-            sent_at = int(
-                message.get("time")
-                or message.get("createTime")
-                or friend.get("updateTime")
-                or 0
-            )
-            inbound.append(
-                BossInboundMessage(
-                    conversation_id=conversation_id,
-                    platform_message_id=str(message.get("mid") or message.get("messageId") or ""),
-                    friend_id=friend_id,
-                    hr_name=hr_name,
-                    company=str(job.get("company") or friend.get("brandName") or ""),
-                    title=str(job.get("title") or friend.get("jobName") or ""),
-                    text=text,
-                    sent_at=sent_at,
-                    raw=message,
+            try:
+                sent_at = int(
+                    message.get("time")
+                    or message.get("createTime")
+                    or friend.get("updateTime")
+                    or 0
                 )
-            )
-        return inbound
+            except (TypeError, ValueError):
+                continue
+            head_key = _platform_message_key(conversation_id, message, sent_at, text)
+            next_cursor = BossConversationCursor(head_key=head_key, sent_at=sent_at)
+            previous = cursors.get(conversation_id)
+            if previous is not None and previous.head_key == head_key:
+                continue
+            if baseline:
+                cursor_updates[conversation_id] = next_cursor
+                if text and (direction == "boss" or from_id == friend_id):
+                    inbound.append(
+                        _inbound_from_raw(
+                            message,
+                            conversation_id=conversation_id,
+                            friend_id=friend_id,
+                            friend_source=friend_source,
+                            encrypt_boss_id=encrypt_boss_id,
+                            hr_name=hr_name,
+                            company=str(job.get("company") or friend.get("brandName") or ""),
+                            title=str(job.get("title") or friend.get("jobName") or ""),
+                        )
+                    )
+                continue
+            changed.append((friend, conversation_id, friend_id, hr_name, sent_at, head_key))
+
+        if changed:
+            async with BossChatReader(self._settings) as reader:
+                for friend, conversation_id, friend_id, hr_name, sent_at, head_key in changed:
+                    history = await reader.read_conversation(
+                        hr_name=hr_name, friend_id=friend_id, page=1
+                    )
+                    if history.get("status") != "ok":
+                        logger.warning(
+                            "Boss daemon history skipped for %s: %s",
+                            hr_name,
+                            history.get("error_type", "unknown"),
+                        )
+                        continue
+                    previous_at = cursors.get(
+                        conversation_id, BossConversationCursor("", 0)
+                    ).sent_at
+                    raw_job = history.get("job_metadata") or friend.get("job_metadata")
+                    job = raw_job if isinstance(raw_job, dict) else {}
+                    for raw_message in history.get("messages", []):
+                        if not isinstance(raw_message, dict):
+                            continue
+                        try:
+                            normalized = _inbound_from_raw(
+                                raw_message,
+                                conversation_id=conversation_id,
+                                friend_id=friend_id,
+                                friend_source=int(friend.get("friendSource") or 0),
+                                encrypt_boss_id=str(
+                                    friend.get("encryptBossId")
+                                    or friend.get("encryptFriendId")
+                                    or ""
+                                ),
+                                hr_name=hr_name,
+                                company=str(
+                                    job.get("company") or friend.get("brandName") or ""
+                                ),
+                                title=str(
+                                    job.get("title") or friend.get("jobName") or ""
+                                ),
+                            )
+                        except ValueError:
+                            continue
+                        previous_head = cursors.get(
+                            conversation_id, BossConversationCursor("", 0)
+                        ).head_key
+                        if (
+                            normalized.sent_at > previous_at
+                            or (
+                                normalized.sent_at == previous_at
+                                and normalized.message_key != previous_head
+                            )
+                        ):
+                            inbound.append(normalized)
+                    cursor_updates[conversation_id] = BossConversationCursor(
+                        head_key=head_key, sent_at=sent_at
+                    )
+        return BossPollBatch(messages=inbound, cursors=cursor_updates)
 
     async def close(self) -> None:
         return None
+
+
+def _platform_message_key(
+    conversation_id: str, message: dict[str, Any], sent_at: int, text: str
+) -> str:
+    message_id = str(message.get("mid") or message.get("messageId") or "")
+    if message_id:
+        return f"boss:{conversation_id}:{message_id}"
+    import hashlib
+
+    material = f"{conversation_id}|{sent_at}|{text}|{message.get('fromId', '')}".encode()
+    return "boss:fallback:" + hashlib.sha256(material).hexdigest()
+
+
+def _inbound_from_raw(
+    message: dict[str, Any],
+    *,
+    conversation_id: str,
+    friend_id: int,
+    friend_source: int,
+    encrypt_boss_id: str,
+    hr_name: str,
+    company: str,
+    title: str,
+) -> BossInboundMessage:
+    try:
+        from_id = int(message.get("fromId") or 0)
+    except (TypeError, ValueError):
+        from_id = 0
+    direction = str(message.get("direction") or "").lower()
+    if direction != "boss" and from_id != friend_id:
+        raise ValueError("message direction is not confirmed as HR inbound")
+    body = message.get("body")
+    body_text = body.get("text") if isinstance(body, dict) else ""
+    text = str(body_text or message.get("text") or "").strip()
+    if not text:
+        raise ValueError("inbound message has no text")
+    try:
+        sent_at = int(message.get("time") or message.get("createTime") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("inbound message has invalid timestamp") from exc
+    return BossInboundMessage(
+        conversation_id=conversation_id,
+        platform_message_id=str(message.get("mid") or message.get("messageId") or ""),
+        friend_id=friend_id,
+        friend_source=friend_source,
+        encrypt_boss_id=encrypt_boss_id,
+        hr_name=hr_name,
+        company=company,
+        title=title,
+        text=text,
+        sent_at=sent_at,
+        raw=message,
+    )
 
 
 class BossMonitorStore:
@@ -143,29 +313,58 @@ class BossMonitorStore:
         self._connection.execute("PRAGMA busy_timeout = 5000")
         _enable_wal(self._connection)
         self._connection.executescript(_SCHEMA)
+        columns = {
+            row[1]
+            for row in self._connection.execute("PRAGMA table_info(boss_monitor_leases)")
+        }
+        if "generation" not in columns:
+            self._connection.execute(
+                "ALTER TABLE boss_monitor_leases ADD COLUMN generation INTEGER NOT NULL DEFAULT 1"
+            )
+        message_columns = {
+            row[1]
+            for row in self._connection.execute("PRAGMA table_info(boss_inbound_messages)")
+        }
+        if "friend_source" not in message_columns:
+            self._connection.execute(
+                """ALTER TABLE boss_inbound_messages
+                ADD COLUMN friend_source INTEGER NOT NULL DEFAULT 0"""
+            )
+        if "encrypt_boss_id" not in message_columns:
+            self._connection.execute(
+                """ALTER TABLE boss_inbound_messages
+                ADD COLUMN encrypt_boss_id TEXT NOT NULL DEFAULT ''"""
+            )
 
     def close(self) -> None:
         self._connection.close()
 
-    def acquire_lease(self, owner: str, *, ttl_seconds: float) -> bool:
+    def acquire_lease(self, owner: str, *, ttl_seconds: float) -> int | None:
         now = time.time()
         self._connection.execute("BEGIN IMMEDIATE")
         try:
             row = self._connection.execute(
-                "SELECT owner, expires_at FROM boss_monitor_leases WHERE name='monitor'"
+                """SELECT owner, expires_at, generation
+                FROM boss_monitor_leases WHERE name='monitor'"""
             ).fetchone()
             if row and row["owner"] != owner and float(row["expires_at"]) > now:
                 self._connection.rollback()
-                return False
+                return None
+            generation = (
+                int(row["generation"])
+                if row and row["owner"] == owner
+                else int(row["generation"] if row else 0) + 1
+            )
             self._connection.execute(
-                """INSERT INTO boss_monitor_leases(name, owner, expires_at)
-                VALUES('monitor', ?, ?)
+                """INSERT INTO boss_monitor_leases(name, owner, expires_at, generation)
+                VALUES('monitor', ?, ?, ?)
                 ON CONFLICT(name) DO UPDATE SET
-                    owner=excluded.owner, expires_at=excluded.expires_at""",
-                (owner, now + ttl_seconds),
+                    owner=excluded.owner, expires_at=excluded.expires_at,
+                    generation=excluded.generation""",
+                (owner, now + ttl_seconds, generation),
             )
             self._connection.commit()
-            return True
+            return generation
         except Exception:
             self._connection.rollback()
             raise
@@ -180,21 +379,55 @@ class BossMonitorStore:
             "SELECT 1 FROM boss_monitor_state WHERE key='baseline_complete'"
         ).fetchone() is not None
 
-    def record(self, messages: list[BossInboundMessage], *, baseline: bool) -> int:
+    def cursors(self) -> dict[str, BossConversationCursor]:
+        rows = self._connection.execute(
+            "SELECT conversation_id, head_key, sent_at FROM boss_monitor_cursors"
+        ).fetchall()
+        return {
+            str(row["conversation_id"]): BossConversationCursor(
+                head_key=str(row["head_key"]), sent_at=int(row["sent_at"])
+            )
+            for row in rows
+        }
+
+    def record(
+        self,
+        messages: list[BossInboundMessage],
+        cursors: dict[str, BossConversationCursor],
+        *,
+        baseline: bool,
+        owner: str,
+        generation: int,
+    ) -> int:
         self._connection.execute("BEGIN IMMEDIATE")
         try:
+            lease = self._connection.execute(
+                """SELECT owner, generation, expires_at FROM boss_monitor_leases
+                WHERE name='monitor'"""
+            ).fetchone()
+            if (
+                lease is None
+                or lease["owner"] != owner
+                or int(lease["generation"]) != generation
+                or float(lease["expires_at"]) <= time.time()
+            ):
+                self._connection.rollback()
+                raise RuntimeError("Boss monitor lease lost before commit")
             before = self._connection.total_changes
             self._connection.executemany(
                 """INSERT OR IGNORE INTO boss_inbound_messages
-                (message_key, conversation_id, platform_message_id, friend_id, hr_name,
-                 company, title, text, sent_at, raw_json, baseline)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (message_key, conversation_id, platform_message_id, friend_id,
+                 friend_source, encrypt_boss_id, hr_name, company, title, text,
+                 sent_at, raw_json, baseline)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [
                     (
                         message.message_key,
                         message.conversation_id,
                         message.platform_message_id or None,
                         message.friend_id,
+                        message.friend_source,
+                        message.encrypt_boss_id,
                         message.hr_name,
                         message.company,
                         message.title,
@@ -207,6 +440,16 @@ class BossMonitorStore:
                 ],
             )
             added = self._connection.total_changes - before
+            self._connection.executemany(
+                """INSERT INTO boss_monitor_cursors(conversation_id, head_key, sent_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(conversation_id) DO UPDATE SET
+                    head_key=excluded.head_key, sent_at=excluded.sent_at""",
+                [
+                    (conversation_id, cursor.head_key, cursor.sent_at)
+                    for conversation_id, cursor in cursors.items()
+                ],
+            )
             if baseline:
                 self._connection.execute(
                     """INSERT OR REPLACE INTO boss_monitor_state(key, value)
@@ -245,21 +488,28 @@ class BossConversationDaemon:
         self._stop = asyncio.Event()
 
     async def run_once(self) -> dict[str, Any]:
-        if not self._store.acquire_lease(self._owner, ttl_seconds=self._lease_ttl):
+        generation = self._store.acquire_lease(self._owner, ttl_seconds=self._lease_ttl)
+        if generation is None:
             return {"status": "standby", "reason": "lease_held"}
         try:
-            return await self._poll_owned()
+            return await self._poll_owned(generation)
         finally:
             self._store.release_lease(self._owner)
 
-    async def _poll_owned(self) -> dict[str, Any]:
+    async def _poll_owned(self, generation: int) -> dict[str, Any]:
         baseline = not self._store.initialized()
-        messages = await self._adapter.poll()
-        added = self._store.record(messages, baseline=baseline)
+        batch = await self._adapter.poll(self._store.cursors(), baseline=baseline)
+        added = self._store.record(
+            batch.messages,
+            cursors=batch.cursors,
+            baseline=baseline,
+            owner=self._owner,
+            generation=generation,
+        )
         return {
             "status": "ok",
             "baseline": baseline,
-            "fetched": len(messages),
+            "fetched": len(batch.messages),
             "new_messages": 0 if baseline else added,
         }
 
@@ -269,14 +519,15 @@ class BossConversationDaemon:
         try:
             while not self._stop.is_set():
                 try:
-                    owns_lease = self._store.acquire_lease(
+                    generation = self._store.acquire_lease(
                         self._owner, ttl_seconds=self._lease_ttl
                     )
-                    if not owns_lease:
+                    owns_lease = generation is not None
+                    if generation is None:
                         delay = self._poll_interval
                         logger.info("Boss daemon standby: another process owns the lease")
                     else:
-                        await self._poll_owned()
+                        await self._poll_owned(generation)
                         # Renew after a successful pass so the lease covers the
                         # wait until the next poll as well.
                         self._store.acquire_lease(
