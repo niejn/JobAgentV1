@@ -11,6 +11,7 @@ jobagent boss daemon --once
 jobagent boss reply
 jobagent boss reply-worker
 jobagent boss reply-worker --once
+jobagent watch --channel wechat --channel boss
 ```
 
 当前 daemon 使用会话列表的 `lastMessage` 做低请求量变更探测，首次运行建立历史基线；后续
@@ -21,6 +22,27 @@ jobagent boss reply-worker --once
 和每日上限，常驻 worker 额外执行 5–10 秒随机停顿。自动授权来自独立
 `boss_reply_policies` 权威表，禁用、过期或版本不一致都会阻止发送。LLM 分类和 CandidateFact
 策略生成仍由后续阶段实现。
+
+### 管理 Channel（已实现）
+
+CLI 与微信共用 `BossReplyApplicationService`，Channel 只解析输入和渲染结果，不直接操作
+审批状态。Boss daemon 将新 HR 消息写入 SQLite Management Outbox；高风险草稿创建时也写入
+同一个 Outbox。微信发送成功后确认 delivery，失败则保留并延迟重试。
+
+微信 owner 可使用：
+
+```text
+/boss inbox
+/boss list
+/boss next
+/boss approve <reply_id 前缀> <版本>
+/boss edit <reply_id 前缀> <版本> <新正文>
+/boss skip <reply_id 前缀> <版本>
+```
+
+审批命令必须包含唯一 reply ID 前缀和草稿版本；普通自由文本不会被解释为批准。微信 Channel
+继续使用扫码 owner 白名单和最新 `context_token`，没有可用 token 时通知保留在 Outbox，CLI
+仍可通过 `jobagent boss reply` 处理。
 
 ## 借鉴 Hermes Agent 的 Adapter / Gateway 设计
 

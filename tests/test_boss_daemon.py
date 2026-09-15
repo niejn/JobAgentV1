@@ -52,6 +52,14 @@ class FakeAdapter:
         self.closed = True
 
 
+class FakeSink:
+    def __init__(self) -> None:
+        self.messages = []
+
+    def publish_inbound(self, messages) -> None:
+        self.messages.extend(messages)
+
+
 def test_monitor_store_lease_is_single_owner(tmp_path) -> None:
     first = BossMonitorStore(tmp_path / "state.db")
     second = BossMonitorStore(tmp_path / "state.db")
@@ -93,7 +101,8 @@ def test_expired_owner_cannot_commit_after_lease_takeover(tmp_path) -> None:
 async def test_first_scan_is_baseline_and_second_scan_emits_only_new(tmp_path) -> None:
     store = BossMonitorStore(tmp_path / "state.db")
     adapter = FakeAdapter([[_message("m1")], [_message("m1"), _message("m2")]])
-    daemon = BossConversationDaemon(adapter, store)
+    sink = FakeSink()
+    daemon = BossConversationDaemon(adapter, store, event_sink=sink)
 
     first = await daemon.run_once()
     second = await daemon.run_once()
@@ -102,6 +111,7 @@ async def test_first_scan_is_baseline_and_second_scan_emits_only_new(tmp_path) -
     assert second == {"status": "ok", "baseline": False, "fetched": 2, "new_messages": 1}
     rows = store.unclassified()
     assert [row["platform_message_id"] for row in rows] == ["m2"]
+    assert [message.platform_message_id for message in sink.messages] == ["m2"]
     await daemon.close()
 
 

@@ -8,6 +8,8 @@ reduced to what a single-user local gateway needs.
 """
 
 from jobagent.gateway.wechat_channel import (
+    BossReplyCommandHandler,
+    CompositeMessageHandler,
     RegistryCommandHandler,
     WeChatChannel,
     build_registry_command_handler,
@@ -15,6 +17,8 @@ from jobagent.gateway.wechat_channel import (
 
 __all__ = [
     "RegistryCommandHandler",
+    "BossReplyCommandHandler",
+    "CompositeMessageHandler",
     "WeChatChannel",
     "build_registry_command_handler",
 ]

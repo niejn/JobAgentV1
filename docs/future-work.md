@@ -208,6 +208,9 @@ Gateway/Adapter/Watcher 架构的借鉴，以及 Boss 常驻监控 daemon 的生
 5. Agent/网页工具：查看待回复、批准草稿、修改后发送、配置自动回复策略；
 6. 后台 worker 生命周期、限流、冷却、告警与可观测性。
 
+管理 Channel 进度：CLI 与微信审批 Adapter、SQLite Outbox、主动微信通知以及统一
+`jobagent watch --channel wechat --channel boss` 生命周期已实现；网页管理入口仍待开发。
+
 ## 已实现：损坏多模态 checkpoint session 的兼容处理
 
 - 文本模型调用时只生成 request 级别的消息投影，不删除 checkpoint 中的原始图片。

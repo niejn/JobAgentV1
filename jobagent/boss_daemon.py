@@ -102,6 +102,10 @@ class BossConversationAdapter(Protocol):
     async def close(self) -> None: ...
 
 
+class BossInboundEventSink(Protocol):
+    def publish_inbound(self, messages: list[object]) -> None: ...
+
+
 class LiveBossConversationAdapter:
     """Adapter over existing Boss list/history capabilities."""
 
@@ -398,7 +402,7 @@ class BossMonitorStore:
         baseline: bool,
         owner: str,
         generation: int,
-    ) -> int:
+    ) -> list[BossInboundMessage]:
         self._connection.execute("BEGIN IMMEDIATE")
         try:
             lease = self._connection.execute(
@@ -413,14 +417,14 @@ class BossMonitorStore:
             ):
                 self._connection.rollback()
                 raise RuntimeError("Boss monitor lease lost before commit")
-            before = self._connection.total_changes
-            self._connection.executemany(
-                """INSERT OR IGNORE INTO boss_inbound_messages
+            inserted: list[BossInboundMessage] = []
+            for message in messages:
+                cursor = self._connection.execute(
+                    """INSERT OR IGNORE INTO boss_inbound_messages
                 (message_key, conversation_id, platform_message_id, friend_id,
                  friend_source, encrypt_boss_id, hr_name, company, title, text,
                  sent_at, raw_json, baseline)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                [
                     (
                         message.message_key,
                         message.conversation_id,
@@ -435,11 +439,10 @@ class BossMonitorStore:
                         message.sent_at,
                         json.dumps(message.raw, ensure_ascii=False),
                         int(baseline),
-                    )
-                    for message in messages
-                ],
-            )
-            added = self._connection.total_changes - before
+                    ),
+                )
+                if cursor.rowcount == 1:
+                    inserted.append(message)
             self._connection.executemany(
                 """INSERT INTO boss_monitor_cursors(conversation_id, head_key, sent_at)
                 VALUES (?, ?, ?)
@@ -456,7 +459,7 @@ class BossMonitorStore:
                     VALUES('baseline_complete', CURRENT_TIMESTAMP)"""
                 )
             self._connection.commit()
-            return added
+            return inserted
         except Exception:
             self._connection.rollback()
             raise
@@ -479,12 +482,14 @@ class BossConversationDaemon:
         *,
         poll_interval_seconds: float = 30,
         lease_ttl_seconds: float = 120,
+        event_sink: BossInboundEventSink | None = None,
     ) -> None:
         self._adapter = adapter
         self._store = store
         self._poll_interval = max(5.0, poll_interval_seconds)
         self._lease_ttl = max(self._poll_interval * 2, lease_ttl_seconds)
         self._owner = uuid.uuid4().hex
+        self._event_sink = event_sink
         self._stop = asyncio.Event()
 
     async def run_once(self) -> dict[str, Any]:
@@ -499,18 +504,20 @@ class BossConversationDaemon:
     async def _poll_owned(self, generation: int) -> dict[str, Any]:
         baseline = not self._store.initialized()
         batch = await self._adapter.poll(self._store.cursors(), baseline=baseline)
-        added = self._store.record(
+        inserted = self._store.record(
             batch.messages,
             cursors=batch.cursors,
             baseline=baseline,
             owner=self._owner,
             generation=generation,
         )
+        if not baseline and inserted and self._event_sink is not None:
+            self._event_sink.publish_inbound(list(inserted))
         return {
             "status": "ok",
             "baseline": baseline,
             "fetched": len(batch.messages),
-            "new_messages": 0 if baseline else added,
+            "new_messages": 0 if baseline else len(inserted),
         }
 
     async def run(self) -> None:

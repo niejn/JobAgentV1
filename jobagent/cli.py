@@ -82,60 +82,58 @@ def boss_command() -> None:
 def boss_reply_command(limit: int) -> None:
     """交互处理 Boss HR 回复队列（批准、编辑或跳过）。"""
 
-    from jobagent.boss_reply_queue import BossReplyQueue
+    from jobagent.boss_reply_service import BossReplyApplicationService
 
-    queue = BossReplyQueue(get_settings().jobagent_state_db)
-    try:
-        items = queue.pending(limit)
-        if not items:
-            click.echo("Boss 暂无待人工处理的回复。")
-            return
-        click.echo(f"Boss 待处理回复：{len(items)} 条")
-        for index, item in enumerate(items, 1):
-            risk = str(item["risk_level"] or "high").lower()
-            click.echo(
-                f"\n[{index}/{len(items)}] {item['company']} / "
-                f"{item['title']} / HR {item['hr_name']}"
+    service = BossReplyApplicationService(get_settings().jobagent_state_db)
+    items = service.list_pending(limit)
+    if not items:
+        click.echo("Boss 暂无待人工处理的回复。")
+        return
+    click.echo(f"Boss 待处理回复：{len(items)} 条")
+    for index, item in enumerate(items, 1):
+        risk = str(item["risk_level"] or "high").lower()
+        click.echo(
+            f"\n[{index}/{len(items)}] {item['company']} / "
+            f"{item['title']} / HR {item['hr_name']}"
+        )
+        click.echo(f"风险：{risk} · {item['intent']} · 置信度 {float(item['confidence']):.2f}")
+        click.echo(f"HR：{item['hr_message']}")
+        click.echo(f"草稿：{item['draft_text']}")
+        action = click.prompt(
+            "操作 (a=批准, e=编辑, s=跳过, q=退出)", default="a"
+        ).strip().lower()
+        if action == "q":
+            break
+        if action == "e":
+            edited = click.prompt("请输入修改后的回复", default=item["draft_text"])
+            result = service.decide(
+                str(item["reply_id"]),
+                decision="approve",
+                draft_version=int(item["draft_version"]),
+                draft_text=edited,
             )
-            click.echo(f"风险：{risk} · {item['intent']} · 置信度 {float(item['confidence']):.2f}")
-            click.echo(f"HR：{item['hr_message']}")
-            click.echo(f"草稿：{item['draft_text']}")
-            action = click.prompt(
-                "操作 (a=批准, e=编辑, s=跳过, q=退出)", default="a"
-            ).strip().lower()
-            if action == "q":
-                break
-            if action == "e":
-                edited = click.prompt("请输入修改后的回复", default=item["draft_text"])
-                ok = queue.decide(
-                    item["reply_id"],
-                    "approve",
-                    draft_version=int(item["draft_version"]),
-                    draft_text=edited,
-                )
-            elif action == "a":
-                ok = queue.decide(
-                    item["reply_id"],
-                    "approve",
-                    draft_version=int(item["draft_version"]),
-                )
-            elif action == "s":
-                ok = queue.decide(
-                    item["reply_id"],
-                    "skip",
-                    draft_version=int(item["draft_version"]),
-                )
-            else:
-                click.echo("无效操作，保留在队列中。")
-                continue
-            if action in {"a", "e"} and ok:
-                click.echo("已加入发送队列。")
-            elif ok:
-                click.echo("已跳过。")
-            else:
-                click.echo("状态已变化，未执行。")
-    finally:
-        queue.close()
+        elif action == "a":
+            result = service.decide(
+                str(item["reply_id"]),
+                decision="approve",
+                draft_version=int(item["draft_version"]),
+            )
+        elif action == "s":
+            result = service.decide(
+                str(item["reply_id"]),
+                decision="skip",
+                draft_version=int(item["draft_version"]),
+            )
+        else:
+            click.echo("无效操作，保留在队列中。")
+            continue
+        ok = result["status"] == "updated"
+        if action in {"a", "e"} and ok:
+            click.echo("已加入发送队列。")
+        elif ok:
+            click.echo("已跳过。")
+        else:
+            click.echo("状态已变化，未执行。")
 
 
 @boss_command.command("daemon")
@@ -153,12 +151,14 @@ async def _run_boss_daemon(*, run_once: bool, interval: float) -> None:
         BossMonitorStore,
         LiveBossConversationAdapter,
     )
+    from jobagent.boss_reply_service import BossReplyApplicationService
 
     settings = get_settings()
     daemon = BossConversationDaemon(
         LiveBossConversationAdapter(settings),
         BossMonitorStore(settings.jobagent_state_db),
         poll_interval_seconds=interval,
+        event_sink=BossReplyApplicationService(settings.jobagent_state_db),
     )
     if run_once:
         result = await daemon.run_once()
@@ -494,10 +494,10 @@ def _render_wechat_qr(img_content: str) -> None:
     "--channel",
     "channels",
     multiple=True,
-    type=click.Choice(["wechat"]),
+    type=click.Choice(["wechat", "boss"]),
     default=["wechat"],
     show_default=True,
-    help="Gateway channels to run (more coming: boss message monitor).",
+    help="Gateway channels to run.",
 )
 def watch_command(channels: tuple[str, ...]) -> None:
     """Run the HR Gateway process: WeChat bot + job progress commands."""
@@ -508,37 +508,75 @@ def watch_command(channels: tuple[str, ...]) -> None:
 async def _watch(channels: tuple[str, ...]) -> None:
     """Gateway entry: run all requested channels until Ctrl+C."""
 
+    from jobagent.boss_reply_service import BossReplyApplicationService
     from jobagent.gateway import WeChatChannel, build_registry_command_handler
     from jobagent.wechat import WeixinAccountStore
 
     settings = get_settings()
-    running: list[WeChatChannel] = []
+    service = BossReplyApplicationService(settings.jobagent_state_db)
+    wechat_channels: list[WeChatChannel] = []
+    coroutines: list[object] = []
+    boss_daemon = None
+    boss_worker = None
+    boss_queue = None
     if "wechat" in channels:
         account = WeixinAccountStore().load()
         if account is None:
             click.echo(
                 "JobAgent · 微信 Bot 未登录；先运行 jobagent login --platform wechat。"
             )
-            return
-        running.append(
-            WeChatChannel(
+        else:
+            channel = WeChatChannel(
                 account=account,
                 handler=build_registry_command_handler(settings.jobagent_state_db),
+                notification_source=service,
             )
+            wechat_channels.append(channel)
+            coroutines.append(channel.run())
+    if "boss" in channels:
+        from jobagent.boss_daemon import (
+            BossConversationDaemon,
+            BossMonitorStore,
+            LiveBossConversationAdapter,
         )
-    if not running:
+        from jobagent.boss_reply_queue import BossReplyQueue
+        from jobagent.boss_reply_worker import BossReplyWorker, LiveBossReplySender
+
+        boss_daemon = BossConversationDaemon(
+            LiveBossConversationAdapter(settings),
+            BossMonitorStore(settings.jobagent_state_db),
+            event_sink=service,
+        )
+        boss_queue = BossReplyQueue(settings.jobagent_state_db)
+        boss_worker = BossReplyWorker(
+            boss_queue,
+            LiveBossReplySender(settings),
+            daily_limit=settings.boss_daily_limit,
+        )
+        coroutines.extend((boss_daemon.run(), boss_worker.run()))
+    if not coroutines:
         click.echo("JobAgent · 没有可运行的通道。")
         return
     click.echo(
         f"JobAgent · HR Gateway 已启动（通道: {', '.join(channels)}），Ctrl+C 退出。"
     )
+    tasks = [asyncio.create_task(coroutine) for coroutine in coroutines]
     try:
-        await asyncio.gather(*(channel.run() for channel in running))
+        await asyncio.gather(*tasks)
     except KeyboardInterrupt:
         click.echo("\nJobAgent · HR Gateway 已停止。")
     finally:
-        for channel in running:
+        if boss_daemon is not None:
+            boss_daemon.stop()
+        if boss_worker is not None:
+            boss_worker.stop()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for channel in wechat_channels:
             await channel.aclose()
+        if boss_queue is not None:
+            boss_queue.close()
 
 
 @main.command("chat")

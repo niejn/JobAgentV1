@@ -58,6 +58,16 @@ class MessageHandler(Protocol):
     async def handle(self, message: InboundMessage) -> str | None: ...
 
 
+class NotificationSource(Protocol):
+    def sync_pending_notifications(self) -> int: ...
+
+    def pending_notifications(self, channel: str, limit: int = 5) -> list[object]: ...
+
+    def mark_notification(
+        self, event_id: str, *, delivered: bool, error: str = ""
+    ) -> None: ...
+
+
 # ---- Registry command handler ------------------------------------------------
 
 
@@ -95,6 +105,7 @@ class RegistryCommandHandler:
             "JobAgent Gateway 指令：\n"
             "/status   - 所有岗位进度概览（按状态统计 + 活跃岗位）\n"
             "/progress <岗位ID 或 公司名>  - 查看岗位完整事件时间线\n"
+            "/boss     - 查看 HR 新消息和待审批回复\n"
             "/ping     - 检查 Bot 是否在线\n\n"
             "其他自由文本消息请打开终端运行 jobagent chat 进行 AI 对话，当前网关不处理。"
         )
@@ -106,35 +117,32 @@ class RegistryCommandHandler:
             return "登记册中暂无岗位记录。"
         counts: dict[str, int] = {}
         active: list[dict[str, str]] = []
-        for r in records:
-            counts[r.status.value] = counts.get(r.status.value, 0) + 1
-            if r.status not in (
+        for record in records:
+            counts[record.status.value] = counts.get(record.status.value, 0) + 1
+            if record.status not in (
                 JobProgressStatus.CLOSED,
                 JobProgressStatus.OFFER,
                 JobProgressStatus.REJECTED,
-            ):
-                if r.company and r.title:
-                    active.append({
-                        "status": r.status.value,
-                        "company": r.company,
-                        "title": r.title[:24],
-                    })
-        status_lines = "\n".join(
-            f"{s}: {c}" for s, c in sorted(counts.items())
-        )
+            ) and record.company and record.title:
+                active.append(
+                    {
+                        "status": record.status.value,
+                        "company": record.company,
+                        "title": record.title[:24],
+                    }
+                )
+        status_lines = "\n".join(f"{key}: {value}" for key, value in sorted(counts.items()))
         active_lines = (
             "\n".join(
-                f"  {i + 1}. [{a['status']}] {a['company']} - {a['title']}"
-                for i, a in enumerate(active[:10])
+                f"  {index + 1}. [{item['status']}] {item['company']} - {item['title']}"
+                for index, item in enumerate(active[:10])
             )
             if active
             else "  (无)"
         )
         return (
-            f"===== 岗位进度概览 =====\n"
-            f"总跟踪: {len(records)} 个\n\n"
-            f"按状态统计:\n{status_lines}\n\n"
-            f"活跃岗位:\n{active_lines}"
+            f"===== 岗位进度概览 =====\n总跟踪: {len(records)} 个\n\n"
+            f"按状态统计:\n{status_lines}\n\n活跃岗位:\n{active_lines}"
         )
 
     def _format_progress(self, keyword: str) -> str:
@@ -143,16 +151,19 @@ class RegistryCommandHandler:
             if record is None:
                 hits = list(registry.list_records(company=keyword, limit=5))
                 if not hits:
-                    all_records = registry.list_records(limit=500)
-                    hits = [r for r in all_records if r.job_id.startswith(keyword)]
+                    hits = [
+                        item
+                        for item in registry.list_records(limit=500)
+                        if item.job_id.startswith(keyword)
+                    ]
                 if not hits:
                     return f"未找到匹配 '{keyword}' 的岗位。用 /status 看全部。"
                 if len(hits) > 1:
                     return (
                         f"找到 {len(hits)} 个匹配：\n"
                         + "\n".join(
-                            f"  {r.job_id} - {r.company[:16]} {r.title[:20]}"
-                            for r in hits[:8]
+                            f"  {item.job_id} - {item.company[:16]} {item.title[:20]}"
+                            for item in hits[:8]
                         )
                         + "\n请用完整 job_id 查询。"
                     )
@@ -160,28 +171,126 @@ class RegistryCommandHandler:
             events = registry.history(record.job_id)
         event_lines = (
             "\n".join(
-                f"  {e.created_at.strftime('%m-%d %H:%M')} → {e.status.value}: "
-                f"{e.note or '-'}"
-                for e in events
+                f"  {event.created_at.strftime('%m-%d %H:%M')} → "
+                f"{event.status.value}: {event.note or '-'}"
+                for event in events
             )
             if events
             else "  (无)"
         )
         return (
             f"===== {record.company[:16]} - {record.title[:16]} =====\n"
-            f"岗位ID: {record.job_id}\n"
-            f"位置: {record.location or '-'}\n"
-            f"网址: {record.url or '-'}\n"
-            f"当前状态: {record.status.value}\n"
+            f"岗位ID: {record.job_id}\n位置: {record.location or '-'}\n"
+            f"网址: {record.url or '-'}\n当前状态: {record.status.value}\n"
             f"备注: {record.note or '-'}\n"
             f"首次发现: {record.first_seen_at.strftime('%m-%d %H:%M')}\n\n"
             f"事件时间线:\n{event_lines}"
         )
 
 
-def build_registry_command_handler(registry_path: Path) -> RegistryCommandHandler:
+class BossReplyCommandHandler:
+    """Deterministic WeChat commands over the shared Boss reply module."""
+
+    def __init__(self, service: object) -> None:
+        self._service = service
+
+    async def handle(self, message: InboundMessage) -> str | None:
+        text = message.text.strip()
+        if not (text == "/boss" or text.startswith("/boss ")):
+            return None
+        parts = text.split(maxsplit=4)
+        action = parts[1].lower() if len(parts) > 1 else "list"
+        if action == "inbox":
+            messages = self._service.list_inbox(5)
+            if not messages:
+                return "Boss 暂无未处理的新 HR 消息。"
+            return "Boss 新 HR 消息：\n" + "\n".join(
+                f"{row['company']} / {row['hr_name']}：{row['text']}"
+                for row in messages
+            )
+        if action in {"list", "next"}:
+            pending = self._service.list_pending(5)
+            if not pending:
+                return "Boss 暂无待人工确认的回复。"
+            if action == "next":
+                return self._render_one(pending[0])
+            return "Boss 待确认回复：\n" + "\n".join(
+                f"{row['reply_id'][:12]} V{row['draft_version']} "
+                f"{row['company']} / {row['hr_name']}"
+                for row in pending
+            ) + "\n发送 /boss next 查看下一条。"
+        if action not in {"approve", "skip", "edit"}:
+            return self._help()
+        if len(parts) < 4:
+            return self._help()
+        reply_ref = parts[2]
+        version = self._parse_version(parts[3])
+        if version is None:
+            return "草稿版本格式错误，请使用 V2 这样的格式。"
+        draft_text = parts[4].strip() if action == "edit" and len(parts) > 4 else None
+        if action == "edit" and not draft_text:
+            return "编辑后发送需要提供新的回复正文。"
+        result = self._service.decide(
+            reply_ref,
+            decision="approve" if action in {"approve", "edit"} else "skip",
+            draft_version=version,
+            draft_text=draft_text,
+        )
+        if result["status"] == "updated":
+            return "已批准并加入发送队列。" if action != "skip" else "已忽略该回复。"
+        if result["status"] == "not_found_or_ambiguous":
+            return "未找到唯一匹配的回复编号，请使用 /boss list 重新查看。"
+        return "草稿版本或状态已变化，请使用 /boss next 查看最新内容。"
+
+    @staticmethod
+    def _parse_version(value: str) -> int | None:
+        normalized = value.strip().lower().removeprefix("v")
+        return int(normalized) if normalized.isdigit() and int(normalized) > 0 else None
+
+    @staticmethod
+    def _render_one(row: dict[str, object]) -> str:
+        return (
+            f"{row['company']} / {row['title']} / HR {row['hr_name']}\n"
+            f"风险：{row['risk_level']} · {row['intent']}\n"
+            f"HR：{row['hr_message']}\n"
+            f"草稿：{row['draft_text']}\n"
+            f"编号：{str(row['reply_id'])[:12]} V{row['draft_version']}\n"
+            "批准：/boss approve <编号> <版本>\n"
+            "编辑：/boss edit <编号> <版本> <新正文>\n"
+            "忽略：/boss skip <编号> <版本>"
+        )
+
+    @staticmethod
+    def _help() -> str:
+        return (
+            "Boss 回复指令：\n"
+            "/boss inbox\n/boss list\n/boss next\n"
+            "/boss approve <编号> <版本>\n"
+            "/boss edit <编号> <版本> <新正文>\n"
+            "/boss skip <编号> <版本>"
+        )
+
+
+class CompositeMessageHandler:
+    def __init__(self, *handlers: MessageHandler) -> None:
+        self._handlers = handlers
+
+    async def handle(self, message: InboundMessage) -> str | None:
+        for handler in self._handlers:
+            reply = await handler.handle(message)
+            if reply is not None:
+                return reply
+        return None
+
+
+def build_registry_command_handler(registry_path: Path) -> MessageHandler:
     """Factory that builds a production registry handler for the gateway."""
-    return RegistryCommandHandler(registry_path)
+    from jobagent.boss_reply_service import BossReplyApplicationService
+
+    return CompositeMessageHandler(
+        BossReplyCommandHandler(BossReplyApplicationService(registry_path)),
+        RegistryCommandHandler(registry_path),
+    )
 
 
 # ---- Sync-buf persistence (cursor survives restarts) -------------------------
@@ -223,6 +332,7 @@ class WeChatChannel:
         client: WeixinBotClient | None = None,
         allow_user_ids: frozenset[str] | None = None,
         dedup: MessageDeduplicator | None = None,
+        notification_source: NotificationSource | None = None,
         _max_iterations: int = 0,  # test-only: exit after N iterations
     ) -> None:
         self._account = account
@@ -230,6 +340,7 @@ class WeChatChannel:
         self._state_dir = state_dir
         self._client = client
         self._dedup = dedup or MessageDeduplicator()
+        self._notification_source = notification_source
         self._context_token_store = ContextTokenStore()
         self._owns_client = client is None
         self._max_iterations = _max_iterations
@@ -268,7 +379,9 @@ class WeChatChannel:
                     continue
                 except httpx.ReadTimeout:
                     # Normal for long-poll candidate: server didn't respond
-                    # within 40 s. Retry immediately.
+                    # within 40 s. Deliver queued management notifications
+                    # before reopening the long poll.
+                    await self._deliver_notifications(client, store)
                     continue
                 except BaseException as exc:
                     # KeyboardInterrupt, CancelledError → re-raise
@@ -285,6 +398,8 @@ class WeChatChannel:
 
                 for message in messages:
                     await self._handle_one(client, store, dedup, message)
+
+                await self._deliver_notifications(client, store)
 
                 # Yield control so CancelledError can be delivered
                 # (MockTransport in tests returns synchronously)
@@ -348,6 +463,31 @@ class WeChatChannel:
                 )
             except Exception:
                 pass  # best-effort; non-critical
+
+    async def _deliver_notifications(
+        self, client: WeixinBotClient, store: ContextTokenStore
+    ) -> None:
+        source = self._notification_source
+        owner = self._account.owner_user_id
+        if source is None or not owner:
+            return
+        context_token = store.get(owner)
+        if not context_token:
+            return
+        source.sync_pending_notifications()
+        for notification in source.pending_notifications("wechat", limit=5):
+            event_id = str(getattr(notification, "event_id", ""))
+            text = str(getattr(notification, "text", ""))
+            if not event_id or not text:
+                continue
+            try:
+                await client.send_text(owner, text[:2048], context_token)
+            except Exception as exc:
+                source.mark_notification(
+                    event_id, delivered=False, error=type(exc).__name__
+                )
+                continue
+            source.mark_notification(event_id, delivered=True)
 
     @property
     def handler(self) -> MessageHandler | None:
