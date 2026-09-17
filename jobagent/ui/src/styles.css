@@ -206,3 +206,77 @@
   .op-action-label{display:none}
   .op-composer-actions .op-model-select{min-width:0}
 }
+
+/* Welcome workspace: clear hierarchy, generous input space, and light task entry points. */
+.op-welcome{max-width:1040px;gap:24px}
+.op-welcome h1{
+  display:flex;
+  align-items:center;
+  gap:12px;
+  margin:22px 0 10px;
+  color:#4d4a47;
+  font-size:clamp(25px,2.7vw,36px);
+  font-weight:500;
+  letter-spacing:-.02em;
+  text-align:left;
+}
+.op-welcome h1::before{content:"✦";color:#e7a33a;font-size:.78em}
+.op-welcome .op-composer{
+  min-height:252px;
+  padding:22px 24px 18px;
+  border-color:#ebe8e4;
+  border-radius:18px;
+  box-shadow:0 12px 30px rgba(49,44,38,.045);
+}
+.op-welcome .op-composer-input{
+  flex:1;
+  min-height:150px;
+  padding:0;
+  font-size:14px;
+  line-height:1.75;
+}
+.op-welcome .op-composer-input::placeholder{color:#aaa59f}
+.op-welcome .op-composer-actions{padding-top:12px;border-top:1px solid #f0eeeb}
+.op-welcome .op-workspace-status{display:none}
+.op-welcome .op-categories{
+  justify-content:flex-start;
+  gap:clamp(18px,3.4vw,42px);
+  flex-wrap:nowrap;
+  overflow-x:auto;
+  padding:4px 2px 2px;
+  scrollbar-width:none;
+}
+.op-welcome .op-categories::-webkit-scrollbar{display:none}
+.op-welcome .op-categories button{
+  flex:none;
+  padding:7px 0;
+  border:0;
+  border-radius:0;
+  background:transparent;
+  color:#53504c;
+  font-size:14px;
+  font-weight:500;
+  white-space:nowrap;
+}
+.op-welcome .op-categories button::before{
+  content:"✦";
+  display:inline-block;
+  margin-right:7px;
+  color:#e9a13b;
+  font-size:13px;
+}
+.op-welcome .op-categories button:nth-child(2)::before{color:#35b9d3}
+.op-welcome .op-categories button:nth-child(3)::before{color:#44b77a}
+.op-welcome .op-categories button:nth-child(4)::before{color:#b278e8}
+.op-welcome .op-categories button:nth-child(5)::before{color:#64ad73}
+.op-welcome .op-categories button:nth-child(6)::before{color:#e88449}
+.op-welcome .op-categories button:hover{border-color:transparent;background:transparent;color:var(--purple)}
+.op-welcome .op-section:first-of-type{margin-top:18px}
+
+@media(max-width:700px){
+  .op-welcome{gap:18px}
+  .op-welcome h1{margin-top:10px;font-size:26px}
+  .op-welcome .op-composer{min-height:218px;padding:18px}
+  .op-welcome .op-composer-input{min-height:118px}
+  .op-welcome .op-categories{gap:22px}
+}
