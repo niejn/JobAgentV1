@@ -231,9 +231,13 @@ TOOL_POLICY_PARAGRAPHS: tuple[tuple[str, frozenset[str] | None], ...] = (
         None,
     ),
     (
-        "发现或使用 Skill 时，先调用 `list_skills`；使用前调用 `read_skill` 读取完整 `SKILL.md`。"
-        "只有用户明确要求安装时才调用 `install_skill`，安装来源必须是用户提供的本地路径或 HTTPS URL；"
-        "安装后重新调用 `list_skills` 验证。Skill 是文档指令，不是可导入代码。",
+        "发现或使用 Skill 时，先调用 `list_skills`；使用前调用 `read_skill` 读取完整 `SKILL.md`"
+        "（返回值含真实路径）。Skill 目录同时挂在虚拟文件系统 `/skills/builtin/` 与 "
+        "`/skills/installed/` 下，可用 ls/read_file/glob 直接浏览，包括捆绑的脚本与参考文件。"
+        "SKILL.md 指示运行捆绑脚本时，先读脚本内容确认行为，再用 read_skill 返回的真实路径"
+        "通过 execute 运行。只有用户明确要求安装时才调用 `install_skill`，安装来源必须是用户"
+        "提供的本地路径或 HTTPS URL；安装后重新调用 `list_skills` 验证——新装的 Skill 下次"
+        "会话才出现在系统提示清单中，本会话用 `read_skill` 读取。",
         frozenset({"list_skills", "read_skill", "install_skill"}),
     ),
     (

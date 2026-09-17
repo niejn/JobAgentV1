@@ -16,6 +16,8 @@ from typing import Any, Literal, cast
 
 import aiosqlite
 from deepagents import create_deep_agent
+from deepagents.backends import BackendProtocol, CompositeBackend, FilesystemBackend
+from deepagents.backends.local_shell import LocalShellBackend
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -161,6 +163,32 @@ _HITL_TOOLS: dict[str, str] = {
     "reply_boss_greeting": "在 Boss 聊天中向 HR 发送一条消息",
     "merge_job_identities": "合并两条岗位身份记录（不可自动撤销）",
 }
+
+SKILL_BUILTIN_ROUTE = "/skills/builtin/"
+SKILL_INSTALLED_ROUTE = "/skills/installed/"
+
+
+def _mount_skill_roots(
+    shell_backend: LocalShellBackend, manager: SkillManager
+) -> CompositeBackend:
+    """Expose both skill roots inside the agent VFS; keep execute on the shell.
+
+    Native SkillsMiddleware reads its sources through the backend, so mounting
+    the roots gives the model metadata exposure plus ls/read_file/glob access
+    to bundled scripts; ``execute`` always routes to the default (shell)
+    backend, so scripts run on the real filesystem with the paths read_skill
+    reports.
+    """
+
+    routes: dict[str, BackendProtocol] = {}
+    for route, root in (
+        (SKILL_BUILTIN_ROUTE, manager.built_in_dir),
+        (SKILL_INSTALLED_ROUTE, manager.installed_dir),
+    ):
+        root.mkdir(parents=True, exist_ok=True)
+        routes[route] = FilesystemBackend(root_dir=root, virtual_mode=True)
+    return CompositeBackend(default=shell_backend, routes=routes)
+
 
 # Platform writes belong to their owning declarative DeepAgents Subagent.  Keep
 # the complete map above as the single policy vocabulary, but do not install
@@ -356,6 +384,7 @@ class JobAgent:
         recursion_limit: int = 90,
         opportunity_artifacts: LocalOpportunityArtifacts | None = None,
         filesystem_root: Path | None = None,
+        skill_manager: SkillManager | None = None,
         debug_trace: bool = False,
         model_capability_registry: ModelCapabilityRegistry | None = None,
         model_capability_key: str = "",
@@ -377,6 +406,9 @@ class JobAgent:
         self._recursion_limit = recursion_limit
         self._opportunity_artifacts = opportunity_artifacts
         self._filesystem_root = (filesystem_root or Path.cwd()).expanduser().resolve()
+        # Single source of truth for skill roots: the same manager feeds the
+        # skill tools and the /skills/ VFS mounts built in _ensure_deep_agent.
+        self._skill_manager = skill_manager or SkillManager()
         self._debug_trace = debug_trace
         self._model_capability_registry = model_capability_registry or ModelCapabilityRegistry(
             Path("data/model_capabilities.json")
@@ -970,12 +1002,9 @@ class JobAgent:
             )
             try:
                 await saver.setup()
-                # LocalShellBackend extends FilesystemBackend with shell
-                # execution; the user opted in to a local development agent.
                 # The shell env is a minimal allowlist: process secrets
                 # (OPENAI_API_KEY, *_COOKIE, bot tokens) live in os.environ
                 # and must stay unreachable from model-driven commands.
-                from deepagents.backends.local_shell import LocalShellBackend
 
                 shell_env = {
                     name: os.environ[name] for name in _SHELL_ENV_ALLOWLIST if name in os.environ
@@ -987,8 +1016,9 @@ class JobAgent:
                     env=shell_env,
                     timeout=120,
                 )
+                backend = _mount_skill_roots(shell_backend, self._skill_manager)
                 filesystem_middleware = FilesystemMiddleware(
-                    backend=shell_backend,
+                    backend=backend,
                     tools=[
                         "ls",
                         "read_file",
@@ -1003,7 +1033,7 @@ class JobAgent:
                 # compiled as a LangGraph CompiledStateGraph. Named 'deep_agent'
                 # because orchestration lives in the model (harness mode),
                 # not in hand-written graph nodes.
-                subagents = []
+                subagents: list[dict[str, Any]] = []
                 for configured in self._subagents:
                     spec = dict(configured)
                     spec["middleware"] = [
@@ -1013,12 +1043,17 @@ class JobAgent:
                         ),
                         *list(spec.get("middleware", [])),
                     ]
-                    subagents.append(spec)
                 deep_agent = create_deep_agent(
                     model=self._model,
                     tools=list(self._root_tools),
                     system_prompt=self._system_prompt,
                     subagents=cast(Any, subagents or None),
+                    # Native SkillsMiddleware: skill metadata reaches the
+                    # system prompt and SKILL.md/bundled files become
+                    # browsable via ls/read_file/glob under the routes above.
+                    # Metadata is loaded once per session; read_skill remains
+                    # the mid-session channel after install_skill.
+                    skills=[SKILL_BUILTIN_ROUTE, SKILL_INSTALLED_ROUTE],
                     middleware=[
                         filesystem_middleware,
                         MessageCompatibilityMiddleware(
@@ -1034,7 +1069,7 @@ class JobAgent:
                         SingleSubagentTaskMiddleware(),
                         cast(Any, NodeTraceMiddleware()),
                     ],
-                    backend=shell_backend,
+                    backend=backend,
                     checkpointer=saver,
                     name="jobagent",
                 )
@@ -1480,6 +1515,9 @@ def build_job_agent(
         with SQLiteCandidateProfileStore(state_db) as profile_store:
             effective_context = profile_store.load_context()
     use_default_tool_bundle = tools is None
+    # One manager instance feeds both the skill tools and the /skills/ VFS
+    # mounts (see JobAgent._ensure_deep_agent), regardless of tool bundle.
+    skill_manager = SkillManager(settings.jobagent_skills_dir)
     if tools is not None:
         registered_tools = list(tools)
     else:
@@ -1510,7 +1548,6 @@ def build_job_agent(
             database=settings.jobagent_state_db,
         )
         artifacts_store = LocalOpportunityArtifacts(settings.jobagent_opportunity_dir)
-        skill_manager = SkillManager(settings.jobagent_skills_dir)
         resume_library = ResumeLibrary(settings.jobagent_resume_dir)
         xhs_email_drafts = XhsEmailDraftService(state_db, resume_library, settings)
         xhs_email_drafts.recover()
@@ -1781,6 +1818,7 @@ note_id、已确认的公司/岗位、Journey ID。XHS 邮件附件先由 XHS �
         recursion_limit=settings.jobagent_recursion_limit,
         opportunity_artifacts=LocalOpportunityArtifacts(settings.jobagent_opportunity_dir),
         filesystem_root=settings.jobagent_artifact_dir,
+        skill_manager=skill_manager,
         debug_trace=settings.jobagent_debug_trace,
         model_capability_registry=ModelCapabilityRegistry(
             settings.jobagent_model_capabilities_file
