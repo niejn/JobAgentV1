@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Protocol
 
@@ -25,14 +26,18 @@ from jobagent.journey.job_registry import (
     SQLiteJobRegistry,
 )
 from jobagent.wechat.ilink import (
+    CONTEXT_TOKENS_FILE,
     WECHAT_DIR,
     ContextTokenStore,
+    ILinkApiError,
     InboundMessage,
     MessageDeduplicator,
     WeixinAccount,
     WeixinBotClient,
     WeixinSessionExpired,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---- Production backoff constants from Hermes --------------------------------
 
@@ -69,13 +74,11 @@ class NotificationSource(Protocol):
 
 
 # ---- Registry command handler ------------------------------------------------
-
-
 class RegistryCommandHandler:
     """Answers ``/status``, ``/progress``, ``/ping``, ``/help`` from the registry.
 
-    Free-form text returns ``None`` (no reply from the gateway), prompting the
-    user to switch to ``jobagent chat`` on their terminal.
+    Free-form text gets a short pointer reply (to ``/help`` and the terminal
+    ``jobagent chat``) — silence reads as "bot dead".
     """
 
     def __init__(self, registry_path: Path) -> None:
@@ -98,7 +101,10 @@ class RegistryCommandHandler:
                 f"未知指令 '{text.split()[0]}'。\n"
                 f"{self._help()}"
             )
-        return None  # free-form text → user should use terminal chat
+        return (
+            "当前网关只处理指令，发送 /help 查看全部指令；"
+            "自由文本对话请打开终端运行 jobagent chat。"
+        )
 
     def _help(self) -> str:
         return (
@@ -341,7 +347,9 @@ class WeChatChannel:
         self._client = client
         self._dedup = dedup or MessageDeduplicator()
         self._notification_source = notification_source
-        self._context_token_store = ContextTokenStore()
+        self._context_token_store = ContextTokenStore(
+            path=state_dir / CONTEXT_TOKENS_FILE.name
+        )
         self._owns_client = client is None
         self._max_iterations = _max_iterations
 
@@ -378,16 +386,45 @@ class WeChatChannel:
                     await asyncio.sleep(SESSION_EXPIRY_SLEEP_SECONDS)
                     continue
                 except httpx.ReadTimeout:
-                    # Normal for long-poll candidate: server didn't respond
-                    # within 40 s. Deliver queued management notifications
+                    # Normal for long-poll: server didn't respond within the
+                    # 40 s budget. Deliver queued management notifications
                     # before reopening the long poll.
                     await self._deliver_notifications(client, store)
+                    continue
+                except ILinkApiError as exc:
+                    if cursor:
+                        # A bogus/stale persisted cursor makes iLink reject
+                        # every poll (ret=-1) forever; reset once and re-poll
+                        # from scratch instead of silently backing off until
+                        # the user kills the process.
+                        logger.warning(
+                            "get_updates rejected with cursor %r (ret=%s "
+                            "errcode=%s); resetting cursor and re-polling",
+                            cursor[:12],
+                            exc.ret,
+                            exc.errcode,
+                        )
+                        cursor = ""
+                        _save_cursor(self._state_dir, "")
+                        continue
+                    consecutive_failures += 1
+                    logger.warning(
+                        "get_updates failed (%s); consecutive failures: %d",
+                        exc,
+                        consecutive_failures,
+                    )
+                    await self._backoff(consecutive_failures)
                     continue
                 except BaseException as exc:
                     # KeyboardInterrupt, CancelledError → re-raise
                     if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)):
                         raise
                     consecutive_failures += 1
+                    logger.warning(
+                        "get_updates error (%s); consecutive failures: %d",
+                        exc,
+                        consecutive_failures,
+                    )
                     await self._backoff(consecutive_failures)
                     continue
 
@@ -436,8 +473,11 @@ class WeChatChannel:
         if message.message_id and dedup.seen(message.message_id):
             return
 
-        # Content-fingerprint dedup (Hermes pattern)
-        if message.text:
+        # Content-fingerprint dedup (Hermes pattern), free text only: a
+        # repeated identical slash-command (/ping liveness check) is
+        # legitimate traffic; message-id dedup above already guards the
+        # overlapping-poll duplicates this was ported to fight.
+        if message.text and not message.text.startswith("/"):
             key = (
                 f"content:{message.from_user_id}:"
                 f"{hashlib.md5(message.text.encode()).hexdigest()}"

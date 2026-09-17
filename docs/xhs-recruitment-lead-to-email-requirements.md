@@ -2,6 +2,8 @@
 
 > 状态：Ready for implementation（CLI only）
 > 版本：v1.1（2026-09-08）
+> P1 提取完善设计草案（2026-09-10）：[结构化提取、Evidence 与评论恢复](xhs-recruitment-extraction-p1-design.md)。
+> 草案细化下述提取需求；待确认后作为 P1 实施基线，不代表已开发完成。
 > 样本：[样本 A](https://www.xiaohongshu.com/discovery/item/6a82b8df0000000025014840) 、
 > [样本 B](https://www.xiaohongshu.com/explore/6a2610dd000000001702d446)
 

@@ -47,7 +47,7 @@ EP_SEND_MESSAGE = "ilink/bot/sendmessage"
 EP_GET_BOT_QR = "ilink/bot/get_bot_qrcode"
 EP_GET_QR_STATUS = "ilink/bot/get_qrcode_status"
 
-LONG_POLL_TIMEOUT_SECONDS = 40.0  # 35 s server hold + client grace
+LONG_POLL_TIMEOUT_SECONDS = 40.0  # ~30 s server hold (measured) + client grace
 API_TIMEOUT_SECONDS = 15.0
 
 SESSION_EXPIRED_ERRCODE = -14
@@ -221,19 +221,29 @@ class WeixinBotClient:
     async def poll_qr_status(
         self, qrcode_key: str, *, base_url: str | None = None
     ) -> QRLoginStatus:
-        """Poll one QR challenge; call every ~2 s until confirmed/expired.
+        """Long-poll one QR challenge until its state changes.
+
+        The server holds each request ~30 s (scan/confirm wait included), so
+        this uses the long-poll budget; a client-side timeout just means
+        "no news yet" and reads as WAITING.
 
         ``base_url`` overrides the client default because a REDIRECT state
         moves polling to ``redirect_host`` mid-login.
         """
 
         effective_base = (base_url or self._base_url).rstrip("/")
-        response = await self._client.get(
-            f"{effective_base}/{EP_GET_QR_STATUS}",
-            params={"qrcode": qrcode_key},
-            headers=_headers(None),
-            timeout=API_TIMEOUT_SECONDS,
-        )
+        try:
+            response = await self._client.get(
+                f"{effective_base}/{EP_GET_QR_STATUS}",
+                params={"qrcode": qrcode_key},
+                headers=_headers(None),
+                timeout=LONG_POLL_TIMEOUT_SECONDS,
+            )
+        except httpx.TransportError:
+            # Same policy as hermes qr_login: transport failures during the
+            # scan/confirm wait (timeout, reset, refused redirect host) are
+            # retried by the caller until the login deadline, not fatal.
+            return QRLoginStatus(state=QRLoginState.WAITING)
         payload = _json_response(response, EP_GET_QR_STATUS)
         bot_token = str(payload.get("bot_token") or "")
         if bot_token:

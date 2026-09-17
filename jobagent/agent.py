@@ -17,6 +17,7 @@ from typing import Any, Literal, cast
 import aiosqlite
 from deepagents import create_deep_agent
 from deepagents.middleware.filesystem import FilesystemMiddleware
+from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage,
@@ -1024,6 +1025,11 @@ class JobAgent:
                             self._model_capability_registry,
                             self._model_capability_key,
                         ),
+                        # deepagents 0.7 made todos opt-in; the root agent
+                        # opts in so multi-step plans persist in checkpointed
+                        # state. Declarative subagents stay lean (single-task
+                        # executors; the root owns decomposition).
+                        TodoListMiddleware(),
                         build_hitl_middleware(),
                         SingleSubagentTaskMiddleware(),
                         cast(Any, NodeTraceMiddleware()),

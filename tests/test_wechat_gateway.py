@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import httpx
@@ -62,9 +63,11 @@ class TestRegistryCommandHandler:
         assert reply is not None
         assert "未知指令" in reply
 
-    def test_free_text_returns_none(self, registry_path: Path) -> None:
+    def test_free_text_gets_hint(self, registry_path: Path) -> None:
         h = RegistryCommandHandler(registry_path)
-        assert _sync(h.handle(_msg("你好，什么情况"))) is None
+        reply = _sync(h.handle(_msg("今天天气怎么样")))
+        assert reply is not None
+        assert "jobagent chat" in reply
 
     def test_empty_registry_status(self, registry_path: Path) -> None:
         h = RegistryCommandHandler(registry_path)
@@ -142,7 +145,7 @@ class TestWeChatChannel:
         assert ch._allow_user_ids == frozenset({"u-2"})
 
     @pytest.mark.asyncio
-    async def test_poll_loop_exits_on_cancelled(self) -> None:
+    async def test_poll_loop_exits_on_cancelled(self, tmp_path: Path) -> None:
         """Poll loop handles CancelledError gracefully."""
         account = WeixinAccount(bot_token="tok", owner_user_id="u-1")
 
@@ -158,6 +161,7 @@ class TestWeChatChannel:
             client=WeixinBotClient(
                 account=account, transport=httpx.MockTransport(_transport)
             ),
+            state_dir=tmp_path,
         )
 
         task = asyncio.create_task(ch.run())
@@ -167,7 +171,7 @@ class TestWeChatChannel:
             await task
 
     @pytest.mark.asyncio
-    async def test_unknown_sender_ignored(self) -> None:
+    async def test_unknown_sender_ignored(self, tmp_path: Path) -> None:
         """Messages from non-owner users are silently dropped."""
         account = WeixinAccount(bot_token="tok", owner_user_id="owner-1")
         handler = _capture_handler()
@@ -188,12 +192,13 @@ class TestWeChatChannel:
             client=client,
             dedup=dedup,
             allow_user_ids=frozenset({"owner-1"}),
+            state_dir=tmp_path,
         )
         await _run_with_timeout(ch)
         assert handler.caught is None
 
     @pytest.mark.asyncio
-    async def test_message_triggers_reply(self) -> None:
+    async def test_message_triggers_reply(self, tmp_path: Path) -> None:
         """Test _handle_one directly: message → handler → send_text."""
         account = WeixinAccount(bot_token="tok", owner_user_id="owner-1")
         handler = _capture_handler(return_text="pong!")
@@ -216,6 +221,7 @@ class TestWeChatChannel:
             client=client,
             dedup=dedup,
             allow_user_ids=frozenset({"owner-1"}),
+            state_dir=tmp_path,
         )
         msg = InboundMessage(
             from_user_id="owner-1",
@@ -234,7 +240,54 @@ class TestWeChatChannel:
         assert len(sent) >= 1, "send_text was not called"
 
     @pytest.mark.asyncio
-    async def test_no_context_token_no_reply(self) -> None:
+    async def test_repeated_identical_command_not_content_deduped(
+        self, tmp_path: Path
+    ) -> None:
+        """Re-sending /ping within the dedup TTL must still reply.
+
+        Content-fingerprint dedup is for free text; an identical repeated
+        slash-command is the standard liveness check and was being silently
+        swallowed for the whole 300 s window.
+        """
+
+        account = WeixinAccount(bot_token="tok", owner_user_id="owner-1")
+        handler = _capture_handler(return_text="pong!")
+        dedup = MessageDeduplicator()
+        sent: list[str] = []
+
+        def _transport(request: httpx.Request) -> httpx.Response:
+            if "sendmessage" in str(request.url):
+                sent.append("sent")
+                return httpx.Response(200, json={})
+            return httpx.Response(200, json={})
+
+        client = WeixinBotClient(
+            account=account, transport=httpx.MockTransport(_transport)
+        )
+        ch = WeChatChannel(
+            account=account,
+            handler=handler,
+            client=client,
+            dedup=dedup,
+            allow_user_ids=frozenset({"owner-1"}),
+            state_dir=tmp_path,
+        )
+        for mid in ("m-1", "m-2"):
+            await ch._handle_one(
+                client=client,
+                store=ch._context_token_store,
+                dedup=dedup,
+                message=InboundMessage(
+                    from_user_id="owner-1",
+                    text="/ping",
+                    context_token="ctx-1",
+                    message_id=mid,
+                ),
+            )
+        assert len(sent) == 2, "second identical /ping was content-deduped"
+
+    @pytest.mark.asyncio
+    async def test_no_context_token_no_reply(self, tmp_path: Path) -> None:
         account = WeixinAccount(bot_token="tok", owner_user_id="owner-1")
         handler = _capture_handler(return_text="should-not-send")
         dedup = MessageDeduplicator()
@@ -260,12 +313,13 @@ class TestWeChatChannel:
             ),
             dedup=dedup,
             allow_user_ids=frozenset({"owner-1"}),
+            state_dir=tmp_path,
         )
         await _run_with_timeout(ch)
         assert handler.caught is None
 
     @pytest.mark.asyncio
-    async def test_session_expiry_pauses(self) -> None:
+    async def test_session_expiry_pauses(self, tmp_path: Path) -> None:
         """Session expiry sleeps for SESSION_EXPIRY_SLEEP_SECONDS then retries."""
         account = WeixinAccount(bot_token="tok", owner_user_id="owner-1")
         handler = _capture_handler(return_text="pong")
@@ -295,6 +349,7 @@ class TestWeChatChannel:
             ),
             dedup=dedup,
             allow_user_ids=frozenset({"owner-1"}),
+            state_dir=tmp_path,
             _max_iterations=2,
         )
         import jobagent.gateway.wechat_channel as mod
@@ -310,7 +365,7 @@ class TestWeChatChannel:
         assert events[1] == "ok"
 
     @pytest.mark.asyncio
-    async def test_error_backoff_then_succeeds(self) -> None:
+    async def test_error_backoff_then_succeeds(self, tmp_path: Path) -> None:
         """Consecutive errors trigger backoff, then recovery."""
         account = WeixinAccount(bot_token="tok", owner_user_id="owner-1")
         handler = _capture_handler(return_text="pong")
@@ -339,6 +394,7 @@ class TestWeChatChannel:
             ),
             dedup=dedup,
             allow_user_ids=frozenset({"owner-1"}),
+            state_dir=tmp_path,
             _max_iterations=3,
         )
         # Hijack backoff delays for test speed
@@ -357,7 +413,9 @@ class TestWeChatChannel:
         assert handler.caught is not None
 
     @pytest.mark.asyncio
-    async def test_no_downstream_write_when_client_errored(self) -> None:
+    async def test_no_downstream_write_when_client_errored(
+        self, tmp_path: Path
+    ) -> None:
         """Send failure doesn't crash the loop."""
         account = WeixinAccount(bot_token="tok", owner_user_id="owner-1")
         handler = _capture_handler(return_text="reply")
@@ -384,11 +442,54 @@ class TestWeChatChannel:
             ),
             dedup=dedup,
             allow_user_ids=frozenset({"owner-1"}),
+            state_dir=tmp_path,
             _max_iterations=2,
         )
         await ch.run()
         assert len(send_attempts) == 1
         assert handler.caught is not None
+
+    @pytest.mark.asyncio
+    async def test_poisoned_cursor_resets_and_recovers(
+        self, tmp_path: Path
+    ) -> None:
+        """A bogus persisted cursor (every poll ret=-1) is reset once, then
+        polling recovers from scratch — the exact failure that made
+        ``jobagent watch`` ignore all WeChat messages with no output."""
+
+        account = WeixinAccount(bot_token="tok", owner_user_id="owner-1")
+        handler = _capture_handler(return_text="pong")
+        _save_cursor(tmp_path, "cursor-1")  # poisoned like the leaked fixture
+        polled_cursors: list[str] = []
+
+        def _transport(request: httpx.Request) -> httpx.Response:
+            if "getupdates" not in str(request.url):
+                return httpx.Response(200, json={})
+            body = json.loads(request.content)
+            cursor = str(body.get("get_updates_buf") or "")
+            polled_cursors.append(cursor)
+            if cursor == "cursor-1":
+                return httpx.Response(200, json={"ret": -1})
+            return _updates_response(
+                "fresh-cursor",
+                [_msg_payload("owner-1", "/ping", "ctx-1", "m-1")],
+            )
+
+        ch = WeChatChannel(
+            account=account,
+            handler=handler,
+            client=WeixinBotClient(
+                account=account, transport=httpx.MockTransport(_transport)
+            ),
+            allow_user_ids=frozenset({"owner-1"}),
+            state_dir=tmp_path,
+            _max_iterations=3,
+        )
+        await ch.run()
+
+        assert handler.caught is not None, "message never delivered"
+        assert _load_cursor(tmp_path) == "fresh-cursor"
+        assert "" in polled_cursors, "never re-polled from scratch"
 
 
 # ---- helpers -----------------------------------------------------------------

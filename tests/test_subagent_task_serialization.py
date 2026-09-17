@@ -90,6 +90,42 @@ class _ToolBindableFakeModel(FakeListChatModel):
         return self
 
 
+class _ToolRecordingFakeModel(FakeListChatModel):
+    """Records the tool set the runtime binds to the model."""
+
+
+    bound_tool_names: list[str] = []
+
+    def bind_tools(self, tools: object, **kwargs: object) -> object:  # noqa: ARG002
+        self.bound_tool_names = sorted(
+            tool.name for tool in tools  # type: ignore[attr-defined]
+        )
+        return self
+
+
+@pytest.mark.asyncio
+async def test_root_agent_binds_write_todos_for_planning(tmp_path) -> None:
+    """deepagents 0.7 made TodoListMiddleware opt-in; jobagent opts in at the
+    root so multi-step plans are tracked as todos in checkpointed state."""
+
+    settings = Settings(
+        _env_file=None,
+        jobagent_checkpoint_db=tmp_path / "checkpoints.db",
+    )
+    model = _ToolRecordingFakeModel(responses=["ok"])
+    agent = build_job_agent(settings, model=model)
+    try:
+        graph = await agent._ensure_deep_agent()
+        assert graph is not None
+        await graph.ainvoke(
+            {"messages": [("user", "hi")]},
+            config={"configurable": {"thread_id": "todo-binding-test"}},
+        )
+    finally:
+        await agent.close()
+
+    assert "write_todos" in model.bound_tool_names
+
 @pytest.mark.asyncio
 async def test_default_agent_exposes_platform_tools_only_to_their_subagents(tmp_path) -> None:
     settings = Settings(

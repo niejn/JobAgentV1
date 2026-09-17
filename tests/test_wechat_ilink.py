@@ -102,6 +102,23 @@ class TestQRLogin:
         assert status.base_url == "https://ilink.other"
         assert status.bot_id == "abc@im.bot"
 
+    @pytest.mark.asyncio
+    async def test_poll_status_timeout_reads_as_waiting(self) -> None:
+        """A long-poll hold past the read timeout must not kill the login flow.
+
+        The real endpoint holds each poll ~30 s until the state changes
+        (measured), so client timeouts during the scan/confirm wait are
+        routine and must surface as WAITING, not raise.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("simulated long-poll hold")
+
+        async with _client(handler) as client:
+            status = await client.poll_qr_status("qr-key")
+
+        assert status.state.value == "waiting"
+
 
 class TestGetUpdates:
     @pytest.mark.asyncio
