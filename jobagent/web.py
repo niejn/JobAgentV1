@@ -417,6 +417,134 @@ async def send_message(conversation_id: str, request: MessageCreate) -> dict[str
         connection.execute("UPDATE web_conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
     return {"role": "assistant", "content": response, "created_at": now}
 
+class UploadedResumeResponse(BaseModel):
+    saved_as: str
+    size_bytes: int
+
+
+def _safe_skill_dir(base: Path) -> Path:
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def _parse_skill_frontmatter(path: Path) -> dict[str, Any]:
+    """Parse the flat fields a skill card needs from SKILL.md frontmatter."""
+    meta: dict[str, Any] = {}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return meta
+    if not text.startswith("---"):
+        return meta
+    lines = text.splitlines()
+    in_officeplus = False
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped == "---":
+            break
+        if not stripped or stripped.startswith("#"):
+            continue
+        if line.startswith("  ") and in_officeplus:
+            key, sep, value = stripped.partition(":")
+            if not sep:
+                continue
+            value = value.strip().strip("\"',")
+            if key.strip() == "titleZhCN":
+                meta["title"] = value
+            elif key.strip() == "descriptionZhCN":
+                meta["summary"] = value
+            elif key.strip() == "guidanceZhCN":
+                meta["guidance"] = value.replace("\\n", " ")
+            continue
+        in_officeplus = stripped.startswith("metadata:")
+        key, sep, value = stripped.partition(":")
+        if not sep:
+            continue
+        value = value.strip().strip("\"'")
+        if key == "name":
+            meta["name"] = value
+        elif key == "description":
+            meta["description"] = value
+        elif key == "version":
+            meta["version"] = value
+    return meta
+
+
+@app.get("/api/skills")
+def list_skills() -> list[dict[str, Any]]:
+    """Aggregate skill cards from the project skill roots for the skill store."""
+    roots = [
+        ("workspace", ROOT.parent / "skills", True),
+        ("officeplus", ROOT.parent / "data" / "skills", False),
+    ]
+    cards: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for source, directory, installed in roots:
+        if not directory.is_dir():
+            continue
+        for entry in sorted(directory.iterdir()):
+            skill_md = entry / "SKILL.md"
+            if not entry.is_dir() or not skill_md.is_file():
+                continue
+            meta = _parse_skill_frontmatter(skill_md)
+            name = meta.get("name") or entry.name
+            if name in seen:
+                continue
+            seen.add(name)
+            cards.append({
+                "id": entry.name,
+                "name": name,
+                "title": meta.get("title") or name,
+                "summary": meta.get("summary") or meta.get("description") or "",
+                "guidance": meta.get("guidance") or "",
+                "version": meta.get("version") or "",
+                "source": source,
+                "installed": installed or source == "workspace",
+                "has_icon": (entry / "icon.png").is_file(),
+            })
+    return cards
+
+
+RESUME_SUFFIXES = {".pdf", ".docx", ".doc", ".md", ".txt"}
+
+
+@app.get("/api/resumes")
+def list_resumes() -> list[dict[str, Any]]:
+    """List resume files available to the sidebar and agent."""
+    directory = _safe_skill_dir(ROOT.parent / "data" / "resumes")
+    items = []
+    for entry in sorted(directory.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+        if entry.is_file() and entry.suffix.lower() in RESUME_SUFFIXES:
+            stat = entry.stat()
+            items.append({
+                "name": entry.name,
+                "size_bytes": stat.st_size,
+                "updated_at": datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec="seconds"),
+            })
+    return items
+
+
+@app.post("/api/resumes/upload", status_code=201)
+async def upload_resume(file: UploadFile = File(...)) -> UploadedResumeResponse:
+    """Store an uploaded resume file under data/resumes/."""
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in RESUME_SUFFIXES:
+        raise HTTPException(status_code=422, detail=f"不支持的简历格式：{suffix or '未知'}（支持 pdf/docx/doc/md/txt）")
+    directory = _safe_skill_dir(ROOT.parent / "data" / "resumes")
+    target = directory / Path(file.filename or "resume").name
+    size = 0
+    with target.open("wb") as sink:
+        while chunk := await file.read(1024 * 1024):
+            size += len(chunk)
+            sink.write(chunk)
+    return UploadedResumeResponse(saved_as=target.name, size_bytes=size)
+
+
+@app.get("/api/app/version")
+def app_version() -> dict[str, Any]:
+    """Version metadata for the settings panel and the (placeholder) updater."""
+    return {"product": "JobAgent", "version": "0.1.0", "updater": "placeholder", "channel": "dev"}
+
 
 if UI_DIST.is_dir():
     app.mount("/", StaticFiles(directory=UI_DIST, html=True), name="ui")

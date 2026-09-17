@@ -4,7 +4,10 @@ type Journey = { deleted_at?: string | null; id: string; company: string; role: 
 type Conversation = { id: string; journey_id: string; title: string; updated_at: string };
 type Message = { id?: number; role: "user" | "assistant"; content: string };
 type MatchOpinion = { score: number | null; evaluation_failed: boolean; reasoning: string[]; matched_skills?: string[]; missing_skills?: string[] };
-type View = "journeys" | "tasks" | "settings";
+type View = "welcome" | "assistant" | "skills" | "journeys";
+type SkillCard = { id: string; name: string; title: string; summary: string; guidance: string; version: string; source: string; installed: boolean; has_icon: boolean };
+type ResumeItem = { name: string; size_bytes: number; updated_at: string };
+type PlaceholderKind = "profile" | "quota";
 
 async function api<T>(url: string, options?: RequestInit): Promise<T> { const response = await fetch(url, { headers: { "Content-Type": "application/json" }, ...options }); if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`); return response.json(); }
 function Metric({ label, value, hint }: { label: string; value: string; hint: string }) { return <div className="metric"><div className="metric-label">{label}</div><div className="metric-number">{value}</div><div className="metric-change">{hint}</div></div>; }
@@ -14,7 +17,7 @@ function JourneyDetail({ journey, onBack }: { journey: Journey; onBack: () => vo
 
 function JourneyList({ journeys, onOpen, onCreate }: { journeys: Journey[]; onOpen: (journey: Journey) => void; onCreate: () => void }) { return <><div className="welcome"><div><p className="eyebrow">OPPORTUNITY JOURNEY · 本周视图</p><h1>早上好，聂俊能 👋</h1><p className="muted">调研、匹配和 Mock Interview 都会沉淀在对应 Journey 中。</p></div><button className="btn primary" onClick={onCreate}>＋ 创建新 Journey</button></div><div className="metrics"><Metric label="进行中的 Journey" value={String(journeys.length)} hint="按公司、部门、职位和周期归档" /><Metric label="运行中任务" value="04" hint="2 个等待输入" /><Metric label="已接受产物" value="28" hint="↑ 8 个 · 本周" /><Metric label="待确认动作" value="03" hint="外部写操作需确认" /></div><div className="card"><div className="card-head"><h2>我的机会 Journey</h2><span className="muted">点击卡片打开详情与对话</span></div><div className="journeys">{journeys.map(journey => <button className="journey-card" key={journey.id} onClick={() => onOpen(journey)}><div className="company-logo">{journey.company.slice(0, 1)}</div><div className="journey-main"><strong>{journey.company}</strong><p>{journey.role}</p><div className="journey-meta"><span className="tag">{journey.department || "未填写部门"}</span><span>{journey.recruiting_cycle || "未填写周期"}</span><span>{journey.task_count} 个任务</span><span>{journey.artifact_count} 个产物</span></div></div><span className="time">{journey.updated_at}　→</span></button>)}</div></div></>; }
 
-function AssistantView() { const [items, setItems] = useState<Conversation[]>([]); const [active, setActive] = useState<Conversation | null>(null); const [messages, setMessages] = useState<Message[]>([]); const [draft, setDraft] = useState(""); const [busy, setBusy] = useState(false); const [offset, setOffset] = useState(0); const [hasMore, setHasMore] = useState(true); const [loadingMore, setLoadingMore] = useState(false); async function loadPage(nextOffset: number, append = false) { if (loadingMore || (!hasMore && append)) return; setLoadingMore(true); try { const page = await api<Conversation[]>(`/api/assistant/conversations?limit=10&offset=${nextOffset}`); setItems(current => append ? [...current, ...page] : page); setOffset(nextOffset + page.length); setHasMore(page.length === 10); } finally { setLoadingMore(false); } } useEffect(() => { void loadPage(0); }, []); async function select(item: Conversation) { setActive(item); const result = await api<{ messages: Message[] }>(`/api/assistant/conversations/${item.id}`); setMessages(result.messages); } async function create() { const item = await api<Conversation>("/api/assistant/conversations", { method: "POST", body: JSON.stringify({ title: "新求职对话" }) }); setItems(current => [item, ...current]); setOffset(current => current + 1); await select(item); } async function send(event: FormEvent) { event.preventDefault(); if (!active || !draft.trim() || busy) return; const content = draft.trim(); setDraft(""); setMessages(current => [...current, { role: "user", content }]); setBusy(true); try { const reply = await api<Message>(`/api/assistant/conversations/${active.id}/messages`, { method: "POST", body: JSON.stringify({ content }) }); setMessages(current => [...current, reply]); } catch (error) { setMessages(current => [...current, { role: "assistant", content: `发送失败：${error instanceof Error ? error.message : "未知错误"}` }]); } finally { setBusy(false); } } return <div className="assistant-view"><div className="assistant-toolbar"><div><p className="eyebrow">GLOBAL JOB ASSISTANT</p><h1>求职助手</h1><p className="muted">管理求职目标、创建 Journey，并处理跨岗位问题。</p></div><button className="btn primary" onClick={create}>＋ 新建对话</button></div><div className="assistant-workspace"><aside className="assistant-history" onScroll={event => { const target = event.currentTarget; if (target.scrollTop + target.clientHeight >= target.scrollHeight - 40) void loadPage(offset, true); }}><p className="section-label">历史对话</p>{items.length === 0 && !loadingMore && <p className="empty">暂无历史对话</p>}{items.map(item => <button className={`conversation-item ${active?.id === item.id ? "selected" : ""}`} key={item.id} onClick={() => select(item)}><strong>{item.title}</strong><span>{item.updated_at}</span></button>)}{loadingMore && <p className="empty">加载中…</p>}{!hasMore && items.length > 0 && <p className="empty">已加载全部对话</p>}</aside><section className="assistant-chat">{!active ? <div className="chat-empty empty"><div className="big-icon">✦</div><h3>开始一个求职对话</h3><p>可以咨询求职方向、创建 Journey 或管理多个岗位。</p><button className="btn primary" onClick={create}>新建对话</button></div> : <><div className="messages">{messages.length === 0 && <div className="assistant-bubble">你好，我是你的求职助手。可以帮你创建和管理多个岗位 Journey。</div>}{messages.map((message, index) => <div className={message.role === "user" ? "user-bubble" : "assistant-bubble"} key={message.id ?? index}>{message.content}</div>)}{busy && <div className="assistant-bubble typing">Agent 思考中…</div>}</div><form className="chat-input" onSubmit={send}><input value={draft} onChange={event => setDraft(event.target.value)} placeholder="告诉求职助手你想做什么…" /><button className="btn primary" disabled={busy}>发送</button></form></>}</section></div></div>; }
+function AssistantView({ initialPrompt, onConsumedPrompt }: { initialPrompt?: string; onConsumedPrompt?: () => void }) { const [items, setItems] = useState<Conversation[]>([]); const [active, setActive] = useState<Conversation | null>(null); const [messages, setMessages] = useState<Message[]>([]); const [draft, setDraft] = useState(initialPrompt ?? ""); const [busy, setBusy] = useState(false); const [offset, setOffset] = useState(0); const [hasMore, setHasMore] = useState(true); const [loadingMore, setLoadingMore] = useState(false); async function loadPage(nextOffset: number, append = false) { if (loadingMore || (!hasMore && append)) return; setLoadingMore(true); try { const page = await api<Conversation[]>(`/api/assistant/conversations?limit=10&offset=${nextOffset}`); setItems(current => append ? [...current, ...page] : page); setOffset(current => current + page.length); setHasMore(page.length === 10); } finally { setLoadingMore(false); } } useEffect(() => { void loadPage(0); }, []); async function select(item: Conversation) { setActive(item); const result = await api<{ messages: Message[] }>(`/api/assistant/conversations/${item.id}`); setMessages(result.messages); } async function create() { const item = await api<Conversation>("/api/assistant/conversations", { method: "POST", body: JSON.stringify({ title: "新求职对话" }) }); setItems(current => [item, ...current]); setOffset(current => current + 1); await select(item); return item; } async function deliver(conversationId: string, content: string) { if (busy) return; setDraft(""); setMessages(current => [...current, { role: "user", content }]); setBusy(true); try { const reply = await api<Message>(`/api/assistant/conversations/${conversationId}/messages`, { method: "POST", body: JSON.stringify({ content }) }); setMessages(current => [...current, reply]); } catch (error) { setMessages(current => [...current, { role: "assistant", content: `发送失败：${error instanceof Error ? error.message : "未知错误"}` }]); } finally { setBusy(false); } } useEffect(() => { const content = initialPrompt?.trim(); if (!content) return; onConsumedPrompt?.(); void (async () => { let id = active?.id; if (!id) { const item = await api<Conversation>("/api/assistant/conversations", { method: "POST", body: JSON.stringify({ title: "新求职对话" }) }); setItems(current => [item, ...current]); setOffset(current => current + 1); setActive(item); id = item.id; } await deliver(id, content); })(); }, [initialPrompt]); async function send(event: FormEvent) { event.preventDefault(); if (!active || !draft.trim() || busy) return; await deliver(active.id, draft.trim()); } return <div className="assistant-view"><div className="assistant-toolbar"><div><p className="eyebrow">GLOBAL JOB ASSISTANT</p><h1>求职助手</h1><p className="muted">管理求职目标、创建 Journey，并处理跨岗位问题。</p></div><button className="btn primary" onClick={create}>＋ 新建对话</button></div><div className="assistant-workspace"><aside className="assistant-history" onScroll={event => { const target = event.currentTarget; if (target.scrollTop + target.clientHeight >= target.scrollHeight - 40) void loadPage(offset, true); }}><p className="section-label">历史对话</p>{items.length === 0 && !loadingMore && <p className="empty">暂无历史对话</p>}{items.map(item => <button className={`conversation-item ${active?.id === item.id ? "selected" : ""}`} key={item.id} onClick={() => select(item)}><strong>{item.title}</strong><span>{item.updated_at}</span></button>)}{loadingMore && <p className="empty">加载中…</p>}{!hasMore && items.length > 0 && <p className="empty">已加载全部对话</p>}</aside><section className="assistant-chat">{!active ? <div className="chat-empty empty"><div className="big-icon">✦</div><h3>开始一个求职对话</h3><p>可以咨询求职方向、创建 Journey 或管理多个岗位。</p><button className="btn primary" onClick={create}>新建对话</button></div> : <><div className="messages">{messages.length === 0 && <div className="assistant-bubble">你好，我是你的求职助手。可以帮你创建和管理多个岗位 Journey。</div>}{messages.map((message, index) => <div className={message.role === "user" ? "user-bubble" : "assistant-bubble"} key={message.id ?? index}>{message.content}</div>)}{busy && <div className="assistant-bubble typing">Agent 思考中…</div>}</div><form className="chat-input" onSubmit={send}><input value={draft} onChange={event => setDraft(event.target.value)} placeholder="告诉求职助手你想做什么…" /><button className="btn primary" disabled={busy}>发送</button></form></>}</section></div></div>; }
 
 type JourneyDraft = { company: string; role: string; department: string; cycle: string; description: string; location: string; salary: string };
 type DraftResult = { draft: JourneyDraft; message: string; missing_fields: string[]; method: string };
@@ -95,4 +98,207 @@ function NewJourney({ onClose, onSaveDraft, initialDraft, onCreated }: { onClose
   return <div className="modal-backdrop"><div className="modal journey-create-modal"><button type="button" className="dialog-close" onClick={onClose}>×</button><div className="create-heading"><div><p className="eyebrow">NEW OPPORTUNITY JOURNEY</p><h2>让 Agent 帮你创建 Journey</h2><p className="muted">粘贴 JD 或上传截图，Agent 会提取信息并在创建前交给你确认。</p></div><span className={`draft-status ${step}`}>{step === "input" ? "等待 JD" : step === "questions" ? "待补充" : "待确认"}</span></div><div className="create-workspace"><section className={`create-chat ${dragging ? "dragging" : ""}`} onPaste={pasteImage} onDragOver={event => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={dropImage}><div className="drop-hint">{dragging ? "松开鼠标即可识别截图" : "截图可直接拖到这里，或复制图片后按 Ctrl/Cmd+V"}</div><div className="messages">{messages.map((message, index) => <div className={message.role === "user" ? "user-bubble" : "assistant-bubble"} key={index}>{message.content}</div>)}</div><form className="create-input" onSubmit={handleReply}><textarea value={input} onChange={event => setInput(event.target.value)} placeholder={step === "input" ? "粘贴完整 JD，或描述你想申请的岗位…" : "补充信息，或告诉我需要修改什么…"} /><div className="input-footer"><label className="image-upload"><input type="file" accept="image/png,image/jpeg,image/webp,image/bmp" onChange={event => handleImage(event.target.files?.[0])} /><span>{ocrBusy ? "识别中…" : "▧ 上传 JD 截图"}</span></label><span className="upload-name">{imageName || "支持 JPG、PNG、WEBP"}</span><button className="btn primary" disabled={busy || ocrBusy || !input.trim()}>{step === "input" ? "提取信息" : "发送"}</button></div></form></section><aside className="draft-summary"><div className="card-head"><h3>Journey 摘要</h3><span className="muted">实时更新</span></div><label>公司名称<input disabled={busy || ocrBusy} value={draft.company} onChange={event => update("company", event.target.value)} placeholder="待识别" /></label><label>岗位名称<input disabled={busy || ocrBusy} value={draft.role} onChange={event => update("role", event.target.value)} placeholder="待识别" /></label><label>部门 / 业务线<input disabled={busy || ocrBusy} value={draft.department} onChange={event => update("department", event.target.value)} placeholder="可选" /></label><label>工作地点<input disabled={busy || ocrBusy} value={draft.location} onChange={event => update("location", event.target.value)} placeholder="可选" /></label><label>招聘周期<input disabled={busy || ocrBusy} value={draft.cycle} onChange={event => update("cycle", event.target.value)} placeholder="可选，例如：2026 社招" /></label><label>薪资范围<input disabled={busy || ocrBusy} value={draft.salary} onChange={event => update("salary", event.target.value)} placeholder="可选" /></label><div className="jd-preview"><strong>原始 JD</strong><p>{draft.description || "粘贴后将在这里保留原文"}</p></div>{error && <p className="error">{error}</p>}<div className="dialog-actions"><button type="button" className="btn ghost" onClick={onClose}>取消</button><button type="button" className="btn primary" onClick={submit} disabled={busy || ocrBusy || !draft.company || !draft.role || !draft.description}>{busy ? "创建中…" : "确认并创建"}</button></div></aside></div></div></div>;
 }
 
-export function App() { const [view, setView] = useState<View>("journeys"); const [journeys, setJourneys] = useState<Journey[]>([]); const [selected, setSelected] = useState<Journey | null>(null); const [dialog, setDialog] = useState(false); const [apiOnline, setApiOnline] = useState(false); useEffect(() => { let active = true; let pending = false; const refresh = async () => { if (pending) return; pending = true; try { const items = await api<Journey[]>("/api/journeys", { signal: AbortSignal.timeout(10000) }); if (active) { setJourneys(items); setApiOnline(true); } } catch { if (active) setApiOnline(false); } finally { pending = false; } }; const onVisible = () => { if (document.visibilityState === "visible") void refresh(); }; void refresh(); window.addEventListener("focus", refresh); document.addEventListener("visibilitychange", onVisible); return () => { active = false; window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", onVisible); }; }, []); if (selected) return <div className="app-shell"><main className="main"><header className="topbar"><div className="breadcrumb">求职旅程 <span>/</span> <b>{selected.company} · {selected.role}</b></div><span className={`connection ${apiOnline ? "online" : "offline"}`}>{apiOnline ? "API 已连接" : "未连接 / 加载中"}</span></header><section className="content"><JourneyDetail journey={selected} onBack={() => setSelected(null)} /></section></main></div>; return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark">J</div><div><strong>JobAgent</strong><span>求职工作台</span></div></div><nav className="nav"><button className={`nav-item ${view === "journeys" ? "active" : ""}`} onClick={() => setView("journeys")}><span>⌂</span>求职旅程</button><button className={`nav-item ${view === "tasks" ? "active" : ""}`} onClick={() => setView("tasks")}><span>✦</span>求职助手</button><button className={`nav-item ${view === "settings" ? "active" : ""}`} onClick={() => setView("settings")}><span>⚙</span>设置</button></nav><div className="sidebar-bottom"><div className="profile"><div className="avatar">聂</div><div><strong>聂俊能</strong><span>求职中 · 后端工程师</span></div></div></div></aside><main className="main"><header className="topbar"><div className="mobile-brand"><div className="brand-mark">J</div><strong>JobAgent</strong></div><div className="breadcrumb">我的求职空间 <span>/</span> <b>{view === "journeys" ? "求职旅程" : view === "tasks" ? "求职助手" : "设置"}</b></div><div className="top-actions"><span className={`connection ${apiOnline ? "online" : "offline"}`}>{apiOnline ? "API 已连接" : "未连接 / 加载中"}</span><div className="top-avatar">聂</div></div></header><section className="content">{view === "journeys" ? <JourneyList journeys={journeys} onOpen={setSelected} onCreate={() => setDialog(true)} /> : view === "tasks" ? <AssistantView /> : <div className="view-placeholder"><div className="card"><div className="big-icon">⚙</div><h1>设置</h1><p className="muted">管理候选人资料、模型连接、通知方式和隐私偏好。</p><button className="btn primary" onClick={() => setView("journeys")}>返回求职旅程 →</button></div></div>}</section></main>{dialog && <NewJourney onClose={() => setDialog(false)} onCreated={journey => { setJourneys(items => [journey, ...items.filter(item => item.id !== journey.id)]); setDialog(false); }} />}</div>; }
+const TASK_CATEGORIES = [
+  { key: "slides", label: "生成幻灯片", prompt: "帮我生成一份 PPT 演示文稿：" },
+  { key: "docs", label: "撰写文档", prompt: "帮我撰写一份 Word 文档：" },
+  { key: "data", label: "数据分析&可视化", prompt: "帮我分析数据并生成图表洞察：" },
+  { key: "design", label: "生成设计", prompt: "帮我生成一张设计图：" },
+  { key: "research", label: "批量调研", prompt: "帮我批量调研以下主题：" },
+  { key: "pdf", label: "PDF转换", prompt: "帮我把这份 PDF 转换为 Word 文档" },
+];
+
+const HOT_TASKS = [
+  { title: "周报生成", sub: "述职开挂", tag: "Word", prompt: "根据我本周的工作内容，生成一份周报 Word 文档" },
+  { title: "分析数据生成图表洞察", sub: "提炼核心结论，找出关键指标变化", tag: "XLSX", prompt: "分析数据生成图表洞察，提炼核心结论，找出关键指标变化" },
+  { title: "PDF转Word", sub: "PDF 快速转换为 Word 文档", tag: "PDF", prompt: "把这份 PDF 快速转换为 Word 文档" },
+  { title: "AI文本润色", sub: "句句出彩", tag: "润色", prompt: "对以下文本进行润色：" },
+  { title: "生成月度销售分析表", sub: "月度汇总、趋势图和商品分析", tag: "XLSX", prompt: "生成月度销售分析表，包含月度汇总、趋势图和商品分析" },
+  { title: "项目计划书", sub: "立项无忧", tag: "Word", prompt: "帮我撰写一份项目计划书" },
+  { title: "读PDF提炼重点", sub: "提炼核心结论，掌握全文要点", tag: "PDF", prompt: "读取这份 PDF，提炼重点和核心结论" },
+  { title: "修复并补全Excel公式", sub: "检查错误公式", tag: "XLSX", prompt: "检查这份 Excel，修复并补全错误公式" },
+];
+
+const INSPIRATION_CARDS = [
+  { title: "项目工作总结汇报", desc: "适用于项目汇报、阶段复盘、产品上线、运营活动与管理层汇报等场景。" },
+  { title: "求职简历一键优化", desc: "上传简历与目标 JD，生成岗位定制版简历 docx/pdf。" },
+  { title: "面试准备包", desc: "汇总目标公司面经证据、高频问题与能力矩阵，输出可追溯准备材料。" },
+];
+
+function TitleBar({ online, onQuota, onProfile, onSettings }: { online: boolean; onQuota: () => void; onProfile: () => void; onSettings: () => void }) {
+  return <header className="op-titlebar">
+    <div className="op-titlebar-status"><span className={`op-dot ${online ? "on" : ""}`} />{online ? "网关在线" : "网关离线"}</div>
+    <div className="op-titlebar-actions">
+      <button className="op-chip" onClick={onQuota} title="积分余额（占位）"><span className="op-gem">◆</span>—</button>
+      <button className="op-chip" onClick={onProfile}>个人中心</button>
+      <button className="op-icon-btn" aria-label="设置" title="设置" onClick={onSettings}>⚙</button>
+      <span className="op-win-controls" title="窗口控制由桌面壳（pywebview）提供">
+        <button disabled>—</button><button disabled>▢</button><button disabled>✕</button>
+      </span>
+    </div>
+  </header>;
+}
+
+function ResumePanel({ onUseResume }: { onUseResume: (name: string) => void }) {
+  const [items, setItems] = useState<ResumeItem[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  function load() { api<ResumeItem[]>("/api/resumes").then(setItems).catch(() => setItems([])); }
+  useEffect(() => { load(); }, []);
+  async function upload(files: FileList | null) {
+    const file = files?.[0];
+    if (!file || busy) return;
+    setBusy(true); setError("");
+    try {
+      const body = new FormData(); body.append("file", file);
+      const response = await fetch("/api/resumes/upload", { method: "POST", body });
+      if (!response.ok) throw new Error((await response.json().catch(() => ({} as { detail?: string }))).detail || `上传失败（HTTP ${response.status}）`);
+      load();
+    } catch (e) { setError(e instanceof Error ? e.message : "上传失败"); }
+    finally { setBusy(false); }
+  }
+  return <div className="op-resume-panel">
+    <p className="section-label">我的简历</p>
+    <label className="op-upload">{busy ? "上传中…" : "＋ 上传简历"}<input type="file" hidden accept=".pdf,.docx,.doc,.md,.txt" onChange={event => { void upload(event.target.files); event.currentTarget.value = ""; }} /></label>
+    {error && <p className="op-error">{error}</p>}
+    {items.length === 0 && !busy && <p className="empty">暂无简历。上传后点击即可让 Agent 排版生成 docx/pdf。</p>}
+    <div className="op-resume-list">{items.map(item => <button key={item.name} className="op-resume-item" title={`${item.updated_at} · 点击交给 Agent`} onClick={() => onUseResume(item.name)}>
+      <span className="op-file-tag">{(item.name.split(".").pop() || "").toUpperCase()}</span>
+      <span className="op-resume-name">{item.name}</span>
+    </button>)}</div>
+  </div>;
+}
+
+function WelcomeView({ onStart }: { onStart: (prompt: string) => void }) {
+  const [value, setValue] = useState("");
+  function submit() { onStart(value.trim() || "把一份打卡数据，变成考勤表并统计迟到和缺勤"); }
+  return <div className="op-welcome">
+    <h1>Hi，让我们随时开始。</h1>
+    <div className="op-composer">
+      <textarea className="op-composer-input" aria-label="消息输入框" placeholder="描述你的任务，例如：把一份打卡数据，变成考勤表并统计迟到和缺勤" value={value} onChange={event => setValue(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(); } }} />
+      <div className="op-composer-actions">
+        <label className="op-icon-btn" title="暂不支持上传超过 20 MB 的单个文件"><input type="file" hidden disabled />📎</label>
+        <button className="op-icon-btn" disabled title="选择技能（即将开放）">⚡</button>
+        <label className="op-model-select" title="默认模型">默认模型<select disabled><option>glm</option></select></label>
+        <button className="op-send" onClick={submit} title="发送">➤</button>
+      </div>
+    </div>
+    <p className="op-workspace-status">正在准备工作台环境，完成后即可开始对话<span className="op-ellipsis">…</span></p>
+    <nav className="op-categories">{TASK_CATEGORIES.map(category => <button key={category.key} onClick={() => onStart(category.prompt)}>{category.label}</button>)}</nav>
+    <section className="op-section">
+      <h2>热门任务</h2>
+      <div className="op-carousel">{HOT_TASKS.map(task => <button key={task.title} className="op-task-card" onClick={() => onStart(task.prompt)}>
+        <p>{task.title}</p><span>{task.sub}</span><em>{task.tag}</em>
+      </button>)}</div>
+    </section>
+    <section className="op-section">
+      <h2>灵感卡片</h2>
+      <div className="op-inspiration">{INSPIRATION_CARDS.map(card => <div key={card.title} className="op-insp-card"><h3>{card.title}</h3><p>{card.desc}</p></div>)}</div>
+    </section>
+  </div>;
+}
+
+function SkillStoreView() {
+  const [cards, setCards] = useState<SkillCard[]>([]);
+  const [tab, setTab] = useState<"all" | "mine" | "officeplus">("all");
+  const [toast, setToast] = useState("");
+  useEffect(() => { api<SkillCard[]>("/api/skills").then(setCards).catch(() => setCards([])); }, []);
+  const list = cards.filter(card => tab === "all" || tab === "mine" && card.source === "workspace" || tab === "officeplus" && card.source === "officeplus");
+  return <div className="op-store">
+    <div className="op-store-head"><h1>Skill 商店</h1>
+      <div className="op-tabs">{([["all", "全部"], ["officeplus", "Office热门精选"], ["mine", "我的skills"]] as const).map(([key, label]) => <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>{label}</button>)}</div>
+    </div>
+    {list.length === 0 && <p className="empty">暂无 Skill</p>}
+    <div className="op-store-grid">{list.map(card => <div key={`${card.source}/${card.id}`} className="op-skill-card">
+      <div className="op-skill-icon">{card.title.slice(0, 1).toUpperCase()}</div>
+      <h3>{card.title}</h3>
+      <p>{card.summary || "（无描述）"}</p>
+      <footer><span className={`op-badge ${card.installed ? "" : "ghost"}`}>{card.installed ? "已安装" : "可安装"}</span>
+        <button onClick={() => setToast(`「${card.title}」${card.installed ? "已在工作区，可在对话中直接使用" : "安装能力即将开放"}`)}>{card.installed ? "详情" : "安装"}</button></footer>
+    </div>)}</div>
+    {toast && <div className="op-toast" role="status" onClick={() => setToast("")}>{toast}</div>}
+  </div>;
+}
+
+function PlaceholderDialog({ kind, onClose }: { kind: PlaceholderKind; onClose: () => void }) {
+  const copy = kind === "quota"
+    ? { title: "积分余额", body: "积分与配额体系为占位组件。接入计费后端后，此处将展示余额、消耗明细与充值入口。" }
+    : { title: "个人中心", body: "账号体系为占位组件。接入登录后，此处将展示账号信息、云同步与配额管理。" };
+  return <div className="modal-backdrop" onClick={onClose}><div className="modal op-placeholder" onClick={event => event.stopPropagation()}>
+    <button type="button" className="dialog-close" onClick={onClose}>×</button>
+    <h2>{copy.title}</h2>
+    <p className="muted">{copy.body}</p>
+    <span className="op-badge ghost">即将开放</span>
+  </div></div>;
+}
+
+function SettingsPanel({ onClose }: { onClose: () => void }) {
+  const [version, setVersion] = useState("0.1.0");
+  const [syncOn, setSyncOn] = useState(false);
+  const [toast, setToast] = useState("");
+  useEffect(() => { api<{ version: string }>("/api/app/version").then(info => setVersion(info.version)).catch(() => setVersion("0.1.0")); }, []);
+  return <div className="modal-backdrop"><div className="modal op-settings">
+    <button type="button" className="dialog-close" onClick={onClose}>×</button>
+    <h2>设置</h2>
+    <div className="op-setting-row"><div><strong>云同步</strong><p className="muted">会话与简历云备份（占位，后续开放）</p></div>
+      <button className={`op-toggle ${syncOn ? "on" : ""}`} aria-pressed={syncOn} onClick={() => { setSyncOn(!syncOn); setToast(syncOn ? "云同步已关闭（占位）" : "云同步已开启（占位）"); }}>{syncOn ? "已开启" : "已关闭"}</button></div>
+    <div className="op-setting-row"><div><strong>账号登录</strong><p className="muted">登录后同步积分与配额（占位）</p></div>
+      <button className="btn ghost" onClick={() => setToast("登录功能即将开放")}>登录</button></div>
+    <div className="op-setting-row"><div><strong>JobAgent 使用协议</strong><p className="muted">使用条款与许可协议</p></div>
+      <button className="btn ghost" onClick={() => setToast("使用协议即将上线")}>查看</button></div>
+    <div className="op-setting-row"><div><strong>当前版本</strong><p className="muted">v{version} · 更新器占位</p></div>
+      <button className="btn ghost" onClick={() => setToast("已是最新版本（占位）")}>检查更新</button></div>
+    {toast && <div className="op-toast" role="status" onClick={() => setToast("")}>{toast}</div>}
+  </div></div>;
+}
+
+export function App() {
+  const [view, setView] = useState<View>("welcome");
+  const [journeys, setJourneys] = useState<Journey[]>([]);
+  const [selected, setSelected] = useState<Journey | null>(null);
+  const [dialog, setDialog] = useState(false);
+  const [apiOnline, setApiOnline] = useState(false);
+  const [pendingPrompt, setPendingPrompt] = useState("");
+  const [placeholder, setPlaceholder] = useState<PlaceholderKind | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  useEffect(() => {
+    let active = true; let pending = false;
+    const refresh = async () => {
+      if (pending) return; pending = true;
+      try { const items = await api<Journey[]>("/api/journeys", { signal: AbortSignal.timeout(10000) }); if (active) { setJourneys(items); setApiOnline(true); } }
+      catch { if (active) setApiOnline(false); }
+      finally { pending = false; }
+    };
+    const onVisible = () => { if (document.visibilityState === "visible") void refresh(); };
+    void refresh(); window.addEventListener("focus", refresh); document.addEventListener("visibilitychange", onVisible);
+    return () => { active = false; window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", onVisible); };
+  }, []);
+  function startWithPrompt(prompt: string) { setPendingPrompt(prompt); setView("assistant"); }
+  const navItems: { key: View; label: string; icon: string }[] = [
+    { key: "welcome", label: "新建任务", icon: "✚" },
+    { key: "skills", label: "Skill 商店", icon: "◈" },
+    { key: "assistant", label: "求职助手", icon: "✦" },
+    { key: "journeys", label: "岗位 Journeys", icon: "▤" },
+  ];
+  return <div className="app-shell op-shell">
+    <aside className="op-sidebar">
+      <div className="op-brand"><span className="op-logo">J</span><div><strong>JobAgent</strong><span>AI 求职办公助手</span></div></div>
+      <nav className="op-nav">{navItems.map(item => <button key={item.key} className={view === item.key ? "active" : ""} onClick={() => setView(item.key)}><span>{item.icon}</span>{item.label}</button>)}</nav>
+      <div className="op-sidebar-scroll"><ResumePanel onUseResume={name => startWithPrompt(`请读取 data/resumes/${name}，优化排版（不改内容）后生成简历 docx，并用 soffice 转出 pdf`)} /></div>
+      <p className={`op-gateway ${apiOnline ? "on" : ""}`}>{apiOnline ? "网关在线" : "网关启动中…"}</p>
+    </aside>
+    <main className="op-main">
+      <TitleBar online={apiOnline} onQuota={() => setPlaceholder("quota")} onProfile={() => setPlaceholder("profile")} onSettings={() => setSettingsOpen(true)} />
+      <div className="op-content">
+        {view === "welcome" && <WelcomeView onStart={startWithPrompt} />}
+        {view === "assistant" && <AssistantView initialPrompt={pendingPrompt} onConsumedPrompt={() => setPendingPrompt("")} />}
+        {view === "skills" && <SkillStoreView />}
+        {view === "journeys" && (selected
+          ? <JourneyDetail journey={selected} onBack={() => setSelected(null)} />
+          : <JourneyList journeys={journeys} onOpen={setSelected} onCreate={() => setDialog(true)} />)}
+      </div>
+    </main>
+    {dialog && <NewJourney onClose={() => setDialog(false)} onCreated={journey => { setJourneys(items => [journey, ...items.filter(item => item.id !== journey.id)]); setDialog(false); setSelected(journey); }} />}
+    {settingsOpen && <SettingsPanel onClose={() => setSettingsOpen(false)} />}
+    {placeholder && <PlaceholderDialog kind={placeholder} onClose={() => setPlaceholder(null)} />}
+  </div>;
+}
