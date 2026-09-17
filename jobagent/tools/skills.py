@@ -44,10 +44,23 @@ def build_skill_tools(manager: SkillManager) -> list[BaseTool]:
     async def read_skill(name: str) -> dict[str, Any]:
         """Read the instructions of one discovered Skill."""
 
+        record = manager.find_skill(name)
+        if record is None:
+            return {
+                "status": "failed",
+                "error_type": "skill_not_found",
+                "message": f"skill not found: {name}",
+            }
         try:
-            return {"status": "completed", "name": name, "content": manager.read_skill(name)}
-        except (OSError, UnicodeError, ValueError) as exc:
-            return {"status": "failed", "error_type": "skill_not_found", "message": str(exc)}
+            content = record.path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            return {"status": "failed", "error_type": "read_failed", "message": str(exc)}
+        return {
+            "status": "completed",
+            "name": name,
+            "path": str(record.path.parent),
+            "content": content,
+        }
 
     async def install_skill(source: str) -> dict[str, Any]:
         """Install a standard Skill from a local source or HTTPS SKILL.md URL."""
@@ -59,9 +72,11 @@ def build_skill_tools(manager: SkillManager) -> list[BaseTool]:
                 "name": item.name,
                 "version": item.version,
                 "installed_path": str(item.path.parent),
+                "files": SkillManager.list_skill_files(item),
             }
         except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
             return {"status": "failed", "error_type": "skill_install_failed", "message": str(exc)}
+
 
     return [
         StructuredTool.from_function(
@@ -79,8 +94,11 @@ def build_skill_tools(manager: SkillManager) -> list[BaseTool]:
             coroutine=install_skill,
             name="install_skill",
             description=(
-                "Install a standard documentation-only Skill from a local SKILL.md or "
-                "an HTTPS URL. Ask for user confirmation before installing a Skill."
+                "Install a standard Skill from a local skill directory (SKILL.md plus "
+                "bundled scripts/references), a local SKILL.md file, an HTTPS SKILL.md "
+                "URL, or a GitHub repository URL (repo root or /tree/<branch>/<subpath> "
+                "for multi-skill repos). Ask for user confirmation before installing "
+                "and mention the file count when it is a directory."
             ),
             args_schema=SkillSource,
         ),

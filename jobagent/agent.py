@@ -152,7 +152,7 @@ _HITL_TOOLS: dict[str, str] = {
     "update_opportunity_journey": "修改指定 Journey 的字段（请核对 ID、版本和修改内容）",
     "delete_opportunity_journey": "软删除指定 Journey，保留关联内容，可恢复（请核对具体 ID）",
     "restore_opportunity_journey": "恢复已软删除的指定 Journey，使其重新显示在网页列表",
-    "install_skill": "从本地文件或互联网下载并安装一个 Agent Skill",
+    "install_skill": "从本地目录/文件、HTTPS SKILL.md 或 GitHub 仓库 URL 安装一个 Agent Skill",
     "send_recruitment_email": "发送已确认的 XHS 招聘邮件草稿及用户选定 PDF 简历",
     "boss_greet_jobs": "向 Boss 招聘方批量发送打招呼消息",
     "upload_boss_resume_pdf": "向 Boss 账户上传/替换附件简历",
