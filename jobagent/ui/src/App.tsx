@@ -170,15 +170,52 @@ function ResumePanel({ onUseResume }: { onUseResume: (name: string) => void }) {
 
 function WelcomeView({ onStart }: { onStart: (prompt: string) => void }) {
   const [value, setValue] = useState("");
-  function submit() { onStart(value.trim() || "把一份打卡数据，变成考勤表并统计迟到和缺勤"); }
+  const [models, setModels] = useState<{ current: string; available: string[] } | null>(null);
+  const [uploadName, setUploadName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+  useEffect(() => { api<{ current: string; available: string[] }>("/api/models").then(setModels).catch(() => setModels(null)); }, []);
+  function submit() {
+    const attachment = uploadName ? `\n（已上传附件：data/uploads/${uploadName}）` : "";
+    onStart((value.trim() || "把一份打卡数据，变成考勤表并统计迟到和缺勤") + attachment);
+  }
+  async function switchModel(model: string) {
+    if (!models || model === models.current || busy) return;
+    setBusy(true); setNotice("");
+    try { const next = await api<{ current: string; available: string[] }>("/api/models", { method: "POST", body: JSON.stringify({ model }) }); setModels(next); setNotice(`已切换模型：${next.current}`); }
+    catch (error) { setNotice(error instanceof Error ? error.message : "切换失败"); }
+    finally { setBusy(false); }
+  }
+  async function upload(files: FileList | null) {
+    const file = files?.[0];
+    if (!file || busy) return;
+    if (file.size > 20 * 1024 * 1024) { setNotice("暂不支持上传超过 20 MB 的单个文件"); return; }
+    setBusy(true); setNotice("");
+    try {
+      const body = new FormData(); body.append("file", file);
+      const response = await fetch("/api/uploads", { method: "POST", body });
+      if (!response.ok) throw new Error((await response.json().catch(() => ({} as { detail?: string }))).detail || `上传失败（HTTP ${response.status}）`);
+      const result = await response.json() as { saved_as: string };
+      setUploadName(result.saved_as);
+      setNotice(`已上传：${result.saved_as}`);
+    } catch (error) { setNotice(error instanceof Error ? error.message : "上传失败"); }
+    finally { setBusy(false); }
+  }
   return <div className="op-welcome">
     <h1>Hi，让我们随时开始。</h1>
     <div className="op-composer">
+      {uploadName && <p className="op-attachment"><span>📎</span>{uploadName}<button type="button" onClick={() => setUploadName("")}>×</button></p>}
       <textarea className="op-composer-input" aria-label="消息输入框" placeholder="描述你的任务，例如：把一份打卡数据，变成考勤表并统计迟到和缺勤" value={value} onChange={event => setValue(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(); } }} />
       <div className="op-composer-actions">
-        <label className="op-icon-btn" title="暂不支持上传超过 20 MB 的单个文件"><input type="file" hidden disabled />📎</label>
-        <button className="op-icon-btn" disabled title="选择技能（即将开放）">⚡</button>
-        <label className="op-model-select" title="默认模型">默认模型<select disabled><option>glm</option></select></label>
+        <label className="op-icon-btn" title={busy ? "处理中…" : "上传附件（≤20 MB）"}><input type="file" hidden disabled={busy} accept=".pdf,.docx,.doc,.md,.txt,.png,.jpg,.jpeg,.webp,.csv,.xlsx,.pptx,.json" onChange={event => { void upload(event.target.files); event.currentTarget.value = ""; }} /><span aria-hidden="true">{busy ? "…" : "📎"}</span><span className="op-action-label">添加附件</span></label>
+        <button className="op-icon-btn" disabled title="选择技能（即将开放）"><span aria-hidden="true">⚡</span><span className="op-action-label">选择技能</span></button>
+        <label className="op-model-select" title="切换对话模型">
+          <select value={models?.current ?? ""} disabled={!models || busy} onChange={event => void switchModel(event.target.value)} aria-label="默认模型">
+            {!models && <option value="">加载中…</option>}
+            {models?.available.map(model => <option key={model} value={model}>{model}</option>)}
+          </select>
+        </label>
+        {notice && <span className="op-notice" role="status">{notice}</span>}
         <button className="op-send" onClick={submit} title="发送">➤</button>
       </div>
     </div>

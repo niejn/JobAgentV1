@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import asdict
 from datetime import datetime
@@ -544,6 +545,77 @@ async def upload_resume(file: UploadFile = File(...)) -> UploadedResumeResponse:
 def app_version() -> dict[str, Any]:
     """Version metadata for the settings panel and the (placeholder) updater."""
     return {"product": "JobAgent", "version": "0.1.0", "updater": "placeholder", "channel": "dev"}
+
+
+MODEL_OVERRIDE_PATH = ROOT.parent / "data" / "web_model_override.json"
+EXTRA_MODEL_CHOICES = ["glm-5.3", "glm-5.2", "deepseek-chat", "deepseek-reasoner", "qwen3-max"]
+
+
+def _available_models() -> list[str]:
+    settings = get_settings()
+    models: list[str] = []
+    for candidate in [settings.jobagent_llm_model, settings.jobagent_llm_fallback_model, *EXTRA_MODEL_CHOICES]:
+        if candidate and candidate not in models:
+            models.append(candidate)
+    return models
+
+
+def _apply_model_override() -> str | None:
+    """Apply the persisted web selection to the cached settings instance."""
+    try:
+        data = json.loads(MODEL_OVERRIDE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    model = data.get("model")
+    if isinstance(model, str) and model:
+        get_settings().jobagent_llm_model = model
+        return model
+    return None
+
+
+@app.get("/api/models")
+def get_models() -> dict[str, Any]:
+    """Current and selectable chat models for the composer selector."""
+    settings = get_settings()
+    current = _apply_model_override() or settings.jobagent_llm_model
+    return {"current": current, "available": _available_models()}
+
+
+class ModelSelection(BaseModel):
+    model: str = Field(min_length=1, max_length=100)
+
+
+@app.post("/api/models")
+def select_model(request: ModelSelection) -> dict[str, Any]:
+    """Persist the web model selection; applies to subsequent agent calls."""
+    if request.model not in _available_models():
+        raise HTTPException(status_code=422, detail=f"未知模型：{request.model}")
+    MODEL_OVERRIDE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    MODEL_OVERRIDE_PATH.write_text(json.dumps({"model": request.model}, ensure_ascii=False), encoding="utf-8")
+    get_settings().jobagent_llm_model = request.model
+    return {"current": request.model, "available": _available_models()}
+
+
+UPLOAD_SUFFIXES = RESUME_SUFFIXES | {".png", ".jpg", ".jpeg", ".webp", ".csv", ".xlsx", ".pptx", ".json"}
+
+
+@app.post("/api/uploads", status_code=201)
+async def upload_attachment(file: UploadFile = File(...)) -> UploadedResumeResponse:
+    """Store a composer attachment under data/uploads/ for the agent to read."""
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in UPLOAD_SUFFIXES:
+        raise HTTPException(status_code=422, detail=f"不支持的文件类型：{suffix or '未知'}")
+    directory = _safe_skill_dir(ROOT.parent / "data" / "uploads")
+    target = directory / Path(file.filename or "upload").name
+    size = 0
+    with target.open("wb") as sink:
+        while chunk := await file.read(1024 * 1024):
+            size += len(chunk)
+            sink.write(chunk)
+    return UploadedResumeResponse(saved_as=target.name, size_bytes=size)
+
+
+_apply_model_override()
 
 
 if UI_DIST.is_dir():
