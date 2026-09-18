@@ -185,6 +185,7 @@
   padding:0 12px;
   white-space:nowrap;
 }
+.op-selected-skill{display:inline-flex;align-items:center;gap:7px;height:32px;border:1px solid #cfe0ff;border-radius:9px;background:#edf4ff;padding:0 10px;color:#3866cc;font:600 11px inherit;white-space:nowrap;cursor:pointer}.op-selected-skill .app-icon{width:16px;height:16px}.op-selected-skill span{font-size:15px;font-weight:400}.op-selected-skill.slides{color:#e89435}.op-selected-skill.docs{color:#31aecd}.op-selected-skill.data{color:#37a86e}.op-selected-skill.design{color:#a66ee0}.op-selected-skill.research{color:#64a56f}.op-selected-skill.pdf{color:#db7844}
 .op-action-label{font-size:11px;font-weight:600}
 .op-composer-actions .op-model-select{
   display:flex;

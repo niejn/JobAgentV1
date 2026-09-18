@@ -211,6 +211,7 @@ function OfficeAiView() {
 
 function WelcomeView({ onStart }: { onStart: (prompt: string) => void }) {
   const [value, setValue] = useState("");
+  const [selectedCategory, setSelectedCategory] = useState<(typeof TASK_CATEGORIES)[number] | null>(null);
   const [models, setModels] = useState<{ current: string; available: string[] } | null>(null);
   const [uploadName, setUploadName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -218,7 +219,8 @@ function WelcomeView({ onStart }: { onStart: (prompt: string) => void }) {
   useEffect(() => { api<{ current: string; available: string[] }>("/api/models").then(setModels).catch(() => setModels(null)); }, []);
   function submit() {
     const attachment = uploadName ? `\n（已上传附件：data/uploads/${uploadName}）` : "";
-    onStart((value.trim() || "把一份打卡数据，变成考勤表并统计迟到和缺勤") + attachment);
+    const skillPrefix = selectedCategory ? `${selectedCategory.prompt}\n` : "";
+    onStart(skillPrefix + (value.trim() || "把一份打卡数据，变成考勤表并统计迟到和缺勤") + attachment);
   }
   async function switchModel(model: string) {
     if (!models || model === models.current || busy) return;
@@ -251,6 +253,7 @@ function WelcomeView({ onStart }: { onStart: (prompt: string) => void }) {
         <div className="op-composer-left-actions">
           <label className="op-icon-btn" title={busy ? "处理中…" : "上传附件（≤20 MB）"}><input type="file" hidden disabled={busy} accept=".pdf,.docx,.doc,.md,.txt,.png,.jpg,.jpeg,.webp,.csv,.xlsx,.pptx,.json" onChange={event => { void upload(event.target.files); event.currentTarget.value = ""; }} />{busy ? <span aria-hidden="true">…</span> : <AppIcon name="attachment" />}<span className="op-action-label">添加附件</span></label>
           <button className="op-icon-btn" disabled title="选择技能（即将开放）"><AppIcon name="skills" /><span className="op-action-label">选择技能</span></button>
+          {selectedCategory && <button type="button" className={`op-selected-skill ${selectedCategory.key}`} onClick={() => setSelectedCategory(null)} title="取消已选任务"><AppIcon name={selectedCategory.icon} />{selectedCategory.label}<span>×</span></button>}
         </div>
         <div className="op-composer-right-actions">
           <label className="op-model-select" title="切换对话模型">
@@ -265,7 +268,7 @@ function WelcomeView({ onStart }: { onStart: (prompt: string) => void }) {
       </div>
     </div>
     <p className="op-workspace-status">正在准备工作台环境，完成后即可开始对话<span className="op-ellipsis">…</span></p>
-    <nav className="op-categories">{TASK_CATEGORIES.map(category => <button key={category.key} title={category.label} aria-label={category.label} onClick={() => onStart(category.prompt)}><span className={`op-category-icon ${category.key}`}><AppIcon name={category.icon} /></span><span className="op-category-label">{category.label}</span></button>)}</nav>
+    {!selectedCategory && <nav className="op-categories">{TASK_CATEGORIES.map(category => <button key={category.key} title={category.label} aria-label={category.label} onClick={() => setSelectedCategory(category)}><span className={`op-category-icon ${category.key}`}><AppIcon name={category.icon} /></span><span className="op-category-label">{category.label}</span></button>)}</nav>}
     <section className="op-section">
       <h2>热门任务</h2>
       <div className="op-carousel">{HOT_TASKS.map(task => <button key={task.title} className="op-task-card" onClick={() => onStart(task.prompt)}>
