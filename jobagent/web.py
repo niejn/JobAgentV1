@@ -15,6 +15,7 @@ from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -60,6 +61,10 @@ class ConversationCreate(BaseModel):
 
 class MessageCreate(BaseModel):
     content: str = Field(min_length=1)
+
+
+class ConversationDelete(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=100)
 
 
 class JourneyDraftMatch(BaseModel):
@@ -113,6 +118,13 @@ def _chat_db() -> sqlite3.Connection:
         id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     )""")
     connection.execute("""CREATE TABLE IF NOT EXISTS assistant_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT NOT NULL,
+        role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL
+    )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS office_ai_conversations (
+        id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS office_ai_messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT NOT NULL,
         role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL
     )""")
@@ -200,6 +212,66 @@ async def send_assistant_message(conversation_id: str, request: MessageCreate) -
     with _chat_db() as connection:
         connection.execute("INSERT INTO assistant_messages (conversation_id, role, content, created_at) VALUES (?, 'assistant', ?, ?)", (conversation_id, response, now))
         connection.execute("UPDATE assistant_conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
+    return {"role": "assistant", "content": response, "created_at": now}
+
+
+@app.delete("/api/assistant/conversations")
+def delete_assistant_conversations(request: ConversationDelete) -> dict[str, int]:
+    """Delete user-visible JobAgent history records without touching checkpoints."""
+
+    ids = list(dict.fromkeys(request.ids))
+    placeholders = ",".join("?" for _ in ids)
+    with _chat_db() as connection:
+        connection.execute(f"DELETE FROM assistant_messages WHERE conversation_id IN ({placeholders})", ids)
+        result = connection.execute(f"DELETE FROM assistant_conversations WHERE id IN ({placeholders})", ids)
+    return {"deleted": result.rowcount}
+
+
+@app.get("/api/office-ai/conversations")
+def list_office_ai_conversations(limit: int = Query(10, ge=1, le=50), offset: int = Query(0, ge=0)) -> list[dict[str, Any]]:
+    with _chat_db() as connection:
+        rows = connection.execute("SELECT * FROM office_ai_conversations ORDER BY updated_at DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+    return [_assistant_conversation_json(row) for row in rows]
+
+
+@app.post("/api/office-ai/conversations", status_code=201)
+def create_office_ai_conversation(request: ConversationCreate) -> dict[str, Any]:
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    conversation = {"id": str(uuid4()), "title": request.title[:120] or "新建工作", "created_at": now, "updated_at": now}
+    with _chat_db() as connection:
+        connection.execute("INSERT INTO office_ai_conversations VALUES (?, ?, ?, ?)", tuple(conversation.values()))
+    return conversation
+
+
+@app.get("/api/office-ai/conversations/{conversation_id}")
+def get_office_ai_conversation(conversation_id: str) -> dict[str, Any]:
+    with _chat_db() as connection:
+        conversation = connection.execute("SELECT * FROM office_ai_conversations WHERE id = ?", (conversation_id,)).fetchone()
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="Office AI conversation not found")
+        messages = connection.execute("SELECT * FROM office_ai_messages WHERE conversation_id = ? ORDER BY id", (conversation_id,)).fetchall()
+    return {**_assistant_conversation_json(conversation), "messages": [_message_json(row) for row in messages]}
+
+
+@app.post("/api/office-ai/conversations/{conversation_id}/messages")
+async def send_office_ai_message(conversation_id: str, request: MessageCreate) -> dict[str, Any]:
+    content = request.content.strip()
+    with _chat_db() as connection:
+        conversation = connection.execute("SELECT * FROM office_ai_conversations WHERE id = ?", (conversation_id,)).fetchone()
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="Office AI conversation not found")
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        connection.execute("INSERT INTO office_ai_messages (conversation_id, role, content, created_at) VALUES (?, 'user', ?, ?)", (conversation_id, content, now))
+    try:
+        agent = build_job_agent(get_settings(), platform_hint="office-ai")
+        response = await agent.reply(content, session_id=f"office-ai:{conversation_id}")
+        await agent.close()
+    except Exception as error:
+        response = f"Office AI 暂时无法回答：{error}"
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    with _chat_db() as connection:
+        connection.execute("INSERT INTO office_ai_messages (conversation_id, role, content, created_at) VALUES (?, 'assistant', ?, ?)", (conversation_id, response, now))
+        connection.execute("UPDATE office_ai_conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
     return {"role": "assistant", "content": response, "created_at": now}
 
 
@@ -616,6 +688,16 @@ async def upload_attachment(file: UploadFile = File(...)) -> UploadedResumeRespo
 
 
 _apply_model_override()
+
+
+@app.get("/office-ai", include_in_schema=False)
+def office_ai_page() -> FileResponse:
+    """Serve the SPA entry point when the Office AI route is opened directly."""
+
+    index = UI_DIST / "index.html"
+    if not index.is_file():
+        raise HTTPException(status_code=404, detail="UI build is unavailable")
+    return FileResponse(index)
 
 
 if UI_DIST.is_dir():
