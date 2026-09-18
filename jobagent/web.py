@@ -121,13 +121,6 @@ def _chat_db() -> sqlite3.Connection:
         id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT NOT NULL,
         role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL
     )""")
-    connection.execute("""CREATE TABLE IF NOT EXISTS office_ai_conversations (
-        id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-    )""")
-    connection.execute("""CREATE TABLE IF NOT EXISTS office_ai_messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT NOT NULL,
-        role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL
-    )""")
     connection.commit()
     return connection
 
@@ -240,64 +233,6 @@ def delete_assistant_conversations(request: ConversationDelete) -> dict[str, int
         connection.execute(f"DELETE FROM assistant_messages WHERE conversation_id IN ({placeholders})", ids)
         result = connection.execute(f"DELETE FROM assistant_conversations WHERE id IN ({placeholders})", ids)
     return {"deleted": result.rowcount}
-
-
-@app.get("/api/office-ai/conversations")
-def list_office_ai_conversations(limit: int = Query(10, ge=1, le=50), offset: int = Query(0, ge=0)) -> list[dict[str, Any]]:
-    with _chat_db() as connection:
-        rows = connection.execute("SELECT * FROM office_ai_conversations ORDER BY updated_at DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()
-    return [_assistant_conversation_json(row) for row in rows]
-
-
-@app.post("/api/office-ai/conversations", status_code=201)
-def create_office_ai_conversation(request: ConversationCreate) -> dict[str, Any]:
-    now = datetime.now().astimezone().isoformat(timespec="seconds")
-    conversation = {"id": str(uuid4()), "title": request.title[:120] or "新建工作", "created_at": now, "updated_at": now}
-    with _chat_db() as connection:
-        connection.execute("INSERT INTO office_ai_conversations VALUES (?, ?, ?, ?)", tuple(conversation.values()))
-    return conversation
-
-
-@app.get("/api/office-ai/conversations/{conversation_id}")
-def get_office_ai_conversation(conversation_id: str) -> dict[str, Any]:
-    with _chat_db() as connection:
-        conversation = connection.execute("SELECT * FROM office_ai_conversations WHERE id = ?", (conversation_id,)).fetchone()
-        if conversation is None:
-            raise HTTPException(status_code=404, detail="Office AI conversation not found")
-        messages = connection.execute("SELECT * FROM office_ai_messages WHERE conversation_id = ? ORDER BY id", (conversation_id,)).fetchall()
-    return {**_assistant_conversation_json(conversation), "messages": [_message_json(row) for row in messages]}
-
-
-@app.post("/api/office-ai/conversations/{conversation_id}/messages")
-async def send_office_ai_message(conversation_id: str, request: MessageCreate) -> dict[str, Any]:
-    content = request.content.strip()
-    with _chat_db() as connection:
-        conversation = connection.execute("SELECT * FROM office_ai_conversations WHERE id = ?", (conversation_id,)).fetchone()
-        if conversation is None:
-            raise HTTPException(status_code=404, detail="Office AI conversation not found")
-        now = datetime.now().astimezone().isoformat(timespec="seconds")
-        connection.execute("INSERT INTO office_ai_messages (conversation_id, role, content, created_at) VALUES (?, 'user', ?, ?)", (conversation_id, content, now))
-    try:
-        agent = build_job_agent(get_settings(), platform_hint="office-ai")
-        response = await agent.reply(content, session_id=f"office-ai:{conversation_id}")
-        await agent.close()
-    except Exception as error:
-        response = f"Office AI 暂时无法回答：{error}"
-    now = datetime.now().astimezone().isoformat(timespec="seconds")
-    with _chat_db() as connection:
-        connection.execute("INSERT INTO office_ai_messages (conversation_id, role, content, created_at) VALUES (?, 'assistant', ?, ?)", (conversation_id, response, now))
-        connection.execute("UPDATE office_ai_conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
-    return {"role": "assistant", "content": response, "created_at": now}
-
-
-@app.delete("/api/office-ai/conversations/{conversation_id}")
-def delete_office_ai_conversation(conversation_id: str) -> dict[str, int]:
-    with _chat_db() as connection:
-        connection.execute("DELETE FROM office_ai_messages WHERE conversation_id = ?", (conversation_id,))
-        result = connection.execute("DELETE FROM office_ai_conversations WHERE id = ?", (conversation_id,))
-    if not result.rowcount:
-        raise HTTPException(status_code=404, detail="Office AI conversation not found")
-    return {"deleted": 1}
 
 
 @app.get("/api/journeys")
@@ -525,84 +460,6 @@ def _safe_skill_dir(base: Path) -> Path:
     return base
 
 
-def _parse_skill_frontmatter(path: Path) -> dict[str, Any]:
-    """Parse the flat fields a skill card needs from SKILL.md frontmatter."""
-    meta: dict[str, Any] = {}
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return meta
-    if not text.startswith("---"):
-        return meta
-    lines = text.splitlines()
-    in_officeplus = False
-    for line in lines[1:]:
-        stripped = line.strip()
-        if stripped == "---":
-            break
-        if not stripped or stripped.startswith("#"):
-            continue
-        if line.startswith("  ") and in_officeplus:
-            key, sep, value = stripped.partition(":")
-            if not sep:
-                continue
-            value = value.strip().strip("\"',")
-            if key.strip() == "titleZhCN":
-                meta["title"] = value
-            elif key.strip() == "descriptionZhCN":
-                meta["summary"] = value
-            elif key.strip() == "guidanceZhCN":
-                meta["guidance"] = value.replace("\\n", " ")
-            continue
-        in_officeplus = stripped.startswith("metadata:")
-        key, sep, value = stripped.partition(":")
-        if not sep:
-            continue
-        value = value.strip().strip("\"'")
-        if key == "name":
-            meta["name"] = value
-        elif key == "description":
-            meta["description"] = value
-        elif key == "version":
-            meta["version"] = value
-    return meta
-
-
-@app.get("/api/skills")
-def list_skills() -> list[dict[str, Any]]:
-    """Aggregate skill cards from the project skill roots for the skill store."""
-    roots = [
-        ("workspace", ROOT.parent / "skills", True),
-        ("officeplus", ROOT.parent / "data" / "skills", False),
-    ]
-    cards: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for source, directory, installed in roots:
-        if not directory.is_dir():
-            continue
-        for entry in sorted(directory.iterdir()):
-            skill_md = entry / "SKILL.md"
-            if not entry.is_dir() or not skill_md.is_file():
-                continue
-            meta = _parse_skill_frontmatter(skill_md)
-            name = meta.get("name") or entry.name
-            if name in seen:
-                continue
-            seen.add(name)
-            cards.append({
-                "id": entry.name,
-                "name": name,
-                "title": meta.get("title") or name,
-                "summary": meta.get("summary") or meta.get("description") or "",
-                "guidance": meta.get("guidance") or "",
-                "version": meta.get("version") or "",
-                "source": source,
-                "installed": installed or source == "workspace",
-                "has_icon": (entry / "icon.png").is_file(),
-            })
-    return cards
-
-
 RESUME_SUFFIXES = {".pdf", ".docx", ".doc", ".md", ".txt"}
 
 
@@ -644,85 +501,6 @@ def app_version() -> dict[str, Any]:
     return {"product": "JobAgent", "version": "0.1.0", "updater": "placeholder", "channel": "dev"}
 
 
-MODEL_OVERRIDE_PATH = ROOT.parent / "data" / "web_model_override.json"
-EXTRA_MODEL_CHOICES = ["glm-5.3", "glm-5.2", "deepseek-chat", "deepseek-reasoner", "qwen3-max"]
-
-
-def _available_models() -> list[str]:
-    settings = get_settings()
-    models: list[str] = []
-    for candidate in [settings.jobagent_llm_model, settings.jobagent_llm_fallback_model, *EXTRA_MODEL_CHOICES]:
-        if candidate and candidate not in models:
-            models.append(candidate)
-    return models
-
-
-def _apply_model_override() -> str | None:
-    """Apply the persisted web selection to the cached settings instance."""
-    try:
-        data = json.loads(MODEL_OVERRIDE_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    model = data.get("model")
-    if isinstance(model, str) and model:
-        get_settings().jobagent_llm_model = model
-        return model
-    return None
-
-
-@app.get("/api/models")
-def get_models() -> dict[str, Any]:
-    """Current and selectable chat models for the composer selector."""
-    settings = get_settings()
-    current = _apply_model_override() or settings.jobagent_llm_model
-    return {"current": current, "available": _available_models()}
-
-
-class ModelSelection(BaseModel):
-    model: str = Field(min_length=1, max_length=100)
-
-
-@app.post("/api/models")
-def select_model(request: ModelSelection) -> dict[str, Any]:
-    """Persist the web model selection; applies to subsequent agent calls."""
-    if request.model not in _available_models():
-        raise HTTPException(status_code=422, detail=f"未知模型：{request.model}")
-    MODEL_OVERRIDE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    MODEL_OVERRIDE_PATH.write_text(json.dumps({"model": request.model}, ensure_ascii=False), encoding="utf-8")
-    get_settings().jobagent_llm_model = request.model
-    return {"current": request.model, "available": _available_models()}
-
-
-UPLOAD_SUFFIXES = RESUME_SUFFIXES | {".png", ".jpg", ".jpeg", ".webp", ".csv", ".xlsx", ".pptx", ".json"}
-
-
-@app.post("/api/uploads", status_code=201)
-async def upload_attachment(file: UploadFile = File(...)) -> UploadedResumeResponse:
-    """Store a composer attachment under data/uploads/ for the agent to read."""
-    suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in UPLOAD_SUFFIXES:
-        raise HTTPException(status_code=422, detail=f"不支持的文件类型：{suffix or '未知'}")
-    directory = _safe_skill_dir(ROOT.parent / "data" / "uploads")
-    target = directory / Path(file.filename or "upload").name
-    size = 0
-    with target.open("wb") as sink:
-        while chunk := await file.read(1024 * 1024):
-            size += len(chunk)
-            sink.write(chunk)
-    return UploadedResumeResponse(saved_as=target.name, size_bytes=size)
-
-
-_apply_model_override()
-
-
-@app.get("/office-ai", include_in_schema=False)
-def office_ai_page() -> FileResponse:
-    """Serve the SPA entry point when the Office AI route is opened directly."""
-
-    index = UI_DIST / "index.html"
-    if not index.is_file():
-        raise HTTPException(status_code=404, detail="UI build is unavailable")
-    return FileResponse(index)
 
 
 if UI_DIST.is_dir():

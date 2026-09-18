@@ -30,6 +30,12 @@ if (-not (Test-Path -LiteralPath $Python)) {
 if (-not (Test-Path -LiteralPath (Join-Path $UiRoot "package.json"))) {
     throw "未找到前端目录：$UiRoot"
 }
+function Test-PortListening([int]$Port) {
+    return [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+}
+
+$BackendRunning = Test-PortListening $BackendPort
+$FrontendRunning = Test-PortListening $FrontendPort
 
 $BackendCommand = @"
 Set-Location -LiteralPath '$Root'
@@ -49,13 +55,21 @@ npm run dev -- --port $FrontendPort
 "@
 }
 
-Start-Process -FilePath "powershell.exe" `
-    -WorkingDirectory $Root `
-    -ArgumentList @("-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $BackendCommand)
+if (-not $BackendRunning) {
+    Start-Process -FilePath "powershell.exe" `
+        -WorkingDirectory $Root `
+        -ArgumentList @("-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $BackendCommand)
+} else {
+    Write-Host "端口 $BackendPort 已有服务在监听，跳过后端启动。" -ForegroundColor Yellow
+}
 
-Start-Process -FilePath "powershell.exe" `
-    -WorkingDirectory $UiRoot `
-    -ArgumentList @("-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $FrontendCommand)
+if (-not $FrontendRunning) {
+    Start-Process -FilePath "powershell.exe" `
+        -WorkingDirectory $UiRoot `
+        -ArgumentList @("-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $FrontendCommand)
+} else {
+    Write-Host "端口 $FrontendPort 已有服务在监听，跳过前端启动。" -ForegroundColor Yellow
+}
 
 if ($StartChat) {
     $ChatCommand = @"
@@ -67,8 +81,12 @@ Set-Location -LiteralPath '$Root'
         -ArgumentList @("-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $ChatCommand)
 }
 
-Write-Host "JobAgent 后端：http://127.0.0.1:$BackendPort" -ForegroundColor Green
-Write-Host "JobAgent 前端：http://localhost:$FrontendPort" -ForegroundColor Green
+if (-not $BackendRunning) {
+    Write-Host "JobAgent 后端：http://127.0.0.1:$BackendPort" -ForegroundColor Green
+}
+if (-not $FrontendRunning) {
+    Write-Host "JobAgent 前端：http://localhost:$FrontendPort" -ForegroundColor Green
+}
 if ($StartChat) {
     Write-Host "JobAgent CLI Agent 已在独立窗口启动。" -ForegroundColor Green
 }

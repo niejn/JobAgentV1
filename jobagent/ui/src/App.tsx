@@ -4,8 +4,7 @@ type Journey = { deleted_at?: string | null; id: string; company: string; role: 
 type Conversation = { id: string; journey_id: string; title: string; updated_at: string; last_message?: string };
 type Message = { id?: number; role: "user" | "assistant"; content: string };
 type MatchOpinion = { score: number | null; evaluation_failed: boolean; reasoning: string[]; matched_skills?: string[]; missing_skills?: string[] };
-type View = "officeAi" | "officeSkills" | "assistant" | "journeys";
-type SkillCard = { id: string; name: string; title: string; summary: string; guidance: string; version: string; source: string; installed: boolean; has_icon: boolean };
+type View = "assistant" | "journeys";
 type ResumeItem = { name: string; size_bytes: number; updated_at: string };
 type PlaceholderKind = "profile" | "quota";
 type IconName = "add" | "store" | "assistant" | "journeys" | "attachment" | "skills" | "send" | "settings" | "slides" | "document" | "data" | "design" | "research" | "pdf";
@@ -121,38 +120,12 @@ function NewJourney({ onClose, onSaveDraft, initialDraft, onCreated }: { onClose
   return <div className="modal-backdrop"><div className="modal journey-create-modal"><button type="button" className="dialog-close" onClick={onClose}>×</button><div className="create-heading"><div><p className="eyebrow">NEW OPPORTUNITY JOURNEY</p><h2>让 Agent 帮你创建 Journey</h2><p className="muted">粘贴 JD 或上传截图，Agent 会提取信息并在创建前交给你确认。</p></div><span className={`draft-status ${step}`}>{step === "input" ? "等待 JD" : step === "questions" ? "待补充" : "待确认"}</span></div><div className="create-workspace"><section className={`create-chat ${dragging ? "dragging" : ""}`} onPaste={pasteImage} onDragOver={event => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={dropImage}><div className="drop-hint">{dragging ? "松开鼠标即可识别截图" : "截图可直接拖到这里，或复制图片后按 Ctrl/Cmd+V"}</div><div className="messages">{messages.map((message, index) => <div className={message.role === "user" ? "user-bubble" : "assistant-bubble"} key={index}>{message.content}</div>)}</div><form className="create-input" onSubmit={handleReply}><textarea value={input} onChange={event => setInput(event.target.value)} placeholder={step === "input" ? "粘贴完整 JD，或描述你想申请的岗位…" : "补充信息，或告诉我需要修改什么…"} /><div className="input-footer"><label className="image-upload"><input type="file" accept="image/png,image/jpeg,image/webp,image/bmp" onChange={event => handleImage(event.target.files?.[0])} /><span>{ocrBusy ? "识别中…" : "▧ 上传 JD 截图"}</span></label><span className="upload-name">{imageName || "支持 JPG、PNG、WEBP"}</span><button className="btn primary" disabled={busy || ocrBusy || !input.trim()}>{step === "input" ? "提取信息" : "发送"}</button></div></form></section><aside className="draft-summary"><div className="card-head"><h3>Journey 摘要</h3><span className="muted">实时更新</span></div><label>公司名称<input disabled={busy || ocrBusy} value={draft.company} onChange={event => update("company", event.target.value)} placeholder="待识别" /></label><label>岗位名称<input disabled={busy || ocrBusy} value={draft.role} onChange={event => update("role", event.target.value)} placeholder="待识别" /></label><label>部门 / 业务线<input disabled={busy || ocrBusy} value={draft.department} onChange={event => update("department", event.target.value)} placeholder="可选" /></label><label>工作地点<input disabled={busy || ocrBusy} value={draft.location} onChange={event => update("location", event.target.value)} placeholder="可选" /></label><label>招聘周期<input disabled={busy || ocrBusy} value={draft.cycle} onChange={event => update("cycle", event.target.value)} placeholder="可选，例如：2026 社招" /></label><label>薪资范围<input disabled={busy || ocrBusy} value={draft.salary} onChange={event => update("salary", event.target.value)} placeholder="可选" /></label><div className="jd-preview"><strong>原始 JD</strong><p>{draft.description || "粘贴后将在这里保留原文"}</p></div>{error && <p className="error">{error}</p>}<div className="dialog-actions"><button type="button" className="btn ghost" onClick={onClose}>取消</button><button type="button" className="btn primary" onClick={submit} disabled={busy || ocrBusy || !draft.company || !draft.role || !draft.description}>{busy ? "创建中…" : "确认并创建"}</button></div></aside></div></div></div>;
 }
 
-const TASK_CATEGORIES: { key: string; label: string; prompt: string; icon: IconName }[] = [
-  { key: "slides", label: "生成幻灯片", prompt: "帮我生成一份 PPT 演示文稿：", icon: "slides" },
-  { key: "docs", label: "撰写文档", prompt: "帮我撰写一份 Word 文档：", icon: "document" },
-  { key: "data", label: "数据分析&可视化", prompt: "帮我分析数据并生成图表洞察：", icon: "data" },
-  { key: "design", label: "生成设计", prompt: "帮我生成一张设计图：", icon: "design" },
-  { key: "research", label: "批量调研", prompt: "帮我批量调研以下主题：", icon: "research" },
-  { key: "pdf", label: "PDF转换", prompt: "帮我把这份 PDF 转换为 Word 文档", icon: "pdf" },
-];
-
-const HOT_TASKS = [
-  { title: "周报生成", sub: "述职开挂", tag: "Word", prompt: "根据我本周的工作内容，生成一份周报 Word 文档" },
-  { title: "分析数据生成图表洞察", sub: "提炼核心结论，找出关键指标变化", tag: "XLSX", prompt: "分析数据生成图表洞察，提炼核心结论，找出关键指标变化" },
-  { title: "PDF转Word", sub: "PDF 快速转换为 Word 文档", tag: "PDF", prompt: "把这份 PDF 快速转换为 Word 文档" },
-  { title: "AI文本润色", sub: "句句出彩", tag: "润色", prompt: "对以下文本进行润色：" },
-  { title: "生成月度销售分析表", sub: "月度汇总、趋势图和商品分析", tag: "XLSX", prompt: "生成月度销售分析表，包含月度汇总、趋势图和商品分析" },
-  { title: "项目计划书", sub: "立项无忧", tag: "Word", prompt: "帮我撰写一份项目计划书" },
-  { title: "读PDF提炼重点", sub: "提炼核心结论，掌握全文要点", tag: "PDF", prompt: "读取这份 PDF，提炼重点和核心结论" },
-  { title: "修复并补全Excel公式", sub: "检查错误公式", tag: "XLSX", prompt: "检查这份 Excel，修复并补全错误公式" },
-];
-
-const INSPIRATION_CARDS = [
-  { title: "项目工作总结汇报", desc: "适用于项目汇报、阶段复盘、产品上线、运营活动与管理层汇报等场景。" },
-  { title: "求职简历一键优化", desc: "上传简历与目标 JD，生成岗位定制版简历 docx/pdf。" },
-  { title: "面试准备包", desc: "汇总目标公司面经证据、高频问题与能力矩阵，输出可追溯准备材料。" },
-];
-
-function TitleBar({ online, office, onQuota, onProfile, onSettings }: { online: boolean; office?: boolean; onQuota: () => void; onProfile: () => void; onSettings: () => void }) {
-  return <header className={`op-titlebar ${office ? "op-office-titlebar" : ""}`}>
+function TitleBar({ online, onQuota, onProfile, onSettings }: { online: boolean; onQuota: () => void; onProfile: () => void; onSettings: () => void }) {
+  return <header className="op-titlebar">
     <div className="op-titlebar-status"><span className={`op-dot ${online ? "on" : ""}`} />{online ? "网关在线" : "网关离线"}</div>
     <div className="op-titlebar-actions">
       <button className="op-chip" onClick={onQuota} title="积分余额（占位）"><span className="op-gem">◆</span>—</button>
-      <button className="op-chip" onClick={onProfile}>{office ? "Office 账户" : "个人中心"}</button>
+      <button className="op-chip" onClick={onProfile}>个人中心</button>
       <button className="op-icon-btn" aria-label="设置" title="设置" onClick={onSettings}><AppIcon name="settings" /></button>
       <span className="op-win-controls" title="窗口控制由桌面壳（pywebview）提供">
         <button disabled>—</button><button disabled>▢</button><button disabled>✕</button>
@@ -191,122 +164,6 @@ function ResumePanel({ onUseResume }: { onUseResume: (name: string) => void }) {
   </div>;
 }
 
-type OfficeConversation = { id: string; title: string; updated_at: string };
-function OfficeRecent({ onOpen }: { onOpen: (conversationId?: string) => void }) {
-  const [items, setItems] = useState<OfficeConversation[]>([]); const [query, setQuery] = useState("");
-  useEffect(() => { api<OfficeConversation[]>("/api/office-ai/conversations?limit=5").then(setItems).catch(() => setItems([])); }, []);
-  const visible = items.filter(item => item.title.includes(query));
-  async function remove(id: string) { try { await api(`/api/office-ai/conversations/${id}`, { method: "DELETE" }); setItems(current => current.filter(item => item.id !== id)); } catch (error) { window.alert(error instanceof Error ? `删除失败：${error.message}` : "删除失败，请重试"); } }
-  return <section className="op-recent-work"><div className="op-recent-head"><p className="section-label">最近工作</p><span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="⌕" aria-label="筛选最近工作" /></span></div>{visible.length ? <div className="op-recent-list">{visible.map(item => <div className="op-recent-row" key={item.id}><button className="op-recent-item" onClick={() => onOpen(item.id)}><strong>{item.title}</strong><span>{item.updated_at}</span></button><button type="button" className="op-recent-delete" title="删除工作" onClick={event => { event.preventDefault(); event.stopPropagation(); void remove(item.id); }}>×</button></div>)}</div> : <p className="empty">没有匹配的工作</p>}</section>;
-}
-
-function OfficeAiView({ conversationId }: { conversationId?: string | null }) {
-  const [items, setItems] = useState<OfficeConversation[]>([]); const [active, setActive] = useState<OfficeConversation | null>(null); const [messages, setMessages] = useState<Message[]>([]); const [draft, setDraft] = useState(""); const [busy, setBusy] = useState(false);
-  const load = () => api<OfficeConversation[]>("/api/office-ai/conversations?limit=30").then(setItems).catch(() => setItems([]));
-  useEffect(() => { load(); }, []);
-  useEffect(() => { if (conversationId) void api<OfficeConversation & { messages: Message[] }>(`/api/office-ai/conversations/${conversationId}`).then(result => { setActive(result); setMessages(result.messages); }); }, [conversationId]);
-  async function open(item: OfficeConversation) { setActive(item); const result = await api<{ messages: Message[] }>(`/api/office-ai/conversations/${item.id}`); setMessages(result.messages); }
-  async function create() { const item = await api<OfficeConversation>("/api/office-ai/conversations", { method: "POST", body: JSON.stringify({ title: "新建工作" }) }); setItems(current => [item, ...current]); setActive(item); setMessages([]); }
-  async function send(event: FormEvent) { event.preventDefault(); if (!active || !draft.trim() || busy) return; const content = draft.trim(); setDraft(""); setMessages(current => [...current, { role: "user", content }]); setBusy(true); try { const reply = await api<Message>(`/api/office-ai/conversations/${active.id}/messages`, { method: "POST", body: JSON.stringify({ content }) }); setMessages(current => [...current, reply]); load(); } catch (error) { setMessages(current => [...current, { role: "assistant", content: `发送失败：${error instanceof Error ? error.message : "未知错误"}` }]); } finally { setBusy(false); } }
-  if (!active) return <WelcomeView onStart={prompt => { void (async () => { const item = await api<OfficeConversation>("/api/office-ai/conversations", { method: "POST", body: JSON.stringify({ title: prompt.slice(0, 36) || "新建工作" }) }); setItems(current => [item, ...current]); setActive(item); setMessages([{ role: "user", content: prompt }]); setBusy(true); try { const reply = await api<Message>(`/api/office-ai/conversations/${item.id}/messages`, { method: "POST", body: JSON.stringify({ content: prompt }) }); setMessages(current => [...current, reply]); load(); } finally { setBusy(false); } })(); }} />;
-  return <div className="office-ai-view"><div className="assistant-toolbar"><div><p className="eyebrow">OFFICE AI</p><h1>Office AI 工作</h1></div><div className="office-work-actions"><button className="btn" onClick={() => active && open(active)}>刷新</button><details><summary className="btn">产物 ▾</summary><div className="office-artifact-menu">本会话暂未生成文件</div></details></div></div><section className="assistant-chat office-ai-chat"><div className="messages">{messages.map((message, index) => <div className={message.role === "user" ? "user-bubble" : "assistant-bubble"} key={message.id ?? index}>{message.content}</div>)}{busy && <div className="assistant-bubble typing">Office AI 思考中…</div>}</div><form className="chat-input" onSubmit={send}><input value={draft} onChange={event => setDraft(event.target.value)} placeholder="描述这项 Office 工作…" /><button className="btn primary" disabled={busy}>发送</button></form></section></div>;
-}
-
-function WelcomeView({ onStart }: { onStart: (prompt: string) => void }) {
-  const [value, setValue] = useState("");
-  const [selectedCategory, setSelectedCategory] = useState<(typeof TASK_CATEGORIES)[number] | null>(null);
-  const [models, setModels] = useState<{ current: string; available: string[] } | null>(null);
-  const [uploadName, setUploadName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState("");
-  useEffect(() => { api<{ current: string; available: string[] }>("/api/models").then(setModels).catch(() => setModels(null)); }, []);
-  function submit() {
-    const attachment = uploadName ? `\n（已上传附件：data/uploads/${uploadName}）` : "";
-    const skillPrefix = selectedCategory ? `${selectedCategory.prompt}\n` : "";
-    onStart(skillPrefix + (value.trim() || "把一份打卡数据，变成考勤表并统计迟到和缺勤") + attachment);
-  }
-  async function switchModel(model: string) {
-    if (!models || model === models.current || busy) return;
-    setBusy(true); setNotice("");
-    try { const next = await api<{ current: string; available: string[] }>("/api/models", { method: "POST", body: JSON.stringify({ model }) }); setModels(next); setNotice(`已切换模型：${next.current}`); }
-    catch (error) { setNotice(error instanceof Error ? error.message : "切换失败"); }
-    finally { setBusy(false); }
-  }
-  async function upload(files: FileList | null) {
-    const file = files?.[0];
-    if (!file || busy) return;
-    if (file.size > 20 * 1024 * 1024) { setNotice("暂不支持上传超过 20 MB 的单个文件"); return; }
-    setBusy(true); setNotice("");
-    try {
-      const body = new FormData(); body.append("file", file);
-      const response = await fetch("/api/uploads", { method: "POST", body });
-      if (!response.ok) throw new Error((await response.json().catch(() => ({} as { detail?: string }))).detail || `上传失败（HTTP ${response.status}）`);
-      const result = await response.json() as { saved_as: string };
-      setUploadName(result.saved_as);
-      setNotice(`已上传：${result.saved_as}`);
-    } catch (error) { setNotice(error instanceof Error ? error.message : "上传失败"); }
-    finally { setBusy(false); }
-  }
-  return <div className="op-welcome">
-    <h1>Hi，让我们随时开始。</h1>
-    <div className="op-composer">
-      {uploadName && <p className="op-attachment"><span>📎</span>{uploadName}<button type="button" onClick={() => setUploadName("")}>×</button></p>}
-      <textarea className="op-composer-input" aria-label="消息输入框" placeholder="描述你的任务，例如：把一份打卡数据，变成考勤表并统计迟到和缺勤" value={value} onChange={event => setValue(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(); } }} />
-      <div className="op-composer-actions">
-        <div className="op-composer-left-actions">
-          <label className="op-icon-btn" title={busy ? "处理中…" : "上传附件（≤20 MB）"}><input type="file" hidden disabled={busy} accept=".pdf,.docx,.doc,.md,.txt,.png,.jpg,.jpeg,.webp,.csv,.xlsx,.pptx,.json" onChange={event => { void upload(event.target.files); event.currentTarget.value = ""; }} />{busy ? <span aria-hidden="true">…</span> : <AppIcon name="attachment" />}<span className="op-action-label">添加附件</span></label>
-          <button className="op-icon-btn" disabled title="选择技能（即将开放）"><AppIcon name="skills" /><span className="op-action-label">选择技能</span></button>
-          {selectedCategory && <button type="button" className={`op-selected-skill ${selectedCategory.key}`} onClick={() => setSelectedCategory(null)} title="取消已选任务"><AppIcon name={selectedCategory.icon} />{selectedCategory.label}<span>×</span></button>}
-        </div>
-        <div className="op-composer-right-actions">
-          <label className="op-model-select" title="切换对话模型">
-            <select value={models?.current ?? ""} disabled={!models || busy} onChange={event => void switchModel(event.target.value)} aria-label="默认模型">
-              {!models && <option value="">加载中…</option>}
-              {models?.available.map(model => <option key={model} value={model}>{model}</option>)}
-            </select>
-          </label>
-          <button className="op-send" onClick={submit} title="发送" aria-label="发送消息"><AppIcon name="send" /></button>
-        </div>
-        {notice && <span className="op-notice" role="status">{notice}</span>}
-      </div>
-    </div>
-    <p className="op-workspace-status">正在准备工作台环境，完成后即可开始对话<span className="op-ellipsis">…</span></p>
-    {!selectedCategory && <nav className="op-categories">{TASK_CATEGORIES.map(category => <button key={category.key} title={category.label} aria-label={category.label} onClick={() => setSelectedCategory(category)}><span className={`op-category-icon ${category.key}`}><AppIcon name={category.icon} /></span><span className="op-category-label">{category.label}</span></button>)}</nav>}
-    <section className="op-section">
-      <h2>热门任务</h2>
-      <div className="op-carousel">{HOT_TASKS.map(task => <button key={task.title} className="op-task-card" onClick={() => onStart(task.prompt)}>
-        <p>{task.title}</p><span>{task.sub}</span><em>{task.tag}</em>
-      </button>)}</div>
-    </section>
-    <section className="op-section">
-      <h2>灵感卡片</h2>
-      <div className="op-inspiration">{INSPIRATION_CARDS.map(card => <div key={card.title} className="op-insp-card"><h3>{card.title}</h3><p>{card.desc}</p></div>)}</div>
-    </section>
-  </div>;
-}
-
-function SkillStoreView() {
-  const [cards, setCards] = useState<SkillCard[]>([]);
-  const [tab, setTab] = useState<"all" | "mine" | "officeplus">("all");
-  const [toast, setToast] = useState("");
-  useEffect(() => { api<SkillCard[]>("/api/skills").then(setCards).catch(() => setCards([])); }, []);
-  const list = cards.filter(card => tab === "all" || tab === "mine" && card.source === "workspace" || tab === "officeplus" && card.source === "officeplus");
-  return <div className="op-store">
-    <div className="op-store-head"><h1>Skill 商店</h1>
-      <div className="op-tabs">{([["all", "全部"], ["officeplus", "Office热门精选"], ["mine", "我的skills"]] as const).map(([key, label]) => <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>{label}</button>)}</div>
-    </div>
-    {list.length === 0 && <p className="empty">暂无 Skill</p>}
-    <div className="op-store-grid">{list.map(card => <div key={`${card.source}/${card.id}`} className="op-skill-card">
-      <div className="op-skill-icon">{card.title.slice(0, 1).toUpperCase()}</div>
-      <h3>{card.title}</h3>
-      <p>{card.summary || "（无描述）"}</p>
-      <footer><span className={`op-badge ${card.installed ? "" : "ghost"}`}>{card.installed ? "已安装" : "可安装"}</span>
-        <button onClick={() => setToast(`「${card.title}」${card.installed ? "已在工作区，可在对话中直接使用" : "安装能力即将开放"}`)}>{card.installed ? "详情" : "安装"}</button></footer>
-    </div>)}</div>
-    {toast && <div className="op-toast" role="status" onClick={() => setToast("")}>{toast}</div>}
-  </div>;
-}
-
 function PlaceholderDialog({ kind, onClose }: { kind: PlaceholderKind; onClose: () => void }) {
   const copy = kind === "quota"
     ? { title: "积分余额", body: "积分与配额体系为占位组件。接入计费后端后，此处将展示余额、消耗明细与充值入口。" }
@@ -340,7 +197,7 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
 }
 
 export function App() {
-  const [view, setView] = useState<View>(() => window.location.pathname === "/office-ai" ? "officeAi" : "assistant");
+  const [view, setView] = useState<View>("journeys");
   const [journeys, setJourneys] = useState<Journey[]>([]);
   const [selected, setSelected] = useState<Journey | null>(null);
   const [dialog, setDialog] = useState(false);
@@ -348,7 +205,6 @@ export function App() {
   const [pendingPrompt, setPendingPrompt] = useState("");
   const [placeholder, setPlaceholder] = useState<PlaceholderKind | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [officeConversationId, setOfficeConversationId] = useState<string | null>(null);
   useEffect(() => {
     let active = true; let pending = false;
     const refresh = async () => {
@@ -361,46 +217,26 @@ export function App() {
     void refresh(); window.addEventListener("focus", refresh); document.addEventListener("visibilitychange", onVisible);
     return () => { active = false; window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", onVisible); };
   }, []);
-  function navigateView(next: View) { window.history.pushState({}, "", next === "officeAi" || next === "officeSkills" ? "/office-ai" : "/"); setView(next); }
-  function startWithPrompt(prompt: string) { setPendingPrompt(prompt); navigateView("assistant"); }
-  function openOfficeAi() { navigateView("officeAi"); }
+  function startWithPrompt(prompt: string) { setPendingPrompt(prompt); setView("assistant"); }
   const navItems: { key: View; label: string; icon: IconName }[] = [
     { key: "assistant", label: "求职助手", icon: "assistant" },
     { key: "journeys", label: "岗位 Journeys", icon: "journeys" },
   ];
-  const officeNav: { key: View; label: string; icon: IconName }[] = [
-    { key: "officeAi", label: "新建任务", icon: "add" },
-    { key: "officeSkills", label: "Skill 商店", icon: "store" },
-  ];
-  const isOffice = view === "officeAi" || view === "officeSkills";
   return <div className="app-shell op-shell">
-    {!isOffice && <aside className="op-sidebar">
-      <div className="op-brand"><span className="op-logo">J</span><div><strong>求职助手</strong><span>历史对话与岗位工作</span></div></div>
-      <nav className="op-nav">{navItems.map(item => <button key={item.key} className={view === item.key ? "active" : ""} onClick={() => navigateView(item.key)}><span><AppIcon name={item.icon} /></span>{item.label}</button>)}</nav>
+    <aside className="op-sidebar">
+      <div className="op-brand"><span className="op-logo">J</span><div><strong>JobAgent</strong><span>求职工作台</span></div></div>
+      <nav className="op-nav">{navItems.map(item => <button key={item.key} className={view === item.key ? "active" : ""} onClick={() => setView(item.key)}><span><AppIcon name={item.icon} /></span>{item.label}</button>)}</nav>
       <div className="op-sidebar-scroll"><ResumePanel onUseResume={name => startWithPrompt(`请读取 data/resumes/${name}，优化排版（不改内容）后生成简历 docx，并用 soffice 转出 pdf`)} /></div>
       <p className={`op-gateway ${apiOnline ? "on" : ""}`}>{apiOnline ? "网关在线" : "网关启动中…"}</p>
-    </aside>}
-    {isOffice && <aside className="op-sidebar op-office-sidebar">
-      <div className="op-brand"><span className="op-logo">O</span><div><strong>Office AI</strong><span>智能办公工作台</span></div></div>
-      <nav className="op-nav">{officeNav.map(item => <button key={item.key} className={view === item.key ? "active" : ""} onClick={() => navigateView(item.key)}><span><AppIcon name={item.icon} /></span>{item.label}</button>)}</nav>
-      <div className="op-sidebar-scroll"><OfficeRecent onOpen={id => { setOfficeConversationId(id || null); navigateView("officeAi"); }} /><section className="op-artifacts"><p className="section-label">产物</p><p className="empty">生成的文件会出现在这里</p></section></div>
-      <p className={`op-gateway ${apiOnline ? "on" : ""}`}>{apiOnline ? "网关在线" : "网关启动中…"}</p>
-    </aside>}
-    <main className={`op-main ${isOffice ? "op-office-main" : ""}`}>
-      <TitleBar online={apiOnline} office={isOffice} onQuota={() => setPlaceholder("quota")} onProfile={() => setPlaceholder("profile")} onSettings={() => setSettingsOpen(true)} />
+    </aside>
+    <main className="op-main">
+      <TitleBar online={apiOnline} onQuota={() => setPlaceholder("quota")} onProfile={() => setPlaceholder("profile")} onSettings={() => setSettingsOpen(true)} />
       <div className="op-content">
-        {view === "officeAi" && <OfficeAiView conversationId={officeConversationId} />}
-        {view === "officeSkills" && <SkillStoreView />}
         {view === "assistant" && <AssistantView initialPrompt={pendingPrompt} onConsumedPrompt={() => setPendingPrompt("")} />}
         {view === "journeys" && (selected
           ? <JourneyDetail journey={selected} onBack={() => setSelected(null)} />
           : <JourneyList journeys={journeys} onOpen={setSelected} onCreate={() => setDialog(true)} />)}
       </div>
-      {!isOffice && <nav className="op-mobile-nav" aria-label="主导航">
-        {navItems.map(item => <button key={item.key} className={view === item.key ? "active" : ""} aria-current={view === item.key ? "page" : undefined} onClick={() => navigateView(item.key)}>
-          <span aria-hidden="true"><AppIcon name={item.icon} /></span><span>{item.label}</span>
-        </button>)}
-      </nav>}
     </main>
     {dialog && <NewJourney onClose={() => setDialog(false)} onCreated={journey => { setJourneys(items => [journey, ...items.filter(item => item.id !== journey.id)]); setDialog(false); setSelected(journey); }} />}
     {settingsOpen && <SettingsPanel onClose={() => setSettingsOpen(false)} />}
