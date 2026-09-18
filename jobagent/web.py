@@ -290,6 +290,16 @@ async def send_office_ai_message(conversation_id: str, request: MessageCreate) -
     return {"role": "assistant", "content": response, "created_at": now}
 
 
+@app.delete("/api/office-ai/conversations/{conversation_id}")
+def delete_office_ai_conversation(conversation_id: str) -> dict[str, int]:
+    with _chat_db() as connection:
+        connection.execute("DELETE FROM office_ai_messages WHERE conversation_id = ?", (conversation_id,))
+        result = connection.execute("DELETE FROM office_ai_conversations WHERE id = ?", (conversation_id,))
+    if not result.rowcount:
+        raise HTTPException(status_code=404, detail="Office AI conversation not found")
+    return {"deleted": 1}
+
+
 @app.get("/api/journeys")
 def list_journeys(company: str = "", include_deleted: bool = False,
                   limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)) -> list[dict[str, Any]]:

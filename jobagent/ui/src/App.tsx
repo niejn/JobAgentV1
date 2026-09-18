@@ -192,21 +192,24 @@ function ResumePanel({ onUseResume }: { onUseResume: (name: string) => void }) {
 }
 
 type OfficeConversation = { id: string; title: string; updated_at: string };
-function OfficeRecent({ onOpen }: { onOpen: () => void }) {
-  const [items, setItems] = useState<OfficeConversation[]>([]);
+function OfficeRecent({ onOpen }: { onOpen: (conversationId?: string) => void }) {
+  const [items, setItems] = useState<OfficeConversation[]>([]); const [query, setQuery] = useState("");
   useEffect(() => { api<OfficeConversation[]>("/api/office-ai/conversations?limit=5").then(setItems).catch(() => setItems([])); }, []);
-  return <section className="op-recent-work"><div className="op-recent-head"><p className="section-label">最近工作</p><button onClick={onOpen}>查看全部</button></div>{items.length ? <div>{items.map(item => <button className="op-recent-item" key={item.id} onClick={onOpen}><strong>{item.title}</strong><span>{item.updated_at}</span></button>)}</div> : <p className="empty">还没有 Office AI 工作</p>}</section>;
+  const visible = items.filter(item => item.title.includes(query));
+  async function remove(id: string) { try { await api(`/api/office-ai/conversations/${id}`, { method: "DELETE" }); setItems(current => current.filter(item => item.id !== id)); } catch (error) { window.alert(error instanceof Error ? `删除失败：${error.message}` : "删除失败，请重试"); } }
+  return <section className="op-recent-work"><div className="op-recent-head"><p className="section-label">最近工作</p><span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="⌕" aria-label="筛选最近工作" /></span></div>{visible.length ? <div className="op-recent-list">{visible.map(item => <div className="op-recent-row" key={item.id}><button className="op-recent-item" onClick={() => onOpen(item.id)}><strong>{item.title}</strong><span>{item.updated_at}</span></button><button type="button" className="op-recent-delete" title="删除工作" onClick={event => { event.preventDefault(); event.stopPropagation(); void remove(item.id); }}>×</button></div>)}</div> : <p className="empty">没有匹配的工作</p>}</section>;
 }
 
-function OfficeAiView() {
+function OfficeAiView({ conversationId }: { conversationId?: string | null }) {
   const [items, setItems] = useState<OfficeConversation[]>([]); const [active, setActive] = useState<OfficeConversation | null>(null); const [messages, setMessages] = useState<Message[]>([]); const [draft, setDraft] = useState(""); const [busy, setBusy] = useState(false);
   const load = () => api<OfficeConversation[]>("/api/office-ai/conversations?limit=30").then(setItems).catch(() => setItems([]));
   useEffect(() => { load(); }, []);
+  useEffect(() => { if (conversationId) void api<OfficeConversation & { messages: Message[] }>(`/api/office-ai/conversations/${conversationId}`).then(result => { setActive(result); setMessages(result.messages); }); }, [conversationId]);
   async function open(item: OfficeConversation) { setActive(item); const result = await api<{ messages: Message[] }>(`/api/office-ai/conversations/${item.id}`); setMessages(result.messages); }
   async function create() { const item = await api<OfficeConversation>("/api/office-ai/conversations", { method: "POST", body: JSON.stringify({ title: "新建工作" }) }); setItems(current => [item, ...current]); setActive(item); setMessages([]); }
   async function send(event: FormEvent) { event.preventDefault(); if (!active || !draft.trim() || busy) return; const content = draft.trim(); setDraft(""); setMessages(current => [...current, { role: "user", content }]); setBusy(true); try { const reply = await api<Message>(`/api/office-ai/conversations/${active.id}/messages`, { method: "POST", body: JSON.stringify({ content }) }); setMessages(current => [...current, reply]); load(); } catch (error) { setMessages(current => [...current, { role: "assistant", content: `发送失败：${error instanceof Error ? error.message : "未知错误"}` }]); } finally { setBusy(false); } }
   if (!active) return <WelcomeView onStart={prompt => { void (async () => { const item = await api<OfficeConversation>("/api/office-ai/conversations", { method: "POST", body: JSON.stringify({ title: prompt.slice(0, 36) || "新建工作" }) }); setItems(current => [item, ...current]); setActive(item); setMessages([{ role: "user", content: prompt }]); setBusy(true); try { const reply = await api<Message>(`/api/office-ai/conversations/${item.id}/messages`, { method: "POST", body: JSON.stringify({ content: prompt }) }); setMessages(current => [...current, reply]); load(); } finally { setBusy(false); } })(); }} />;
-  return <div className="office-ai-view"><div className="assistant-toolbar"><div><p className="eyebrow">OFFICE AI</p><h1>Office AI 工作</h1></div><button className="btn primary" onClick={() => setActive(null)}>新建工作</button></div><section className="assistant-chat office-ai-chat"><div className="messages">{messages.map((message, index) => <div className={message.role === "user" ? "user-bubble" : "assistant-bubble"} key={message.id ?? index}>{message.content}</div>)}{busy && <div className="assistant-bubble typing">Office AI 思考中…</div>}</div><form className="chat-input" onSubmit={send}><input value={draft} onChange={event => setDraft(event.target.value)} placeholder="描述这项 Office 工作…" /><button className="btn primary" disabled={busy}>发送</button></form></section></div>;
+  return <div className="office-ai-view"><div className="assistant-toolbar"><div><p className="eyebrow">OFFICE AI</p><h1>Office AI 工作</h1></div><div className="office-work-actions"><button className="btn" onClick={() => active && open(active)}>刷新</button><details><summary className="btn">产物 ▾</summary><div className="office-artifact-menu">本会话暂未生成文件</div></details></div></div><section className="assistant-chat office-ai-chat"><div className="messages">{messages.map((message, index) => <div className={message.role === "user" ? "user-bubble" : "assistant-bubble"} key={message.id ?? index}>{message.content}</div>)}{busy && <div className="assistant-bubble typing">Office AI 思考中…</div>}</div><form className="chat-input" onSubmit={send}><input value={draft} onChange={event => setDraft(event.target.value)} placeholder="描述这项 Office 工作…" /><button className="btn primary" disabled={busy}>发送</button></form></section></div>;
 }
 
 function WelcomeView({ onStart }: { onStart: (prompt: string) => void }) {
@@ -345,6 +348,7 @@ export function App() {
   const [pendingPrompt, setPendingPrompt] = useState("");
   const [placeholder, setPlaceholder] = useState<PlaceholderKind | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [officeConversationId, setOfficeConversationId] = useState<string | null>(null);
   useEffect(() => {
     let active = true; let pending = false;
     const refresh = async () => {
@@ -379,13 +383,13 @@ export function App() {
     {isOffice && <aside className="op-sidebar op-office-sidebar">
       <div className="op-brand"><span className="op-logo">O</span><div><strong>Office AI</strong><span>智能办公工作台</span></div></div>
       <nav className="op-nav">{officeNav.map(item => <button key={item.key} className={view === item.key ? "active" : ""} onClick={() => navigateView(item.key)}><span><AppIcon name={item.icon} /></span>{item.label}</button>)}</nav>
-      <div className="op-sidebar-scroll"><OfficeRecent onOpen={() => navigateView("officeAi")} /><ResumePanel onUseResume={name => navigateView("officeAi")} /></div>
+      <div className="op-sidebar-scroll"><OfficeRecent onOpen={id => { setOfficeConversationId(id || null); navigateView("officeAi"); }} /><section className="op-artifacts"><p className="section-label">产物</p><p className="empty">生成的文件会出现在这里</p></section></div>
       <p className={`op-gateway ${apiOnline ? "on" : ""}`}>{apiOnline ? "网关在线" : "网关启动中…"}</p>
     </aside>}
     <main className={`op-main ${isOffice ? "op-office-main" : ""}`}>
       <TitleBar online={apiOnline} office={isOffice} onQuota={() => setPlaceholder("quota")} onProfile={() => setPlaceholder("profile")} onSettings={() => setSettingsOpen(true)} />
       <div className="op-content">
-        {view === "officeAi" && <OfficeAiView />}
+        {view === "officeAi" && <OfficeAiView conversationId={officeConversationId} />}
         {view === "officeSkills" && <SkillStoreView />}
         {view === "assistant" && <AssistantView initialPrompt={pendingPrompt} onConsumedPrompt={() => setPendingPrompt("")} />}
         {view === "journeys" && (selected
