@@ -168,8 +168,23 @@ def get_profile() -> dict[str, Any]:
 @app.get("/api/assistant/conversations")
 def list_assistant_conversations(limit: int = Query(10, ge=1, le=50), offset: int = Query(0, ge=0)) -> list[dict[str, Any]]:
     with _chat_db() as connection:
-        rows = connection.execute("SELECT * FROM assistant_conversations ORDER BY updated_at DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()
-        return [_assistant_conversation_json(row) for row in rows]
+        rows = connection.execute(
+            """
+            SELECT c.*,
+                   (SELECT m.content FROM assistant_messages m
+                    WHERE m.conversation_id = c.id
+                    ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS last_message
+            FROM assistant_conversations c
+            ORDER BY c.updated_at DESC LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+        conversations = []
+        for row in rows:
+            item = _assistant_conversation_json(row)
+            message = (row["last_message"] or "").strip()
+            conversations.append({**item, "last_message": " ".join(message.split())[:120]})
+        return conversations
 
 
 @app.post("/api/assistant/conversations", status_code=201)
