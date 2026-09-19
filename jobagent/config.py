@@ -98,13 +98,7 @@ class Settings(BaseSettings):
             "CDP remains the default fallback."
         ),
     )
-    boss_contact_transport: Literal["cdp", "http"] = Field(
-        default="http",
-        description=(
-            "Boss HR conversation creation transport. Defaults to HTTP friend/add plus "
-            "WebSocket greeting; Boss job reads remain on the separate CDP transport."
-        ),
-    )
+
     boss_chat_transport: Literal["http", "cdp"] = Field(
         default="http",
         description=(

@@ -1,6 +1,5 @@
 """Agent tool: reply to a Boss HR greeting (TR-6) - middleware-approved send."""
 
-from __future__ import annotations
 
 import logging
 from typing import Any
@@ -8,6 +7,7 @@ from typing import Any
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
+from jobagent.boss_outbound_guard import guard_refusal, screen_outbound_text
 from jobagent.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,8 @@ def build_boss_chat_reply_tool(settings: Settings) -> StructuredTool:
         circuit = BossCircuit(boss_circuit_path(settings.jobagent_state_db))
         if (refusal := circuit.check()) is not None:
             return refusal
+        if violations := screen_outbound_text(message):
+            return guard_refusal(violations)
         from jobagent.applier.boss_chat_send import BossChatSender
 
         async with BossChatSender(settings) as sender:
@@ -57,7 +59,8 @@ def build_boss_chat_reply_tool(settings: Settings) -> StructuredTool:
         name="reply_boss_greeting",
         description=(
             "回复 Boss 直聘聊天：向指定 HR 发送一条文字消息（执行前暂停等待人工批准。）"
-            "hr_name 用 list_boss_greetings 查到的 name。"
+            "hr_name 用 list_boss_greetings 查到的 name。消息必须以求职者本人第一人称书写；"
+            "含测试/请忽略话术或暴露 AI/自动化身份的文本会被出站护栏拒发。"
         ),
         args_schema=BossChatReplyRequest,
     )

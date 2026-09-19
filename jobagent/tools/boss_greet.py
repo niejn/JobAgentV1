@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field, field_validator
 
-from jobagent.applier.boss import BossApplier
+from jobagent.boss_outbound_guard import guard_refusal, screen_outbound_text
 from jobagent.config import Settings
 from jobagent.crawl import CrawlGate
 from jobagent.domain import HttpUrl, Job, JobSource, Profile
@@ -27,6 +27,12 @@ from jobagent.scraper.boss import get_boss_cooldown
 logger = logging.getLogger(__name__)
 
 
+def _bare_boss_job_id(job_id: str) -> str:
+    """Chat-list metadata carries the bare encryptJobId; registry ids add boss:."""
+
+    return job_id.removeprefix("boss:").strip()
+
+
 class GreetingTarget(BaseModel):
     """One Boss job to greet - minimal fields the agent already has."""
 
@@ -37,8 +43,11 @@ class GreetingTarget(BaseModel):
     greeting: str | None = Field(
         default=None,
         description=(
-            "Per-JD personalized greeting text (recommended). When omitted, "
-            "the configured template or Boss's default greeting is sent."
+            "Per-JD personalized greeting text (recommended), written in the "
+            "job seeker's own first-person voice. Must never mention AI, "
+            "automation, bots, or test/ignore phrasing - an outbound guard "
+            "refuses to send such text. When omitted, the configured template "
+            "or Boss's default greeting is sent."
         ),
     )
 
@@ -111,111 +120,11 @@ class BossGreetingsManager:
                 "status": "failed",
                 "message": "候选人背景未就绪；请先导入简历并确认候选背景。",
             }
-        if self._settings.boss_contact_transport == "http":
-            return await self._greet_direct(request)
-
-        targets = request.jobs[: request.max_greetings]
-        results: list[dict[str, Any]] = []
-        registry = (
-            SQLiteJobRegistry(self._registry_path)
-            if self._registry_path is not None
-            else None
-        )
-        from jobagent.journey.boss_contact import BossContactRegistry
-
-        contact_registry = (
-            BossContactRegistry(self._registry_path)
-            if self._registry_path is not None
-            else None
-        )
-
-        async with BossApplier(
-            self._settings, crawl_gate=self._crawl_gate
-        ) as applier:
-            for target in targets:
-                attempt = (
-                    contact_registry.begin_attempt(
-                        job_id=target.job_id or target.url,
-                        action="greeting",
-                        requested_text=target.greeting,
-                    )
-                    if contact_registry is not None
-                    else None
-                )
-                if attempt is not None and attempt.status in {"confirmed", "submitted"}:
-                    results.append(
-                        {
-                            "job_id": target.job_id or target.url,
-                            "company": target.company,
-                            "title": target.title,
-                            "status": "submitted",
-                            "reason": "already_contacted",
-                            "greeting_sent": attempt.result.get("greeting_sent"),
-                        }
-                    )
-                    continue
-                job = Job(
-                    id=target.job_id or target.url,
-                    source=JobSource.BOSS,
-                    title=target.title,
-                    company=target.company,
-                    location="",
-                    url=HttpUrl(target.url),
-                    description="",
-                )
-                application = await applier.apply(job, profile, greeting=target.greeting)
-                status = application.status.value
-                extra = application.extra or {}
-                entry = {
-                    "job_id": target.job_id or target.url,
-                    "company": target.company,
-                    "title": target.title,
-                    "status": status,
-                    "reason": extra.get("reason", ""),
-                    "greeting_sent": extra.get("greeting_sent"),
-                }
-                if contact_registry is not None and attempt is not None:
-                    conversation = extra.get("conversation")
-                    conversation_id = None
-                    if isinstance(conversation, dict):
-                        conversation_id = contact_registry.save_conversation(
-                            job_id=target.job_id or target.url,
-                            target=conversation,
-                        )
-                    contact_status = "submitted" if status == "submitted" else "failed"
-                    contact_registry.finish_attempt(
-                        attempt.id,
-                        status=contact_status,
-                        result=extra,
-                        conversation_id=conversation_id,
-                    )
-                if registry is not None and status == "submitted":
-                    entry["progress_recorded"] = self._record_greeted(
-                        registry, target
-                    )
-                results.append(entry)
-                # Stop on daily limit or captcha — further jobs won't work.
-                if status in ("failed", "captcha_blocked"):
-                    reason = extra.get("reason", "")
-                    if reason in ("daily_limit", "captcha"):
-                        break
-
-        succeeded = sum(1 for r in results if r["status"] == "submitted")
-        if registry is not None:
-            registry.close()
-        if contact_registry is not None:
-            contact_registry.close()
-        result: dict[str, Any] = {
-            "status": "completed" if succeeded > 0 else "failed",
-            "total": len(targets),
-            "succeeded": succeeded,
-            "results": results,
-        }
-        # Read interview-mode preference to guide HR conversation.
-        interview_mode = self._load_interview_preference()
-        if interview_mode:
-            result["interview_mode_note"] = interview_mode
-        return result
+        # The legacy CDP/Playwright greeting transport was removed 2026-09-19:
+        # it lacked the per-HR dedup, the outbound-guard send seam and the
+        # post-batch delivery re-verification. HTTP direct contact is the only
+        # path; BossApplier itself stays for the standalone CLI apply flow.
+        return await self._greet_direct(request)
 
     async def _greet_direct(self, request: BossGreetJobsRequest) -> dict[str, Any]:
         """Create conversations with friend/add and greet through MQTT/WS."""
@@ -232,7 +141,11 @@ class BossGreetingsManager:
             if item.get("name") and item.get("value")
         }
         targets = request.jobs[: request.max_greetings]
+        history_index = await self._load_history_job_index()
         results: list[dict[str, Any]] = []
+        # (results_index, conversation target, text, send timestamp, request target)
+        # for entries left unverified — re-checked read-only after the batch.
+        pending_verifies: list[tuple[int, Any, str, int, GreetingTarget]] = []
         registry = (
             SQLiteJobRegistry(self._registry_path)
             if self._registry_path is not None
@@ -269,6 +182,35 @@ class BossGreetingsManager:
                         }
                     )
                     continue
+                if violations := screen_outbound_text(target.greeting or ""):
+                    entry = {
+                        "job_id": job_id,
+                        "company": target.company,
+                        "title": target.title,
+                        "url": target.url,
+                        "reason": "outbound_guard",
+                        "greeting_sent": False,
+                        **guard_refusal(violations),
+                    }
+                    if contact_registry is not None and attempt is not None:
+                        contact_registry.finish_attempt(
+                            attempt.id, status="failed", result=entry
+                        )
+                    results.append(entry)
+                    continue
+                hist = history_index.get(_bare_boss_job_id(job_id))
+                if hist is not None:
+                    results.append(
+                        self._record_history_skip(
+                            registry=registry,
+                            contact_registry=contact_registry,
+                            attempt=attempt,
+                            target=target,
+                            job_id=job_id,
+                            hist=hist,
+                        )
+                    )
+                    continue
                 transport = (
                     contact_registry.get_job_transport(job_id)
                     if contact_registry is not None
@@ -301,10 +243,21 @@ class BossGreetingsManager:
                     metadata=transport,
                 )
                 created = await contact.enter(job)
+                prior_conversation = (
+                    contact_registry.find_conversation_by_friend(created.target.friend_id)
+                    if contact_registry is not None and created.target is not None
+                    else None
+                )
+                same_hr_previously_contacted = prior_conversation is not None
                 custom_sent = False
                 send_error = ""
                 delivery_unverified = False
-                if created.status == "confirmed" and created.target and target.greeting:
+                if (
+                    created.status == "confirmed"
+                    and created.target
+                    and target.greeting
+                    and not same_hr_previously_contacted
+                ):
                     attempt_started_ms = int(time.time() * 1000)
                     try:
                         await send_text_to_target(
@@ -326,6 +279,15 @@ class BossGreetingsManager:
                         else:
                             delivery_unverified = True
                             send_error = "ack_timeout_history_not_visible"
+                            pending_verifies.append(
+                                (
+                                    len(results),
+                                    created.target,
+                                    target.greeting,
+                                    attempt_started_ms,
+                                    target,
+                                )
+                            )
                     except Exception as exc:
                         send_error = type(exc).__name__
                         if await self._verify_with_retry(
@@ -348,9 +310,19 @@ class BossGreetingsManager:
                                 "Direct Boss greeting delivery unverified: %s",
                                 send_error,
                             )
+                            pending_verifies.append(
+                                (
+                                    len(results),
+                                    created.target,
+                                    target.greeting,
+                                    attempt_started_ms,
+                                    target,
+                                )
+                            )
                 status = (
                     "submitted"
-                    if created.status == "confirmed" and custom_sent
+                    if created.status == "confirmed"
+                    and (custom_sent or same_hr_previously_contacted)
                     else "unverified"
                     if created.status == "confirmed" and delivery_unverified
                     else "failed"
@@ -361,7 +333,9 @@ class BossGreetingsManager:
                     "title": target.title,
                     "url": target.url,
                     "status": status,
-                    "reason": "direct_contact_confirmed"
+                    "reason": "already_contacted_same_hr"
+                    if status == "submitted" and same_hr_previously_contacted
+                    else "direct_contact_confirmed"
                     if status == "submitted"
                     else "greeting_unverified"
                     if status == "unverified"
@@ -371,6 +345,8 @@ class BossGreetingsManager:
                     "platform_error_code": getattr(created, "platform_code", None),
                     "platform_error_message": getattr(created, "platform_message", ""),
                 }
+                if same_hr_previously_contacted and prior_conversation is not None:
+                    entry["previously_contacted_job"] = prior_conversation["job_id"]
                 conversation_id = None
                 if contact_registry is not None and created.target is not None:
                     conversation_id = contact_registry.save_conversation(
@@ -394,6 +370,28 @@ class BossGreetingsManager:
                 if registry is not None and status == "submitted":
                     entry["progress_recorded"] = self._record_greeted(registry, target)
                 results.append(entry)
+
+            # Deferred read-only re-verification (channel fact, measured
+            # 2026-09-19: WS/MQTT ack loss is routine and messages surface in
+            # history ~6 s late, so unverified usually means delivered).
+            # By now the whole batch has elapsed; one more history pass
+            # corrects the status without ever re-sending.
+            for index, verify_target, text, started_ms, target_model in pending_verifies:
+                if await self._verify_with_retry(
+                    cookies=cookies,
+                    target=verify_target,
+                    text=text,
+                    not_before_ms=started_ms,
+                    initial_delay=0.0,
+                ):
+                    entry = results[index]
+                    entry["status"] = "submitted"
+                    entry["reason"] = "history_confirmed_after_batch"
+                    entry["greeting_sent"] = True
+                    if registry is not None:
+                        entry["progress_recorded"] = self._record_greeted(
+                            registry, target_model
+                        )
         finally:
             if registry is not None:
                 registry.close()
@@ -408,13 +406,113 @@ class BossGreetingsManager:
             "results": results,
         }
 
+    async def _load_history_job_index(self) -> dict[str, dict[str, Any]]:
+        """Read-only chat list indexed by bare encryptJobId.
+
+        Failures degrade to an empty index: greeting must not be blocked by a
+        read outage; the registry-only checks still apply.
+        """
+
+        try:
+            from jobagent.applier.boss_chat import list_boss_greetings_http
+
+            listing = await list_boss_greetings_http(self._settings, label_id=0)
+        except Exception:
+            logger.info("Boss history pre-check unavailable", exc_info=True)
+            return {}
+        if listing.get("status") != "ok":
+            logger.info(
+                "Boss history pre-check failed: %s", listing.get("error_type")
+            )
+            return {}
+        index: dict[str, dict[str, Any]] = {}
+        for friend in listing.get("greetings") or []:
+            if not isinstance(friend, dict):
+                continue
+            bare = str((friend.get("job_metadata") or {}).get("job_id") or "").strip()
+            if bare:
+                index[bare] = friend
+        return index
+
+    def _record_history_skip(
+        self,
+        *,
+        registry: SQLiteJobRegistry | None,
+        contact_registry: Any,
+        attempt: Any,
+        target: GreetingTarget,
+        job_id: str,
+        hist: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist an already-greeted-in-history skip (registry + attempt +
+        conversation), so the next run takes the already_contacted fast path."""
+
+        entry = {
+            "job_id": job_id,
+            "company": target.company,
+            "title": target.title,
+            "url": target.url,
+            "status": "submitted",
+            "reason": "already_greeted_in_history",
+            "greeting_sent": False,
+            "history_hr": str(hist.get("name") or ""),
+        }
+        conversation_id: str | None = None
+        if contact_registry is not None:
+            friend_id = int(hist.get("friendId") or 0)
+            if friend_id > 0:
+                meta = hist.get("job_metadata") or {}
+                conversation_id = contact_registry.save_conversation(
+                    job_id=job_id,
+                    target={
+                        "friend_id": friend_id,
+                        "friend_source": int(hist.get("friendSource") or 0),
+                        "encrypt_boss_id": str(
+                            hist.get("encryptBossId")
+                            or hist.get("encryptFriendId")
+                            or ""
+                        ),
+                        "name": str(hist.get("name") or ""),
+                        "company": str(
+                            hist.get("brandName") or meta.get("company") or ""
+                        ),
+                        "job_title": str(meta.get("title") or target.title),
+                    },
+                )
+        if contact_registry is not None and attempt is not None:
+            contact_registry.finish_attempt(
+                attempt.id,
+                status="submitted",
+                result=entry,
+                conversation_id=conversation_id,
+            )
+        if registry is not None:
+            entry["progress_recorded"] = self._record_greeted(registry, target)
+        return entry
+
     @staticmethod
     async def _verify_with_retry(
-        *, cookies: dict[str, str], target: Any, text: str, not_before_ms: int = 0
+        *,
+        cookies: dict[str, str],
+        target: Any,
+        text: str,
+        not_before_ms: int = 0,
+        initial_delay: float = 3.0,
     ) -> bool:
-        """Poll Boss history after an ACK timeout; never send a second message."""
+        """Poll Boss history after an ACK ambiguity; never send a second message.
+
+        Channel fact (measured 2026-09-19 live): Boss WS/MQTT acks are
+        routinely lost and the connection may close mid-send while the
+        message still delivers — it only surfaces in conversation history
+        ~6 s after the publish. Wait out that visibility lag before the
+        first read-only check and span ~10 s total before giving up.
+        ``initial_delay=0`` is for deferred re-checks long after the send.
+        """
+
         from jobagent.applier.boss_ws import verify_text_in_conversation
 
+        if initial_delay:
+            await asyncio.sleep(initial_delay)
         for attempt in range(3):
             try:
                 if await verify_text_in_conversation(
@@ -427,7 +525,7 @@ class BossGreetingsManager:
             except Exception:
                 logger.info("Boss greeting history check failed (attempt %d)", attempt + 1)
             if attempt < 2:
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(3.0)
         return False
 
     def _record_greeted(
@@ -533,6 +631,15 @@ def build_boss_greet_jobs_tool(manager: BossGreetingsManager) -> BaseTool:
             "Uses an existing logged-in Boss session with Playwright. "
             "Execution pauses for explicit user approval (HITL middleware). "
             "The greeter logs and enforces daily Boss limits. "
+            "Dedup before sending: jobs already greeted are skipped with "
+            "already_contacted / already_greeted_in_history (chat history "
+            "shows a conversation for that job), and an HR we already talked "
+            "to under another job is skipped with already_contacted_same_hr "
+            "instead of re-sending. "
+            "still deliver — unverified means 'no receipt', usually delivered; "
+            "the batch re-verifies via read-only history at the end and flips "
+            "confirmed entries to submitted (reason=history_confirmed_after_batch). "
+            "Never re-send on unverified; confirm with read_boss_conversation. "
             "Call update_job_application_state after to track the result."
         ),
         args_schema=BossGreetJobsRequest,

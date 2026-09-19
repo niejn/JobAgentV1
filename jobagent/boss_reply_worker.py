@@ -10,6 +10,7 @@ import time
 import uuid
 from typing import Any, Protocol
 
+from jobagent.boss_outbound_guard import guard_refusal, screen_outbound_text
 from jobagent.boss_reply_queue import BossReplyQueue
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,10 @@ class LiveBossReplySender:
         hr_name: str,
         text: str,
     ) -> dict[str, Any]:
+        if violations := screen_outbound_text(text):
+            # Same outbound guard as the agent tools: the candidate's account
+            # only ever sends text written in their own voice.
+            return dict[str, Any](guard_refusal(violations))
         from jobagent.applier.boss_ws import (
             BossConversationTarget,
             send_text_to_target,
@@ -68,6 +73,11 @@ class LiveBossReplySender:
             await send_text_to_target(cookies=cookies, target=target, text=text)
             return {"status": "ok", "conversation_id": conversation_id}
         except Exception as exc:
+            # Boss WS/MQTT acks are routinely lost while the message still
+            # delivers; history surfaces it only ~6 s after the publish
+            # (measured 2026-09-19). Wait out the visibility lag before the
+            # first read-only history check, then keep the widened window.
+            await asyncio.sleep(4.0)
             for attempt in range(3):
                 if await verify_text_in_conversation(
                     cookies=cookies,
@@ -77,7 +87,7 @@ class LiveBossReplySender:
                 ):
                     return {"status": "ok", "conversation_id": conversation_id}
                 if attempt < 2:
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(3)
             return {
                 "status": "unverified",
                 "error_type": type(exc).__name__,

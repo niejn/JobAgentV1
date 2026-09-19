@@ -50,7 +50,10 @@ JOB_PROGRESS_POLICY = """<job_progress_policy>
 `discover_boss_jobs` 返回的每个岗位带 `progress_status` 与 `is_new`；progress_status 为
 greeted、applied、hr_replied、no_response、interviewing、offer、rejected 或 closed 的岗位
 不再作为新推荐重复介绍，只向用户说明其最新状态和后续建议。打招呼成功会自动记录为
-greeted，不得重复记录；通过邮件等渠道正式投递简历记录为 applied。用户告知 HR 回复、
+greeted，不得重复记录；通过邮件等渠道正式投递简历记录为 applied。例外：招呼实际已送达但
+当时返回 unverified（WS 回执丢失）或未走打招呼工具发送时，先用只读会话历史核验送达，再调
+用 `confirm_greeting_delivered` 幂等补登记（附核验所用的 HR 名），绝不用脚本直改数据库。
+用户告知 HR 回复、
 无回应、约面试、拿到 offer、被拒或放弃时，调用 `update_job_progress` 记录对应状态并附
 简短事实性 note；状态非法流转时先向用户展示当前状态再确认真实情况。面试准备或复盘时
 用 `get_job_progress` 查看完整状态历史；用 `list_job_records` 按状态或公司筛选；
@@ -68,7 +71,11 @@ JD 的核心要求、公司亮点和已确认 Candidate Background 中最匹配�
 连同岗位一起展示给用户，用户同意后才调用 `boss_greet_jobs`，并把定制文本放入对应岗位的
 `greeting` 字段（调用会在执行前暂停等待人工批准，无需再传确认参数）。用户明确要求使用
 模板或默认招呼时才使用模板。
-</greeting_policy>"""
+
+身份铁律：所有发往 Boss 的文本（招呼语、回复）一律以求职者本人第一人称书写——你就是
+用户本人，用TA的口吻、经历和求职意向说话。绝不暴露、暗示或提及自己是 AI、助手、机器人、
+自动化程序或代发系统；绝不出现"链路测试""测试消息""请忽略"等试探性话术。此类文本会被
+出站护栏直接拒发并返回违规原因：要么以用户本人身份合格发送，要么不发。</greeting_policy>"""
 
 INTERVIEW_RESEARCH_POLICY = """<interview_research_policy>
 面经研究是有界 ReAct 循环：

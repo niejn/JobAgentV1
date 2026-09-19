@@ -82,6 +82,7 @@ from jobagent.tools import (
     build_boss_greet_jobs_tool,
     build_boss_job_discovery_tool,
     build_boss_resume_upload_tool,
+    build_confirm_greeting_delivered_tool,
     build_find_merge_candidates_tool,
     build_get_job_progress_tool,
     build_import_candidate_resume_tool,
@@ -252,7 +253,21 @@ _BOSS_SUBAGENT_PROMPT = """你是 Boss 直聘招聘渠道专家，只使用已�
 Boss 简历只能在 HR 已回复后调用 `prepare_boss_resume_after_hr_reply`，从 Boss 平台返回的在线/附件
 简历选项中由用户选择；不得查询、导入或使用本地 PDF 简历库。
 一次任务最多准备和执行一项外发动作。工具返回回执后，如实报告 confirmed、unverified、failed
-或 blocked，并关联用户提供的 Journey。"""
+或 blocked，并关联用户提供的 Journey。
+
+身份铁律：所有外发文本一律以求职者本人第一人称书写（你就是用户本人）。绝不暴露或暗示
+AI/助手/机器人/自动化身份，绝不出现"链路测试""测试消息""请忽略"类话术；此类文本会被
+出站护栏拒发（refused + 违规原因）。收到 refused 时以用户本人身份重写再发，不要原样重试。
+
+渠道事实（实测 2026-09-19）：Boss 的 WS/MQTT 回执经常丢失、连接中途关闭是常态，这不代表
+发送失败——消息几乎总会送达，但要在会话历史里约 6 秒后才可见。工具返回 unverified 只表示
+"回执缺失"，大概率已送达：批量结束后工具会用只读历史自动二次核验，并把核验成功的条目改判
+为 submitted（reason=history_confirmed_after_batch）。仍有 unverified 时，用 read_boss_conversation
+只读核验后再下结论；绝不因 unverified 直接重发（会造成重复消息）。需要补发正式文案时，先读
+历史确认对方已收到什么，再决定下一条消息。
+历史会话里已有的岗位不再打招呼：工具按聊天记录与登记册自动跳过（already_contacted /
+already_greeted_in_history / already_contacted_same_hr），收到这些回执就是无需发送，如实向
+用户说明即可，不要换文案对同一个 HR 重试。"""
 
 _XHS_SUBAGENT_PROMPT = """你是小红书招聘线索与邮件投递渠道专家，只使用已提供的小红书和邮件工具。
 你不访问 Boss，也不继承主对话历史：task 任务描述是你唯一的上下文来源。任务描述应携带帖子
@@ -1596,6 +1611,10 @@ def build_job_agent(
             ("reply_boss_greeting", lambda: build_boss_chat_reply_tool(settings)),
             ("create_opportunity_journey", lambda: build_create_journey_tool(state_db)),
             ("update_job_progress", lambda: build_update_job_progress_tool(state_db)),
+            (
+                "confirm_greeting_delivered",
+                lambda: build_confirm_greeting_delivered_tool(state_db),
+            ),
             ("list_job_records", lambda: build_list_job_records_tool(state_db)),
             ("list_recent_emails", lambda: build_list_recent_emails_tool(settings)),
             ("read_email", lambda: build_read_email_tool(settings)),

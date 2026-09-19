@@ -154,6 +154,31 @@ class BossContactRegistry:
         assert row is not None  # the upsert above guarantees the row exists
         return str(row[0])
 
+    def find_conversation_by_friend(self, friend_id: int) -> dict[str, Any] | None:
+        """Most recent conversation for one HR across jobs (per-HR dedup).
+
+        The (job_id, friend_id) uniqueness deliberately cannot answer "have
+        we ever contacted this HR"; this lookup can, for same-HR-different-job
+        greeting skips.
+        """
+
+        row = self._connection.execute(
+            """SELECT id, job_id, friend_id, encrypt_boss_id, friend_name, company
+            FROM boss_conversations WHERE friend_id = ?
+            ORDER BY last_seen_at DESC LIMIT 1""",
+            (int(friend_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": str(row[0]),
+            "job_id": str(row[1]),
+            "friend_id": int(row[2]),
+            "encrypt_boss_id": str(row[3]),
+            "friend_name": str(row[4]),
+            "company": str(row[5]),
+        }
+
     def save_job_transport(self, *, job_id: str, metadata: dict[str, Any]) -> None:
         """Persist only internal fields needed to contact a discovered job."""
 

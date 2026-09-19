@@ -269,3 +269,38 @@ Gateway/Adapter/Watcher 架构的借鉴，以及 Boss 常驻监控 daemon 的生
 
 安全边界：不猜测邮箱、不把普通评论当官方 JD、不自动评论或私信、不把 SMTP 成功说成 HR 已读，
 所有简历邮件外发都必须经过人工确认。
+
+## 低优先级：Boss 打招呼按 HR 会话去重（发过消息的 HR 不再重复发送）
+
+状态：**已实现（2026-09-19）**。发送前只读聊天列表预检（already_greeted_in_history，
+覆盖绕过工具的发送盲区）+ 会话级 per-HR 检查（already_contacted_same_hr）+ 跳过即落库
+（greeted + attempt submitted），下次运行走 already_contacted 快路径。CDP 旧传输路径
+已整体删除（HTTP 直连是唯一路径，旧配置项被忽略）；真实环境整批验证待下次实际打招呼。
+
+原始记录：
+现象（2026-09-19 实测）：已发过消息的 HR 会再次收到打招呼。
+
+根因（已核实）：
+
+- `boss_conversations` 的唯一键是 `(job_id, friend_id)` 对
+  （`jobagent/journey/boss_contact.py` 的 `UNIQUE(job_id, friend_id)`，
+  docstring 明确"the (job_id, friend_id) pair, never the friend alone"）；
+  `boss_greet_jobs` 的 `already_contacted` 检查按 job_id 走 `begin_attempt`，
+  所以同一 HR 换一个岗位链接再 greet 时检查不命中，向同一会话再次发送；
+- registry 之外的发送（Boss App/网页人工发送、agent 用 execute 手搓脚本直发）
+  不留任何记录，现有检查完全不可见。
+
+方案：
+
+- 发送前按 `friend_id` 查询 `boss_conversations`：该 HR 已有会话时默认跳过，
+  结果返回 `already_contacted_same_hr` 并附历史岗位（job_id/company/title），
+  提示"如确要对另一岗位再次打招呼需用户显式确认"——不能粗暴全局禁发，
+  对同公司不同岗位分别打招呼是合法求职行为，出口保留但默认不重发；
+- 对 registry 盲区（App/脚本发送）：greet 批次前用只读
+  `list_boss_greetings` 拉当前会话列表，按 friend_id / encrypt_boss_id 匹配
+  已有会话（一次只读请求的成本），覆盖工具链外的历史接触；
+- HITL 审批预览里显示"该 HR 已有会话（上次岗位 X）"，让用户在批准时就看到
+  重复风险。
+
+验收：同一 HR 第二个岗位 greet 默认跳过并说明原因；用户显式确认后可发；
+仅经 App 手发过的 HR 也能被只读会话列表识别为已接触。

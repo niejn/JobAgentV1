@@ -11,6 +11,7 @@ from jobagent.models import Job, JobSource
 from jobagent.scraper.boss import BossDiscoveryRequest
 from jobagent.tools.job_discovery import build_boss_job_discovery_tool
 from jobagent.tools.job_progress import (
+    build_confirm_greeting_delivered_tool,
     build_get_job_progress_tool,
     build_list_job_records_tool,
     build_update_job_progress_tool,
@@ -131,6 +132,75 @@ class TestProgressTools:
 
         assert result["status"] == "invalid_transition"
         assert "discovered" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_confirm_greeting_delivered_backfills_greeted(
+        self, tmp_path: Path
+    ) -> None:
+        db = tmp_path / "registry.db"
+        with SQLiteJobRegistry(db) as registry:
+            registry.upsert_discovered(
+                job_id="boss:j1", source="boss", company="掘新科技", title="AI Agent"
+            )
+        tool = build_confirm_greeting_delivered_tool(db)
+
+        result = await tool.ainvoke(
+            {"job_id": "boss:j1", "hr_name": "赖立高", "sent_text": "您好，想进一步沟通。"}
+        )
+
+        assert result["status"] == "completed"
+        assert result["progress_status"] == "greeted"
+        assert "hr=赖立高" in result["note"]
+        assert "您好" in result["note"]
+
+    @pytest.mark.asyncio
+    async def test_confirm_greeting_delivered_is_idempotent(
+        self, tmp_path: Path
+    ) -> None:
+        db = tmp_path / "registry.db"
+        with SQLiteJobRegistry(db) as registry:
+            registry.upsert_discovered(
+                job_id="boss:j1", source="boss", company="某公司", title="后端"
+            )
+        tool = build_confirm_greeting_delivered_tool(db)
+
+        first = await tool.ainvoke({"job_id": "boss:j1", "hr_name": "张HR"})
+        second = await tool.ainvoke({"job_id": "boss:j1", "hr_name": "张HR"})
+
+        assert first["status"] == "completed"
+        assert second["status"] == "completed"
+        assert second["progress_status"] == "greeted"
+
+    @pytest.mark.asyncio
+    async def test_confirm_greeting_delivered_unknown_without_company(
+        self, tmp_path: Path
+    ) -> None:
+        tool = build_confirm_greeting_delivered_tool(tmp_path / "registry.db")
+
+        result = await tool.ainvoke({"job_id": "boss:ghost", "hr_name": "张HR"})
+
+        assert result["status"] == "not_found"
+
+    @pytest.mark.asyncio
+    async def test_confirm_greeting_delivered_creates_missing_record(
+        self, tmp_path: Path
+    ) -> None:
+        db = tmp_path / "registry.db"
+        tool = build_confirm_greeting_delivered_tool(db)
+
+        result = await tool.ainvoke(
+            {
+                "job_id": "boss:new",
+                "hr_name": "张HR",
+                "company": "元石",
+                "title": "后端工程师",
+                "url": "https://www.zhipin.com/job_detail/new.html",
+            }
+        )
+
+        assert result["status"] == "completed"
+        assert result["company"] == "元石"
+        assert result["progress_status"] == "greeted"
 
     @pytest.mark.asyncio
     async def test_get_returns_full_history(self, tmp_path: Path) -> None:

@@ -50,6 +50,7 @@ from jobagent.tools.job_identity_merge import (
     build_merge_job_identities_tool,
 )
 from jobagent.tools.job_progress import (
+    build_confirm_greeting_delivered_tool,
     build_get_job_progress_tool,
     build_list_job_records_tool,
     build_update_job_progress_tool,
@@ -102,6 +103,7 @@ __all__ = [
     "build_save_job_search_profile_tool",
     "InterviewEvidenceDiscovery",
     "InterviewEvidenceTarget",
+    "build_confirm_greeting_delivered_tool",
     "build_update_job_progress_tool",
     "build_send_application_email_tool",
     "build_list_recent_emails_tool",
