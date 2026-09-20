@@ -163,6 +163,9 @@ _HITL_TOOLS: dict[str, str] = {
     "upload_boss_resume_pdf": "向 Boss 账户上传/替换附件简历",
     "send_boss_resume_after_hr_reply": "向已回复的 Boss HR 发送用户选定的简历",
     "reply_boss_greeting": "在 Boss 聊天中向 HR 发送一条消息",
+    "boss_reply_decide": "批准/编辑后发送一条 Boss HR 回复（外发消息，请核对 HR、草稿正文与版本）",
+    "boss_fact_set": "写入一条跨会话候选人事实（将成为自动回复引用的口径，请核对内容与类别）",
+    "boss_auto_config": "修改 HR 自动回复运行开关（总闸/观察期）",
     "merge_job_identities": "合并两条岗位身份记录（不可自动撤销）",
 }
 

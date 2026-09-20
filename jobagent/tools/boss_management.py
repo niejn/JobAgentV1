@@ -138,7 +138,10 @@ def build_boss_management_tools(state_db: Path) -> list[BaseTool]:
         return {"status": "ok", "summary": digest_summary_for_chat(state_db)}
 
     async def boss_backfill_cold_start() -> dict[str, Any]:
-        report = run_backfill(state_db)
+        from jobagent.config import get_settings
+        from jobagent.models.llm_client import build_agent_model
+
+        report = run_backfill(state_db, model=build_agent_model(get_settings()))
         return {
             "status": "ok",
             "report": render_report(report),

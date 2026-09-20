@@ -209,6 +209,7 @@ class BossDirectContactAdapter:
 
     async def _fetch_page_token_from_cdp(self) -> str:
         from playwright.async_api import async_playwright
+
         from jobagent.auth.boss_debug_chrome import BossDebugChromeError, ensure_boss_debug_chrome
 
         endpoint = str(self._settings.debug_chrome_cdp_endpoint)

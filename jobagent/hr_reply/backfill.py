@@ -44,11 +44,13 @@ class ExtractionSchema(BaseModel):
             "city/outsourcing_stance), talking_points or value, evidence."
         ),
     )
-    insights: list[dict[str, str]] = Field(
+    insights: list[dict[str, Any]] = Field(
         default_factory=list,
         description=(
             "HR statements about their company: company, insight_type "
-            "(outsourcing/salary_range/other), value summary, evidence."
+            "(outsourcing/salary_range/other), value summary, evidence, and "
+            "for outsourcing a boolean is_outsourcing (False when the HR "
+            "explicitly says it is NOT outsourcing)."
         ),
     )
 
@@ -98,17 +100,20 @@ def run_backfill(
 def _conversation_history(
     connection: sqlite3.Connection, *, limit: int = 200
 ) -> list[dict[str, Any]]:
-    """Stored inbound messages grouped by conversation, newest-first."""
+    """HR inbound + approved outbound per conversation, newest-first.
 
-    rows = connection.execute(
-        """SELECT conversation_id, company, hr_name, text, sent_at
+    A-grade facts may only come from the outbound side (drafts the user
+    approved and the worker sent); the inbound side feeds B-grade insights.
+    """
+
+    inbound = connection.execute(
+        """SELECT conversation_id, company, hr_name, text
         FROM boss_inbound_messages
-        ORDER BY conversation_id, sent_at DESC
-        LIMIT ?""",
+        ORDER BY sent_at DESC LIMIT ?""",
         (limit,),
     ).fetchall()
     grouped: dict[str, dict[str, Any]] = {}
-    for conversation_id, company, hr_name, text, _sent_at in rows:
+    for conversation_id, company, hr_name, text in inbound:
         entry = grouped.setdefault(
             str(conversation_id),
             {
@@ -116,11 +121,21 @@ def _conversation_history(
                 "company": str(company),
                 "hr_name": str(hr_name),
                 "messages": [],
+                "outbound": [],
             },
         )
         entry["messages"].append(str(text))
+    sent = connection.execute(
+        """SELECT conversation_id, draft_text FROM boss_reply_queue
+        WHERE sent_at IS NOT NULL AND draft_text != ''
+        ORDER BY sent_at DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    for conversation_id, draft_text in sent:
+        existing = grouped.get(str(conversation_id))
+        if existing is not None and str(draft_text):
+            existing["outbound"].append(str(draft_text))
     return list(grouped.values())
-
 
 def _extract_conversations(
     conversations: list[dict[str, Any]],
@@ -131,14 +146,21 @@ def _extract_conversations(
 ) -> None:
     structured = model.with_structured_output(ExtractionSchema)
     for conversation in conversations:
-        body = "\n".join(
+        outbound = "\n".join(
+            f"我（求职者发出）：{text}" for text in conversation["outbound"][:30]
+        )
+        inbound = "\n".join(
             f"{conversation['hr_name']}：{text}"
             for text in conversation["messages"][:30]
         )
+        if not outbound and not inbound:
+            continue
         prompt = (
-            "从以下 Boss 直聘聊天记录提取信息。注意区分：只有【求职者发出的消息】"
-            "才是求职者事实（facts）；HR 说的关于他们公司的信息是公司洞察（insights）。\n"
-            f"公司：{conversation['company']}\n{body}"
+            "从以下 Boss 直聘聊天记录提取信息，严格遵守来源分级：\n"
+            "- facts：只能来自【我（求职者发出）】的消息中关于求职者自己的陈述；"
+ "HR 消息里关于求职者的描述一律不算 facts。\n"
+            "- insights：来自 HR 消息的关于其公司/岗位的信息。\n"
+            f"公司：{conversation['company']}\n{inbound}\n{outbound}"
         )
         try:
             raw = structured.invoke(prompt)
@@ -202,7 +224,7 @@ def _apply_insights(
             continue
         payload: dict[str, Any] = {"summary": str(item.get("value") or "")[:300]}
         if insight_type == "outsourcing":
-            payload["is_outsourcing"] = True
+            payload["is_outsourcing"] = bool(item.get("is_outsourcing"))
         insights.upsert(
             company=company,
             insight_type=insight_type,

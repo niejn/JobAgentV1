@@ -14,6 +14,7 @@ auto-sends at night and no draft is lost.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 import time
@@ -137,7 +138,7 @@ class HrReplyOrchestrator:
             try:
                 engine = ReplyPolicyEngine(config=config, insights=insights)
                 for group in groups:
-                    stats = self._process_group(
+                    stats = await self._process_group(
                         group=group,
                         classifier=classifier,
                         engine=engine,
@@ -184,16 +185,24 @@ class HrReplyOrchestrator:
             "encrypt_boss_id", "company", "title", "hr_name", "text", "sent_at",
         ]
         groups: list[dict[str, Any]] = []
+
+        def _to_ms(value: Any) -> float:
+            # Boss timestamps are milliseconds; tolerate seconds too.
+            raw = float(value or 0)
+            return raw if raw >= 1e12 else raw * 1000.0
+
         for row in rows:
             record = dict(zip(columns, row, strict=True))
+            record["sent_at_ms"] = _to_ms(record["sent_at"])
             last = groups[-1] if groups else None
             if (
                 last is not None
                 and last["conversation_id"] == record["conversation_id"]
-                and record["sent_at"] - last["sent_at_end"] <= MERGE_WINDOW_SECONDS
+                and record["sent_at_ms"] - last["sent_at_end"]
+                <= MERGE_WINDOW_SECONDS * 1000.0
             ):
                 last["messages"].append(record)
-                last["sent_at_end"] = record["sent_at"]
+                last["sent_at_end"] = record["sent_at_ms"]
             else:
                 groups.append(
                     {
@@ -205,15 +214,15 @@ class HrReplyOrchestrator:
                         "title": str(record["title"]),
                         "hr_name": str(record["hr_name"]),
                         "messages": [record],
-                        "sent_at_start": record["sent_at"],
-                        "sent_at_end": record["sent_at"],
+                        "sent_at_start": record["sent_at_ms"],
+                        "sent_at_end": record["sent_at_ms"],
                     }
                 )
         return groups
 
     # -- one group ------------------------------------------------------------
 
-    def _process_group(
+    async def _process_group(
         self,
         *,
         group: dict[str, Any],
@@ -232,17 +241,26 @@ class HrReplyOrchestrator:
         state = state_store.get(group["friend_id"])
 
         if float(state.get("manual_cooldown_until") or 0) > now:
-            self._mark(connection, keys, "skipped_manual")
+            # Leave unclassified so the group is reprocessed after cooldown;
+            # permanent skipping would hide HR questions the user missed.
             stats.skipped_manual += len(keys)
             stats.reasons.append("manual_takeover_cooldown")
             return stats
 
-        classification = classifier.classify(
-            hr_messages=texts,
-            conversation_context=f"{group['company']} / {group['title']}",
+        # Include the last auto reply so the classifier can spot follow-ups
+        # and negotiation rounds against our own previous answer (P1-6).
+        last_auto = str(state.get("last_auto_reply_text") or "")
+        context = f"{group['company']} / {group['title']}"
+        if last_auto:
+            context += f"；上一条自动回复：{last_auto[:120]}"
+        # Sync LLM call: run off the event loop so worker heartbeats and the
+        # daemon keep ticking during classification (review finding 6).
+        classification = await asyncio.to_thread(
+            classifier.classify, hr_messages=texts, conversation_context=context
         )
         if classification.degraded:
             stats.degraded += 1
+            self._bump_degraded_counter(connection)
         decision = engine.decide(
             classification=classification,
             facts=facts_store.snapshot(),
@@ -251,9 +269,21 @@ class HrReplyOrchestrator:
             fingerprint=fingerprint,
             now=now,
         )
+        if decision.action == "auto" and engine.config.audit_only:
+            # Re-mark what audit-only suppressed, for the observation report.
+            decision = decision.__class__(
+                action="human",
+                draft_text=decision.draft_text,
+                risk_level=decision.risk_level,
+                reasons=["audit_only_observation"],
+                fact_ids=decision.fact_ids,
+                intent=decision.intent,
+                confidence=decision.confidence,
+            )
         stats.reasons.extend(decision.reasons)
 
         status = "awaiting_human"
+        draft_text = decision.draft_text
         if decision.action == "auto":
             queue.upsert_policy(
                 policy_id=decision.policy_id,
@@ -269,6 +299,10 @@ class HrReplyOrchestrator:
             stats.awaiting_human += 1
         else:
             stats.awaiting_human += 1
+            if engine.config.audit_only and decision.reasons == ["audit_only_observation"]:
+                # Observation period: mark drafts that WOULD auto-send so
+                # reviewers can measure go-live readiness (review finding 9).
+                draft_text = f"[would_auto_send] {draft_text}" if draft_text else ""
         state_store.note_question(group["friend_id"], fingerprint)
 
         queue.enqueue(
@@ -281,14 +315,14 @@ class HrReplyOrchestrator:
             title=group["title"],
             hr_name=group["hr_name"],
             hr_message="\n".join(texts),
-            draft_text=decision.draft_text,
+            draft_text=draft_text,
             risk_level=decision.risk_level,
             intent=decision.intent,
             confidence=decision.confidence,
             fact_ids=decision.fact_ids,
             policy_id=decision.policy_id,
             policy_version=decision.policy_version,
-            authorized_until=decision.authorized_until,
+            authorized_until=self._bound_to_send_window(decision.authorized_until, now),
             risk_verified=1 if decision.action == "auto" else 0,
             status=status,
         )
@@ -312,6 +346,41 @@ class HrReplyOrchestrator:
             "UPDATE boss_inbound_messages SET processing_status=? WHERE message_key=?",
             [(status, key) for key in keys],
         )
+
+    @staticmethod
+    def _bound_to_send_window(authorized_until: float, now: float) -> float:
+        """Auto-ready authorization expires at today's window end (P1-5).
+
+        Human-approved sends stay window-free; auto rows that outlive the
+        21:00 boundary lose their policy match and wait for the next day.
+        """
+
+        from datetime import datetime, timedelta
+
+        end = datetime.fromtimestamp(now).replace(
+            hour=SEND_WINDOW_DEFAULT[1], minute=0, second=0, microsecond=0
+        )
+        end_ts = end.timestamp()
+        if end_ts <= now:  # already past today's end - next window is tomorrow
+            end_ts = (end + timedelta(days=1)).timestamp()
+        return min(authorized_until, end_ts)
+
+    @staticmethod
+    def _bump_degraded_counter(connection: sqlite3.Connection) -> None:
+        """Persist degradation events so the digest can report them (P0-2)."""
+
+        from datetime import date
+
+        key = f"degraded_events:{date.today().isoformat()}"
+        with connection:
+            connection.execute(
+                """INSERT INTO boss_reply_engine_config (key, value, updated_at)
+                VALUES (?, '1', ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value=CAST(CAST(value AS INTEGER)+1 AS TEXT),
+                    updated_at=excluded.updated_at""",
+                (key, time.time()),
+            )
 
     # -- runtime switches (kill switch / audit) --------------------------------
 

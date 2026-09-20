@@ -242,7 +242,12 @@ class TestPolicyEngine:
     def test_conversation_limits_and_duplicates(self, tmp_path: Path) -> None:
         engine = self._engine(tmp_path)
         kwargs = self._base(tmp_path)
-        kwargs["conversation_state"] = {"auto_reply_count_24h": 2}
+        import time as _time
+
+        kwargs["conversation_state"] = {
+            "auto_reply_count_24h": 2,
+            "window_started_at": _time.time() - 3600,
+        }
         assert engine.decide(**kwargs).reasons == ["auto_reply_limit_reached"]
         fingerprint = question_fingerprint(["q"])
         kwargs["conversation_state"] = {

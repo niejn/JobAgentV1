@@ -27,6 +27,9 @@ def test_hitl_tools_cover_exactly_the_external_writes() -> None:
         "upload_boss_resume_pdf",
         "send_boss_resume_after_hr_reply",
         "reply_boss_greeting",
+        "boss_reply_decide",
+        "boss_fact_set",
+        "boss_auto_config",
         "merge_job_identities",
     }
 

@@ -68,6 +68,7 @@ class BossChatSender:
 
     async def __aenter__(self) -> BossChatSender:
         from playwright.async_api import async_playwright
+
         from jobagent.auth.boss_debug_chrome import BossDebugChromeError, ensure_boss_debug_chrome
 
         self._playwright = await async_playwright().start()

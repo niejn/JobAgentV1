@@ -6,7 +6,11 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, Field
 
 from jobagent.journey.management import (
-    JourneyTarget, JourneyUpdate, change_journey, get_journey, list_journeys,
+    JourneyTarget,
+    JourneyUpdate,
+    change_journey,
+    get_journey,
+    list_journeys,
 )
 
 

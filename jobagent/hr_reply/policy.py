@@ -13,7 +13,6 @@ requests, offer decisions and contact/credential sharing.
 from __future__ import annotations
 
 import hashlib
-import json
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -55,7 +54,6 @@ class EngineConfig:
     max_auto_per_conversation_per_day: int = MAX_AUTO_PER_CONVERSATION_PER_DAY
     duplicate_window_hours: float = DUPLICATE_WINDOW_HOURS
     manual_cooldown_hours: float = MANUAL_COOLDOWN_HOURS
-
 
 @dataclass(frozen=True, slots=True)
 class PolicyDecision:
@@ -214,8 +212,9 @@ def assemble_draft(intent: str, facts: dict[str, CandidateFact]) -> str:
     if intent == "city" and "city" in facts:
         return _join_draft(_talking_points(facts["city"]))
     if intent == "interview_mode":
-        points = _talking_points(facts["city"]) if "city" in facts else []
-        return _join_draft(["可以先线上沟通，方便的话我们先电话或视频聊", *points[:1]])
+        # No fact requirements and no location leak (review finding 19):
+        # only the willingness to talk online, same as basic_interest.
+        return _join_draft(["可以先线上沟通，方便的话我们先电话或视频聊"])
     if intent == "outsourcing":
         stance = facts.get("outsourcing_stance")
         if stance is not None and str(stance.payload.get("stance") or "") == "refuse":
@@ -225,9 +224,6 @@ def assemble_draft(intent: str, facts: dict[str, CandidateFact]) -> str:
                     "这个岗位是贵司自有编制，还是外包/派遣用工？劳动合同签署主体和汇报关系分别是什么？",
                 ]
             )
-        return _join_draft(
-            ["想确认一下这个岗位是贵司自有编制还是外包/派遣用工？劳动合同签署主体和汇报关系分别是什么？"]
-        )
     if intent == "basic_interest":
         return _join_draft(["对这个岗位很感兴趣，想进一步了解团队和业务方向"])
     return ""
@@ -283,9 +279,6 @@ class ReplyPolicyEngine:
             if classification.negotiation_followup:
                 reasons.append("negotiation_followup")
             return human()
-        if intent == "resume_request":
-            reasons.append("resume_request")
-            return human()
         if classification.confidence < self._config.confidence_min:
             reasons.append(
                 f"low_confidence:{classification.confidence:.2f}"
@@ -328,9 +321,14 @@ class ReplyPolicyEngine:
         if float(conversation_state.get("manual_cooldown_until") or 0) > now:
             reasons.append("manual_takeover_cooldown")
             return human()
-        if int(conversation_state.get("auto_reply_count_24h") or 0) >= (
-            self._config.max_auto_per_conversation_per_day
-        ):
+        # Effective auto count: the 24h window rolls at read time, so a
+        # conversation that hit yesterday's cap is not capped forever
+        # (review finding 5).
+        window_start = float(conversation_state.get("window_started_at") or 0)
+        effective_count = int(conversation_state.get("auto_reply_count_24h") or 0)
+        if now - window_start > 24 * 3600.0:
+            effective_count = 0
+        if effective_count >= self._config.max_auto_per_conversation_per_day:
             reasons.append("auto_reply_limit_reached")
             return human()
         if (
@@ -391,14 +389,3 @@ def _replace(config: EngineConfig, **changes: Any) -> EngineConfig:
     return replace(config, **changes)
 
 
-def dump_decision(decision: PolicyDecision) -> str:
-    return json.dumps(
-        {
-            "action": decision.action,
-            "intent": decision.intent,
-            "confidence": decision.confidence,
-            "reasons": decision.reasons,
-            "fact_ids": decision.fact_ids,
-        },
-        ensure_ascii=False,
-    )
