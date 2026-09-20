@@ -347,4 +347,60 @@ new
 - “线下面试时间”“薪资”“外包”“到岗时间”等问题不会在缺少事实时自动发送。
 - 用户批准后只发送对应草稿，审批前不产生外发动作。
 - ACK 丢失但消息实际存在时，最终状态为 `submitted` 或 `unverified`，不会重复发送。
+
+## 2026-09-20 需求定稿（用户决策，覆盖上文默认策略）
+
+### 自动化目标：~99% 自动回复
+
+仅以下三类落人工（awaiting_human）：
+
+1. **面试时间确认类**——具体日期/时间/改期的承诺（`interview_time` 保持永远 HITL）；
+2. **无事实依据类**——问题拆解出的槽位没有已确认 CandidateFact 支撑；
+3. **置信不足类**——LLM 自评置信度低于阈值、多意图混合或上下文冲突。
+
+其余（薪资首轮、到岗、在职状态、外包澄清、线上面试意愿、基础兴趣等）按策略自动发送。
+
+### 薪资口径（首条 CandidateFact，示范事实存储形状）
+
+```yaml
+category: salary_expectation
+talking_points:
+  - 更看重团队氛围和所做工作的价值
+  - 薪资在 3 万多
+  - 岗位比较匹配的话薪资可以折中，不会成为 blocking 的问题
+constraints: [不暴露底线数字，不报区间下限/上限，不主动展开谈判]
+source: 用户 2026-09-20 原话
+valid_until: null   # 直至用户更新
+version: 1
+```
+
+`salary_expectation` 因此从"永远 HITL"改为**按口径自动回复首轮**；但 HR 压价、
+追问底线、给出 offer 数字等**谈判回合仍 HITL**——口径只授权标准答案，不授权谈判。
+
+### CLI 管理入口：jobagent chat 内工具
+
+在 `jobagent chat` 注册 boss 队列管理工具（收件箱/查看/批准/编辑/跳过），与微信
+`/boss` 指令共用 `BossReplyApplicationService`——一套服务层、两个 Channel。
+
+### 不因高自动化而省略的护栏
+
+- 出站护栏 + 第一人称身份铁律（已上线，自动回复同样过检）；
+- **审计**：每条自动回复记录 `fact_ids + policy_version + confidence`，可回溯；
+- **总闸**：微信/chat 一条指令全局停用自动回复（`boss_reply_policies` 权威表已有基础）；
+- **观察期**：上线首 1-2 天 audit-only——草稿照常生成并标记 `would_auto_send`
+  但不实际发送，人工抽查质量后放开；
+- 连环消息合并回复 + 同 HR 频率间隔（worker 间隔/每日上限已有）；
+  offer 接受/拒绝、具体面试时间承诺、联系方式/证件发送仍是硬性 HITL。
+
+### CandidateFact 升级：有效期与版本
+
+"存到 memory 跨会话"的落地形态 = 结构化事实（非聊天记忆）：每条事实带
+`valid_until` 与 `version`，用户后说覆盖先说并留版本痕迹；冲突或过期事实
+不得用于自动回复。
+
+### 当日汇总报告
+
+daily digest：当天新 HR 消息数、自动回复数（含引用事实）、待人工数、岗位状态
+变化。分发：微信推送（复用 Management Outbox）+ chat 内查询工具 + markdown
+落盘（含薪资数字，目录进 .gitignore）。
 - 扫描、草稿、审批、发送和回执都能关联到会话、岗位和 Journey。
