@@ -382,6 +382,13 @@ class BossResumeDelivery:
             logger.info("Boss resume delivery page evaluation failed", exc_info=True)
             return {"step": "page", "message": type(exc).__name__}
         finally:
+            # Clear the parked page: it is bound to THIS playwright
+            # connection, which dies on stop(); a stale _parked handle is
+            # what caused TargetClosedError when the next _evaluate() call
+            # tried to reuse it across connections (live finding 2026-09-20).
+            import jobagent.applier.boss_chat_session as _chat_session
+
+            _chat_session._parked = None  # noqa: SLF001
             if pool is not None:
                 await pool.close()
             await playwright.stop()
