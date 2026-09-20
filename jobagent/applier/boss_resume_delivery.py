@@ -118,10 +118,10 @@ async (payload) => {
   const headers = {traceId, "X-Requested-With": "XMLHttpRequest",
     "Content-Type": "application/x-www-form-urlencoded"};
   if (zpToken) headers["zp_token"] = zpToken;
-  const accept = await fetch("/wapi/zpchat/exchange/accept?_=" + Date.now(), {
+  const accept = await fetch("/wapi/zpchat/exchange/request?_=" + Date.now(), {
     method: "POST", credentials: "include", headers,
     body: new URLSearchParams({securityId: payload.securityId, type: payload.type,
-      mid: payload.mid, scene: "", encryptResumeId: payload.encryptResumeId}).toString(),
+      encryptResumeId: payload.encryptResumeId, mid: payload.mid || ""}).toString(),
   }).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
   if (accept.code !== 0) return {step: "accept", code: accept.code, message: accept.message};
   const refresh = await fetch("/wapi/zpchat/message/refresh?messageId="
