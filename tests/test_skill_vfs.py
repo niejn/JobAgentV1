@@ -172,3 +172,45 @@ async def test_ls_tool_sees_mounted_skills(tmp_path: Path) -> None:
     ]
     assert any("SKILL.md" in out for out in tool_outputs)
     assert any("run.py" in out for out in tool_outputs)
+
+
+def test_memories_route_mounted_and_writable(tmp_path: Path) -> None:
+    """Long-term memory (/memories/, Teacher_AICoding pattern): any session
+    can read AND write the shared knowledge base through the VFS."""
+
+    from deepagents.backends.local_shell import LocalShellBackend
+
+    built_in = tmp_path / "builtin"
+    installed = tmp_path / "installed"
+    _make_skill(built_in, "demo-skill")
+    _make_skill(installed, "extra-skill")
+    memory_root = tmp_path / "memory"
+    memory_root.mkdir()
+    (memory_root / "channel-facts.md").write_text(
+        "# facts\nWS acks are routinely lost.\n", encoding="utf-8"
+    )
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    manager = SkillManager(installed, built_in_dir=built_in)
+    shell = LocalShellBackend(root_dir=artifacts, virtual_mode=True)
+    backend = _mount_skill_roots(shell, manager, memory_root)
+
+    names = {entry["path"] for entry in backend.ls("/").entries}
+    assert "/memories/" in names
+
+    listing = backend.ls("/memories/")
+    assert any("channel-facts.md" in entry["path"] for entry in listing.entries)
+    read = backend.read("/memories/channel-facts.md")
+    assert "routinely lost" in read.file_data["content"]
+
+    backend.write("/memories/new-finding.md", "validated 2026-09-20")
+    assert (memory_root / "new-finding.md").read_text(encoding="utf-8") == (
+        "validated 2026-09-20"
+    )
+
+
+def test_memories_route_absent_without_root(tmp_path: Path) -> None:
+    backend = _backend(tmp_path)
+
+    names = {entry["path"] for entry in backend.ls("/").entries}
+    assert "/memories/" not in names

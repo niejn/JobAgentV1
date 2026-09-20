@@ -273,6 +273,13 @@ class Settings(BaseSettings):
         default=Path("data/skills"),
         description="User-installed documentation Skills directory.",
     )
+    jobagent_memory_dir: Path = Field(
+        default=Path("data/memory"),
+        description=(
+            "Cross-session long-term memory (/memories/ in the agent VFS): "
+            "channel facts and hard-won operational knowledge as markdown."
+        ),
+    )
     jobagent_resume_dir: Path = Field(
         default=Path("data/resumes"),
         description="Controlled directory for user-supplied PDF resume attachments.",

@@ -170,15 +170,22 @@ SKILL_INSTALLED_ROUTE = "/skills/installed/"
 
 
 def _mount_skill_roots(
-    shell_backend: LocalShellBackend, manager: SkillManager
+    shell_backend: LocalShellBackend,
+    manager: SkillManager,
+    memory_root: Path | None = None,
 ) -> CompositeBackend:
-    """Expose both skill roots inside the agent VFS; keep execute on the shell.
+    """Expose skill roots and long-term memory inside the agent VFS.
 
     Native SkillsMiddleware reads its sources through the backend, so mounting
     the roots gives the model metadata exposure plus ls/read_file/glob access
     to bundled scripts; ``execute`` always routes to the default (shell)
     backend, so scripts run on the real filesystem with the paths read_skill
     reports.
+
+    ``/memories/`` (Teacher_AICoding pattern) is the cross-session knowledge
+    base: channel facts and hard-won operational findings as markdown that any
+    session can ls/read_file/write_file - so the next session inherits the
+    conclusions instead of re-probing the platform.
     """
 
     routes: dict[str, BackendProtocol] = {}
@@ -188,6 +195,11 @@ def _mount_skill_roots(
     ):
         root.mkdir(parents=True, exist_ok=True)
         routes[route] = FilesystemBackend(root_dir=root, virtual_mode=True)
+    if memory_root is not None:
+        memory_root.mkdir(parents=True, exist_ok=True)
+        routes["/memories/"] = FilesystemBackend(
+            root_dir=memory_root, virtual_mode=True
+        )
     return CompositeBackend(default=shell_backend, routes=routes)
 
 
@@ -403,6 +415,7 @@ class JobAgent:
         opportunity_artifacts: LocalOpportunityArtifacts | None = None,
         filesystem_root: Path | None = None,
         skill_manager: SkillManager | None = None,
+        memory_root: Path | None = None,
         debug_trace: bool = False,
         model_capability_registry: ModelCapabilityRegistry | None = None,
         model_capability_key: str = "",
@@ -427,6 +440,7 @@ class JobAgent:
         # Single source of truth for skill roots: the same manager feeds the
         # skill tools and the /skills/ VFS mounts built in _ensure_deep_agent.
         self._skill_manager = skill_manager or SkillManager()
+        self._memory_root = memory_root
         self._debug_trace = debug_trace
         self._model_capability_registry = model_capability_registry or ModelCapabilityRegistry(
             Path("data/model_capabilities.json")
@@ -1034,7 +1048,9 @@ class JobAgent:
                     env=shell_env,
                     timeout=120,
                 )
-                backend = _mount_skill_roots(shell_backend, self._skill_manager)
+                backend = _mount_skill_roots(
+                    shell_backend, self._skill_manager, self._memory_root
+                )
                 filesystem_middleware = FilesystemMiddleware(
                     backend=backend,
                     tools=[
@@ -1841,6 +1857,7 @@ note_id、已确认的公司/岗位、Journey ID。XHS 邮件附件先由 XHS �
         opportunity_artifacts=LocalOpportunityArtifacts(settings.jobagent_opportunity_dir),
         filesystem_root=settings.jobagent_artifact_dir,
         skill_manager=skill_manager,
+        memory_root=settings.jobagent_memory_dir,
         debug_trace=settings.jobagent_debug_trace,
         model_capability_registry=ModelCapabilityRegistry(
             settings.jobagent_model_capabilities_file

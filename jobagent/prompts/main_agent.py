@@ -248,6 +248,15 @@ TOOL_POLICY_PARAGRAPHS: tuple[tuple[str, frozenset[str] | None], ...] = (
         frozenset({"list_skills", "read_skill", "install_skill"}),
     ),
     (
+        """长期记忆：`/memories/` 是跨会话共享的知识库（按主题分 markdown 文件，如
+`/memories/channel-facts.md`）。处理 Boss、微信等渠道任务前，先 ls 并 read_file 相关主题的
+记忆，继承前次会话已验证的渠道事实，不要重新探测。自己通过只读探测确认了新的平台机制
+（接口行为、回执规律、弹窗流程、限制规则）或踩坑结论时，把它追加写入对应主题文件并标注
+日期与证据来源，让下个会话直接复用。记忆只存事实与结论；强制行为规则仍以系统提示词为准，
+两者冲突时以系统提示词为准。""",
+        frozenset({"ls", "read_file", "write_file"}),
+    ),
+    (
         """不得自行构造、要求或暴露 Cookie、API Key、xsec_token、Spider_XHS 内部参数、任意本地路径、
 任意下载目录和平台私有请求地址。""",
         None,
