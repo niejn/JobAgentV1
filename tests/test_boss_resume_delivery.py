@@ -72,6 +72,7 @@ class FakeDelivery(BossResumeDelivery):
             "resumes": self.refresh_resumes
             if self.refresh_resumes is not None
             else default_resumes,
+            "supportCommonResume": True,
         }
 
 
@@ -103,6 +104,7 @@ async def test_prepare_lists_filenames_but_hides_platform_credentials(tmp_path: 
             "selectable": False,
         },
     ]
+    assert prepared["support_common_resume"] is True
     assert "securityId" not in str(prepared)
     assert "encrypted-resume-id" not in str(prepared)
 

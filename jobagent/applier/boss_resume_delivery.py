@@ -90,10 +90,11 @@ async (payload) => {
   });
   if (choices.code !== 0) return {step: "resumes", code: choices.code, message: choices.message};
   const resumeList = ((choices.zpData || {}).resumeList) || [];
+  const supportCommonResume = Boolean((choices.zpData || {}).supportCommonResume);
   return {
     step: "ready", friendId: String(target.friendId), hrName: target.name || "",
     company: target.brandName || "", jobTitle: target.jobName || target.positionName || "",
-    securityId, bossId, mid, type,
+    securityId, bossId, mid, type, supportCommonResume,
     resumes: resumeList.map((r, index) => ({
       optionId: "resume_" + index,
       encryptResumeId: String(r.resumeId || ""),
@@ -213,6 +214,7 @@ class BossResumeDelivery:
             "hr_name": str(raw.get("hrName") or ""),
             "company": str(raw.get("company") or ""),
             "job_title": str(raw.get("jobTitle") or ""),
+            "support_common_resume": bool(raw.get("supportCommonResume")),
             "resume_options": visible,
         }
 

@@ -49,7 +49,9 @@ def build_prepare_boss_resume_after_hr_reply_tool(
         description=(
             "Read-only preflight for proactively sending a Boss resume after an HR reply. "
             "Use a selected stable conversation_id from list_boss_greetings, not an HR name. "
-            "Returns HR/job context and sendable resume filenames. It never sends a resume."
+            "Returns HR/job context, attachment-resume options, and whether the Boss "
+            "online resume is offered for this chat (support_common_resume). It never "
+            "sends a resume."
         ),
         args_schema=BossResumeDeliveryPrepareRequest,
     )
