@@ -30,7 +30,6 @@ from jobagent.hr_reply.facts import CandidateFactStore, CompanyInsightStore
 from jobagent.hr_reply.policy import (
     ConversationStateStore,
     EngineConfig,
-    PolicyDecision,
     ReplyPolicyEngine,
     engine_config_from_overrides,
     question_fingerprint,
@@ -269,27 +268,25 @@ class HrReplyOrchestrator:
             fingerprint=fingerprint,
             now=now,
         )
-        if decision.action == "auto" and engine.config.audit_only:
-            # Re-mark what audit-only suppressed, for the observation report.
-            decision = decision.__class__(
-                action="human",
-                draft_text=decision.draft_text,
-                risk_level=decision.risk_level,
-                reasons=["audit_only_observation"],
-                fact_ids=decision.fact_ids,
-                intent=decision.intent,
-                confidence=decision.confidence,
-            )
+        # (audit-only observation is handled inside the engine: audit_only
+        # routes everything to human; the [would_auto_send] marker below is
+        # applied at enqueue time for reviewer visibility.)
         stats.reasons.extend(decision.reasons)
 
         status = "awaiting_human"
         draft_text = decision.draft_text
         if decision.action == "auto":
+            # Bound authorization to today's send window and use the SAME
+            # value for both the policy row and the queue row — the queue
+            # validates exact equality (round-2 finding P0-1).
+            bounded_until = self._bound_to_send_window(
+                decision.authorized_until, now
+            )
             queue.upsert_policy(
                 policy_id=decision.policy_id,
                 version=decision.policy_version,
                 intent=decision.intent,
-                authorized_until=decision.authorized_until,
+                authorized_until=bounded_until,
             )
             status = "auto_ready"
             stats.auto_ready += 1
@@ -299,10 +296,16 @@ class HrReplyOrchestrator:
             stats.awaiting_human += 1
         else:
             stats.awaiting_human += 1
-            if engine.config.audit_only and decision.reasons == ["audit_only_observation"]:
-                # Observation period: mark drafts that WOULD auto-send so
-                # reviewers can measure go-live readiness (review finding 9).
-                draft_text = f"[would_auto_send] {draft_text}" if draft_text else ""
+            if engine.config.audit_only and any(
+                r == "audit_only_observation" for r in decision.reasons
+            ):
+                # Observation period: mark drafts that WOULD auto-send.
+                # Stored in error field, not draft_text, so it never leaks
+                # into approved sends (round-2 finding P1-2).
+                draft_text = decision.draft_text
+                audit_note = "[would_auto_send]"
+            else:
+                audit_note = ""
         state_store.note_question(group["friend_id"], fingerprint)
 
         queue.enqueue(
@@ -320,11 +323,12 @@ class HrReplyOrchestrator:
             intent=decision.intent,
             confidence=decision.confidence,
             fact_ids=decision.fact_ids,
-            policy_id=decision.policy_id,
-            policy_version=decision.policy_version,
-            authorized_until=self._bound_to_send_window(decision.authorized_until, now),
-            risk_verified=1 if decision.action == "auto" else 0,
+            policy_id=decision.policy_id if status == "auto_ready" else "",
+            policy_version=decision.policy_version if status == "auto_ready" else 0,
+            authorized_until=bounded_until if status == "auto_ready" else 0,
+            risk_verified=1 if status == "auto_ready" else 0,
             status=status,
+            error=audit_note or None,
         )
         self._mark(connection, keys, "drafted")
         stats.processed += len(keys)
@@ -414,10 +418,3 @@ class HrReplyOrchestrator:
         finally:
             connection.close()
 
-
-def would_auto_send_flag(decision: PolicyDecision) -> str:
-    """Marker appended to audit-only drafts so reviewers see what would fire."""
-
-    if decision.action == "auto":
-        return "[would_auto_send]"
-    return ""

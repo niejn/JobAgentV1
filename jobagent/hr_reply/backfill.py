@@ -153,31 +153,52 @@ def _extract_conversations(
             f"{conversation['hr_name']}：{text}"
             for text in conversation["messages"][:30]
         )
-        if not outbound and not inbound:
-            continue
-        prompt = (
-            "从以下 Boss 直聘聊天记录提取信息，严格遵守来源分级：\n"
-            "- facts：只能来自【我（求职者发出）】的消息中关于求职者自己的陈述；"
- "HR 消息里关于求职者的描述一律不算 facts。\n"
-            "- insights：来自 HR 消息的关于其公司/岗位的信息。\n"
-            f"公司：{conversation['company']}\n{inbound}\n{outbound}"
-        )
-        try:
-            raw = structured.invoke(prompt)
-        except Exception as exc:  # noqa: BLE001 - degradation is the contract
-            report.degraded = True
-            report.degraded_reason = f"{type(exc).__name__}: {exc}"[:200]
-            logger.warning("backfill extraction degraded: %s", report.degraded_reason)
-            return
-        if isinstance(raw, ExtractionSchema):
-            payload: dict[str, Any] = raw.model_dump()
-        elif isinstance(raw, dict):
-            payload = raw
-        else:
-            continue
-        _apply_facts(payload.get("facts") or [], facts, report)
-        _apply_insights(payload.get("insights") or [], conversation, insights, report)
+        # Two separate invocations enforce grading rule C by construction:
+        # facts see only approved outbound text, insights only HR inbound.
+        if outbound:
+            try:
+                raw = structured.invoke(
+                    "从以下求职者发出的消息中提取关于求职者自己的事实（facts）。"
+                    "不要提取任何 HR 或公司信息。\n"
+                    f"公司：{conversation['company']}\n{outbound}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                report.degraded = True
+                report.degraded_reason = f"{type(exc).__name__}: {exc}"[:200]
+                logger.warning(
+                    "backfill extraction degraded: %s", report.degraded_reason
+                )
+                return
+            payload = _payload(raw)
+            if payload is not None:
+                _apply_facts(payload.get("facts") or [], facts, report)
+        if inbound:
+            try:
+                raw = structured.invoke(
+                    "从以下 HR 消息中提取关于其公司/岗位的信息（insights）。"
+                    "不要提取任何关于求职者的事实。\n"
+                    f"公司：{conversation['company']}\n{inbound}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                report.degraded = True
+                report.degraded_reason = f"{type(exc).__name__}: {exc}"[:200]
+                logger.warning(
+                    "backfill extraction degraded: %s", report.degraded_reason
+                )
+                return
+            payload = _payload(raw)
+            if payload is not None:
+                _apply_insights(
+                    payload.get("insights") or [], conversation, insights, report
+                )
 
+
+def _payload(raw: Any) -> dict[str, Any] | None:
+    if isinstance(raw, ExtractionSchema):
+        return raw.model_dump()
+    if isinstance(raw, dict):
+        return raw
+    return None
 
 def _apply_facts(
     items: list[Any], facts: CandidateFactStore, report: BackfillReport

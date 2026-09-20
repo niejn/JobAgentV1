@@ -547,9 +547,46 @@ async def _watch(channels: tuple[str, ...]) -> None:
             write_report,
         )
         from jobagent.hr_reply.orchestrator import HrReplyOrchestrator
+        from jobagent.hr_reply.policy import ConversationStateStore
+
+        def _note_manual_outbound(friend_id: int, text: str, sent_at: int) -> None:
+            """Takeover detection (design P0-1): outbound message not matching
+            a system-sent draft → user is chatting manually → cooldown."""
+            import sqlite3
+
+            conn = sqlite3.connect(
+                settings.jobagent_state_db.expanduser().resolve()
+            )
+            try:
+                row = conn.execute(
+                    """SELECT 1 FROM boss_reply_queue
+                    WHERE friend_id=? AND TRIM(draft_text)=TRIM(?)
+                      AND sent_at IS NOT NULL LIMIT 1""",
+                    (friend_id, text),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                row = None
+            finally:
+                conn.close()
+            if row is not None:
+                return  # matches a system-sent draft, not manual
+            with ConversationStateStore(settings.jobagent_state_db) as states:
+                states.note_manual_outbound(friend_id, cooldown_hours=4.0)
+            logging.getLogger(__name__).info(
+                "manual takeover detected for friend_id=%s; auto-reply cooled down",
+                friend_id,
+            )
+
 
         boss_daemon = BossConversationDaemon(
-            LiveBossConversationAdapter(settings),
+            LiveBossConversationAdapter(
+                settings,
+                outbound_sink=type(
+                    "OutboundSink",
+                    (),
+                    {"note_outbound": staticmethod(_note_manual_outbound)},
+                )(),
+            ),
             BossMonitorStore(settings.jobagent_state_db),
             event_sink=service,
         )

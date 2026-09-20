@@ -101,17 +101,28 @@ class BossConversationAdapter(Protocol):
 
     async def close(self) -> None: ...
 
-
 class BossInboundEventSink(Protocol):
     def publish_inbound(self, messages: list[object]) -> None: ...
 
 
+
+
+class BossOutboundEventSink(Protocol):
+    def note_outbound(self, friend_id: int, text: str, sent_at: int) -> None: ...
+
+
 class LiveBossConversationAdapter:
     """Adapter over existing Boss list/history capabilities."""
-
-    def __init__(self, settings: Settings, *, conversation_limit: int = 100) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        conversation_limit: int = 100,
+        outbound_sink: BossOutboundEventSink | None = None,
+    ) -> None:
         self._settings = settings
         self._conversation_limit = conversation_limit
+        self._outbound_sink = outbound_sink
 
     async def poll(
         self,
@@ -233,6 +244,25 @@ class LiveBossConversationAdapter:
                                 ),
                             )
                         except ValueError:
+                            # Outbound (geek-sent) message — manual takeover
+                            # detection (design P0-1): if it doesn't match a
+                            # system-sent draft, the user is chatting manually.
+                            if self._outbound_sink is not None:
+                                _body = raw_message.get("body")
+                                _text = str(
+                                    (_body.get("text") if isinstance(_body, dict) else "")
+                                    or raw_message.get("text")
+                                    or ""
+                                ).strip()
+                                _time = int(
+                                    raw_message.get("time")
+                                    or raw_message.get("createTime")
+                                    or 0
+                                )
+                                if _text:
+                                    self._outbound_sink.note_outbound(
+                                        friend_id, _text, _time
+                                    )
                             continue
                         previous_head = cursors.get(
                             conversation_id, BossConversationCursor("", 0)
@@ -480,18 +510,18 @@ class BossConversationDaemon:
         adapter: BossConversationAdapter,
         store: BossMonitorStore,
         *,
-        poll_interval_seconds: float = 30,
-        lease_ttl_seconds: float = 120,
         event_sink: BossInboundEventSink | None = None,
+        outbound_sink: BossOutboundEventSink | None = None,
+        poll_interval: float = 30.0,
     ) -> None:
         self._adapter = adapter
         self._store = store
-        self._poll_interval = max(5.0, poll_interval_seconds)
-        self._lease_ttl = max(self._poll_interval * 2, lease_ttl_seconds)
-        self._owner = uuid.uuid4().hex
         self._event_sink = event_sink
+        self._outbound_sink = outbound_sink
+        self._poll_interval = poll_interval
         self._stop = asyncio.Event()
-
+        self._owner = f"daemon-{uuid.uuid4().hex[:8]}"
+        self._lease_ttl = max(60.0, poll_interval * 3)
     async def run_once(self) -> dict[str, Any]:
         generation = self._store.acquire_lease(self._owner, ttl_seconds=self._lease_ttl)
         if generation is None:

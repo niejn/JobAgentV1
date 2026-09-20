@@ -38,7 +38,7 @@ INTENTS = (
 #: Deterministic mapping: which user fact categories an intent needs before
 #: an automatic answer may be assembled.
 INTENT_FACT_REQUIREMENTS: dict[str, tuple[str, ...]] = {
-    "interview_mode": ("city",),
+    "interview_mode": (),
     "interview_time": (),
     "outsourcing": ("outsourcing_stance",),
     "salary_expectation": ("salary_expectation",),

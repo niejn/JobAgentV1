@@ -91,6 +91,14 @@ def build_digest(state_db: Path, *, day: date | None = None) -> DigestData:
             day_str,
         )
         try:
+            degraded = connection.execute(
+                "SELECT value FROM boss_reply_engine_config WHERE key=?",
+                (f"degraded_events:{day_str}",),
+            ).fetchone()
+            digest.degraded_events = int(degraded[0]) if degraded else 0
+        except sqlite3.OperationalError:
+            digest.degraded_events = 0
+        try:
             companies = connection.execute(
                 """SELECT company, COUNT(*) AS hits FROM boss_reply_queue
                 WHERE date(created_at)=date(?) GROUP BY company
@@ -114,6 +122,7 @@ def render_markdown(digest: DigestData) -> str:
         f"- 今日已发送：{digest.sent_today}（回执未确认 {digest.unverified_today}）",
         f"- 当前待人工处理：{digest.open_awaiting}",
         f"- 事实变更：{digest.fact_changes_today}；公司洞察变更：{digest.insight_changes_today}",
+        f"- LLM 降级事件：{digest.degraded_events}",
     ]
     if digest.top_companies:
         lines.append(f"- 活跃公司：{', '.join(digest.top_companies)}")
