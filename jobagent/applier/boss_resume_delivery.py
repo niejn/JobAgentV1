@@ -91,10 +91,12 @@ async (payload) => {
   if (choices.code !== 0) return {step: "resumes", code: choices.code, message: choices.message};
   const resumeList = ((choices.zpData || {}).resumeList) || [];
   const supportCommonResume = Boolean((choices.zpData || {}).supportCommonResume);
+  const supportAnnexType = Boolean((choices.zpData || {}).supportAnnexType);
+  const supportVideoResume = Boolean((choices.zpData || {}).supportVideoResume);
   return {
     step: "ready", friendId: String(target.friendId), hrName: target.name || "",
     company: target.brandName || "", jobTitle: target.jobName || target.positionName || "",
-    securityId, bossId, mid, type, supportCommonResume,
+    securityId, bossId, mid, type, supportCommonResume, supportAnnexType, supportVideoResume,
     resumes: resumeList.map((r, index) => ({
       optionId: "resume_" + index,
       encryptResumeId: String(r.resumeId || ""),
@@ -215,6 +217,8 @@ class BossResumeDelivery:
             "company": str(raw.get("company") or ""),
             "job_title": str(raw.get("jobTitle") or ""),
             "support_common_resume": bool(raw.get("supportCommonResume")),
+            "support_annex_type": bool(raw.get("supportAnnexType")),
+            "support_video_resume": bool(raw.get("supportVideoResume")),
             "resume_options": visible,
         }
 
