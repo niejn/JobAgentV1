@@ -68,6 +68,14 @@ DEFAULT_TOOL_NAMES = {
     "update_opportunity_journey",
     "delete_opportunity_journey",
     "restore_opportunity_journey",
+    "boss_reply_view",
+    "boss_reply_decide",
+    "confirm_greeting_delivered",
+    "boss_facts_view",
+    "boss_fact_set",
+    "boss_auto_config",
+    "boss_daily_digest",
+    "boss_backfill_cold_start",
 }
 
 

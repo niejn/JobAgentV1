@@ -9,6 +9,7 @@ from jobagent.tools.boss_greet import (
     BossGreetingsManager,
     build_boss_greet_jobs_tool,
 )
+from jobagent.tools.boss_management import build_boss_management_tools
 from jobagent.tools.boss_resume import build_boss_resume_upload_tool
 from jobagent.tools.boss_resume_delivery import (
     build_prepare_boss_resume_after_hr_reply_tool,
@@ -105,6 +106,7 @@ __all__ = [
     "InterviewEvidenceTarget",
     "build_confirm_greeting_delivered_tool",
     "build_update_job_progress_tool",
+    "build_boss_management_tools",
     "build_send_application_email_tool",
     "build_list_recent_emails_tool",
     "build_read_email_tool",

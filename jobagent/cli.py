@@ -541,6 +541,12 @@ async def _watch(channels: tuple[str, ...]) -> None:
         )
         from jobagent.boss_reply_queue import BossReplyQueue
         from jobagent.boss_reply_worker import BossReplyWorker, LiveBossReplySender
+        from jobagent.hr_reply.digest import (
+            build_digest,
+            push_wechat_summary,
+            write_report,
+        )
+        from jobagent.hr_reply.orchestrator import HrReplyOrchestrator
 
         boss_daemon = BossConversationDaemon(
             LiveBossConversationAdapter(settings),
@@ -553,7 +559,36 @@ async def _watch(channels: tuple[str, ...]) -> None:
             LiveBossReplySender(settings),
             daily_limit=settings.boss_daily_limit,
         )
-        coroutines.extend((boss_daemon.run(), boss_worker.run()))
+
+        async def _run_hr_reply_pipeline() -> None:
+            """Classify new HR messages into the queue, then digest at 21:00."""
+            orchestrator = HrReplyOrchestrator(settings)
+            digest_sent_day = ""
+            while True:
+                try:
+                    await orchestrator.run_once()
+                except Exception:  # noqa: BLE001 - pipeline must keep ticking
+                    import logging
+
+                    logging.getLogger(__name__).warning(
+                        "hr reply pipeline tick failed", exc_info=True
+                    )
+                now = datetime.now()
+                if now.hour >= 21 and digest_sent_day != now.date().isoformat():
+                    try:
+                        digest = build_digest(settings.jobagent_state_db)
+                        write_report(digest, settings.jobagent_state_db.parent / "reports")
+                        push_wechat_summary(settings.jobagent_state_db, digest)
+                        digest_sent_day = digest.day
+                    except Exception:  # noqa: BLE001 - digest must not kill watch
+                        import logging
+
+                        logging.getLogger(__name__).warning(
+                            "daily digest failed", exc_info=True
+                        )
+                await asyncio.sleep(60)
+
+        coroutines.extend((boss_daemon.run(), boss_worker.run(), _run_hr_reply_pipeline()))
     if not coroutines:
         click.echo("JobAgent · 没有可运行的通道。")
         return

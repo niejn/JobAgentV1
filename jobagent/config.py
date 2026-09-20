@@ -121,6 +121,14 @@ class Settings(BaseSettings):
         le=100,
         description="Max Boss searches before the session is forced to rest.",
     )
+    boss_auto_reply_enabled: bool = Field(
+        default=True,
+        description="HR auto-reply pipeline master switch (kill switch also at runtime).",
+    )
+    boss_auto_reply_audit_only: bool = Field(
+        default=True,
+        description="Observation period: drafts are generated but never auto-sent.",
+    )
     linkedin_cookie: str | None = None
 
     # Email application channel (XHS referral posts with an HR mailbox).

@@ -81,6 +81,7 @@ from jobagent.tools import (
     build_boss_chat_reply_tool,
     build_boss_greet_jobs_tool,
     build_boss_job_discovery_tool,
+    build_boss_management_tools,
     build_boss_resume_upload_tool,
     build_confirm_greeting_delivered_tool,
     build_find_merge_candidates_tool,
@@ -1077,6 +1078,7 @@ class JobAgent:
                         ),
                         *list(spec.get("middleware", [])),
                     ]
+                    subagents.append(spec)
                 deep_agent = create_deep_agent(
                     model=self._model,
                     tools=list(self._root_tools),
@@ -1734,6 +1736,7 @@ def build_job_agent(
         registered_tools.extend(build_skill_tools(skill_manager))
         registered_tools.extend(build_resume_library_tools(resume_library))
         registered_tools.extend(build_journey_management_tools(state_db))
+        registered_tools.extend(build_boss_management_tools(state_db))
     effective_model = model or build_agent_model(settings)
     platform_subagents: list[dict[str, Any]] = []
     if use_default_tool_bundle:
