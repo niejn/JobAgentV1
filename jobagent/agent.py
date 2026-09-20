@@ -304,6 +304,12 @@ URL 或 note_id、已确认的公司/岗位、Journey ID 和附件简历文件�
 # delivery is deterministic (no read_skill round the model could skip).
 _XHS_RECRUITMENT_SKILL = "xhs-recruitment-email"
 
+_RESUME_CRAFTING_PROMPT = """你是定制简历制作专家。你不访问 Boss、小红书、SMTP、Cookie 或任何
+平台工具。任务描述必须包含岗位 JD、Journey ID 和已确认的候选人事实；信息不足时返回 blocked，
+绝不补造项目、指标、头衔或职责。先输出与 JD 要求逐条对应的事实来源，再生成 Markdown 简历草稿，
+并调用 save_tailored_resume 保存。只有用户在后续消息明确确认后，才调用 confirm_tailored_resume。
+确认前的任何版本都不得说成可投递。"""
+
 
 def _load_subagent_skill(skill_manager: SkillManager, name: str) -> str | None:
     """Load one SKILL.md body for prompt injection; missing/invalid degrades to None."""
@@ -1740,6 +1746,14 @@ def build_job_agent(
         registered_tools.extend(build_resume_library_tools(resume_library))
         registered_tools.extend(build_journey_management_tools(state_db))
         registered_tools.extend(build_boss_management_tools(state_db))
+        from jobagent.tools.tailored_resume import (
+            TailoredResumeStore,
+            build_tailored_resume_tools,
+        )
+
+        resume_crafting_tools = build_tailored_resume_tools(
+            TailoredResumeStore(settings.jobagent_artifact_dir)
+        )
     effective_model = model or build_agent_model(settings)
     platform_subagents: list[dict[str, Any]] = []
     if use_default_tool_bundle:
@@ -1758,6 +1772,11 @@ def build_job_agent(
             and tool.name not in _XHS_ONLY_TOOL_NAMES
         ]
         if boss_tools:
+            from jobagent.boss_preflight import (
+                BossSessionPreflight,
+                BossSessionPreflightMiddleware,
+            )
+
             platform_subagents.append(
                 {
                     "name": "boss_recruiting",
@@ -1765,6 +1784,9 @@ def build_job_agent(
                     "system_prompt": _BOSS_SUBAGENT_PROMPT,
                     "model": effective_model,
                     "tools": boss_tools,
+                    "middleware": [
+                        BossSessionPreflightMiddleware(BossSessionPreflight(settings))
+                    ],
                     "interrupt_on": _interrupt_on_config(
                         {
                             name: description
@@ -1806,6 +1828,18 @@ def build_job_agent(
                     "interrupt_on": xhs_interrupts,
                 }
             )
+        platform_subagents.append(
+            {
+                "name": "resume_crafting",
+                "description": "根据已确认候选人事实和指定 JD 制作可追溯定制简历。",
+                "system_prompt": _RESUME_CRAFTING_PROMPT,
+                "model": effective_model,
+                "tools": resume_crafting_tools,
+                "interrupt_on": _interrupt_on_config(
+                    {"confirm_tailored_resume": "确认这版定制简历可用于后续投递。"}
+                ),
+            }
+        )
     # PS-1 分层组装：条件注入（段/段落跟随 registered_tools）+ 元数据层
     # （日期冻结于构造时刻）+ candidate_context 不可信块。单一组装点在
     # prompts/builder.py，本处只传事实源。
@@ -1830,7 +1864,8 @@ def build_job_agent(
 
 <platform_subagent_policy>
 Boss 与小红书/邮件渠道由原生 `task` Tool 调用专属 Subagent：`boss_recruiting` 或
-`xhs_recruiting`。Subagent 不继承本对话历史，task 的任务描述必须自包含：写明帖子 URL 或
+`xhs_recruiting`；定制简历由 `resume_crafting` 处理。Subagent 不继承本对话历史，
+task 的任务描述必须自包含：写明帖子 URL 或
 note_id、已确认的公司/岗位、Journey ID。XHS 邮件附件先由 XHS 子 Agent 用
 `list_available_resume_pdfs` 核对；Boss 简历只在 HR 回复后由 Boss 平台预检工具列出。邮件任务
 还须携带用户已逐字确认的主题/正文；有本地分析结论时一并附上让子代理复用。当任务
