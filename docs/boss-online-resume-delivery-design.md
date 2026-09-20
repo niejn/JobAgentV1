@@ -1,5 +1,11 @@
 # Boss 在线简历：列出与发送 — 需求与功能设计
 
+> 状态更新（2026-09-20 定稿后关闭）：该账号的在线简历与附件
+> `聂俊能_AI_Agent应用开发工程师_v14.pdf` 内容同源（同一 parserId
+> `d39899b04dfadad11XB72tq-EVRV`，Boss 解析自动关联）——发该附件即发
+> 在线简历内容，现有 prepare/send 工具已满足需求。本设计的"同步→发送"
+> 方案保留为备选：仅当在线简历与附件出现分叉（直接在 Boss 网页改在线
+> 简历而未重传 PDF）时才需要实施。
 状态：设计完成，待数据探测（G1–G4）后实施。日期：2026-09-20。
 解码依据：`data/journeys/workspace/findings_online_resume.md`（Boss 前端 bundle 离线分析）。
 
