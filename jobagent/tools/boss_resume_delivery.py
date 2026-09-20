@@ -83,7 +83,10 @@ def build_send_boss_resume_after_hr_reply_tool(manager: BossResumeDelivery) -> B
         description=(
             "Send one specifically selected Boss online/attachment resume after an HR replied. "
             "Call prepare_boss_resume_after_hr_reply first, show the exact resume filename to "
-            "the user, then call this tool. Execution pauses for explicit human approval."
+            "the user, then call this tool. Execution pauses for explicit human approval. "
+            "The preflight credential expires after 10 minutes; this tool re-runs the read-only "
+            "preflight automatically on expiry and continues when the approved resume is still "
+            "selectable - NEVER script prepare+send together, always use these two tools."
         ),
         args_schema=BossResumeDeliverySendRequest,
     )

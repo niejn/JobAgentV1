@@ -30,11 +30,35 @@ class FakeDelivery(BossResumeDelivery):
             "refreshCode": 0,
             "historyCode": 0,
         }
+        # When set, preflight evaluations return this resume list instead.
+        self.refresh_resumes: list[dict] | None = None
 
     async def _evaluate(self, script: str, payload: dict[str, str]):  # type: ignore[override]
         self.payloads.append(payload)
         if "exchange/accept" in script:
             return self.send_result
+        default_resumes = [
+            {
+                "optionId": "resume_0",
+                "encryptResumeId": "encrypted-resume-id",
+                "fileName": "李明_AI Agent工程师.pdf",
+                "annexType": 0,
+                "uploadTime": 1,
+                "restricted": False,
+                "restrictedLabel": "",
+                "securityStatus": "normal",
+            },
+            {
+                "optionId": "resume_1",
+                "encryptResumeId": "restricted-id",
+                "fileName": "李明_旧简历.pdf",
+                "annexType": 0,
+                "uploadTime": 1,
+                "restricted": True,
+                "restrictedLabel": "不可投递",
+                "securityStatus": "restricted",
+            },
+        ]
         return {
             "step": "ready",
             "friendId": "20001",
@@ -45,28 +69,9 @@ class FakeDelivery(BossResumeDelivery):
             "bossId": "boss-secret",
             "mid": "383439670067459",
             "type": "1",
-            "resumes": [
-                {
-                    "optionId": "resume_0",
-                    "encryptResumeId": "encrypted-resume-id",
-                    "fileName": "李明_AI Agent工程师.pdf",
-                    "annexType": 0,
-                    "uploadTime": 1,
-                    "restricted": False,
-                    "restrictedLabel": "",
-                    "securityStatus": "normal",
-                },
-                {
-                    "optionId": "resume_1",
-                    "encryptResumeId": "restricted-id",
-                    "fileName": "李明_旧简历.pdf",
-                    "annexType": 0,
-                    "uploadTime": 1,
-                    "restricted": True,
-                    "restrictedLabel": "不可投递",
-                    "securityStatus": "restricted",
-                },
-            ],
+            "resumes": self.refresh_resumes
+            if self.refresh_resumes is not None
+            else default_resumes,
         }
 
 
@@ -128,6 +133,67 @@ async def test_send_requires_exact_selected_filename_and_returns_receipt(tmp_pat
     assert sent["status"] == "confirmed"
     assert sent["resume_file_name"] == "李明_AI Agent工程师.pdf"
     assert manager.payloads[-1]["encryptResumeId"] == "encrypted-resume-id"
+
+
+@pytest.mark.asyncio
+async def test_expired_delivery_reprepares_and_sends(tmp_path: Path) -> None:
+    """HITL approval routinely outlives the 10-min preflight TTL: send must
+    re-run the read-only preflight itself instead of failing (which drove
+    agents to script prepare+send as one bypass)."""
+
+    manager = FakeDelivery(tmp_path)
+    prepared = await manager.prepare("20001")
+    # Age the preflight past the TTL without waiting.
+    for record in manager._prepared.values():
+        object.__setattr__(record, "created_at", record.created_at - 700)
+
+    sent = await manager.send(
+        delivery_id=prepared["delivery_id"],
+        resume_option_id="resume_0",
+        resume_file_name="李明_AI Agent工程师.pdf",
+        hr_name="陈女士",
+        company="四川影目",
+        job_title="AI Agent 工程师",
+    )
+
+    assert sent["status"] == "confirmed"
+    assert sent["reprepared_after_expiry"] is True
+    # Two prepare evaluations (initial + refresh) plus one send evaluation.
+    assert len([p for p in manager.payloads if "friendId" in p]) == 2
+    assert manager.payloads[-1]["encryptResumeId"] == "encrypted-resume-id"
+
+
+@pytest.mark.asyncio
+async def test_expired_delivery_reports_when_selection_became_unsendable(
+    tmp_path: Path,
+) -> None:
+    manager = FakeDelivery(tmp_path)
+    prepared = await manager.prepare("20001")
+    for record in manager._prepared.values():
+        object.__setattr__(record, "created_at", record.created_at - 700)
+    # The refresh drops the previously selected resume entirely.
+    manager.refresh_resumes = [
+        {
+            "optionId": "resume_x",
+            "encryptResumeId": "other-id",
+            "fileName": "新简历.pdf",
+            "annexType": 1,
+            "restricted": False,
+        }
+    ]
+
+    sent = await manager.send(
+        delivery_id=prepared["delivery_id"],
+        resume_option_id="resume_0",
+        resume_file_name="李明_AI Agent工程师.pdf",
+        hr_name="陈女士",
+        company="四川影目",
+        job_title="AI Agent 工程师",
+    )
+
+    assert sent["status"] == "failed"
+    assert sent["error_type"] == "delivery_expired_options_changed"
+    assert sent["resume_options"]
 
 
 @pytest.mark.asyncio

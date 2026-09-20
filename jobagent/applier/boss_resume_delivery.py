@@ -231,12 +231,50 @@ class BossResumeDelivery:
         prepared = self._prepared.get(delivery_id)
         if prepared is None:
             return {"status": "failed", "error_type": "unknown_delivery"}
+        reprepared_after_expiry = False
         if time.monotonic() - prepared.created_at > _PREPARED_TTL_SECONDS:
+            # HITL approval between prepare and send routinely outlives the
+            # 10-minute preflight TTL. Re-run the read-only preflight and keep
+            # going when the user-selected resume is still selectable, instead
+            # of failing (the old hard failure drove agents to script
+            # prepare+send as one bypass).
             self._prepared.pop(delivery_id, None)
-            return {"status": "failed", "error_type": "delivery_expired"}
-        option = prepared.options.get(resume_option_id)
-        if option is None or not option.get("selectable"):
-            return {"status": "failed", "error_type": "resume_not_selectable"}
+            refreshed = await self.prepare(prepared.friend_id)
+            if refreshed.get("status") != "ready":
+                return {
+                    **refreshed,
+                    "error_type": refreshed.get("error_type") or "delivery_expired",
+                    "message": "原预检已过期，重新预检未就绪；请按返回状态处理。",
+                }
+            new_delivery_id = str(refreshed.get("delivery_id") or "")
+            prepared = self._prepared.get(new_delivery_id)
+            if prepared is None:
+                return {"status": "failed", "error_type": "delivery_expired"}
+            reprepared_after_expiry = True
+            option = prepared.options.get(resume_option_id)
+            if option is None or not option.get("selectable"):
+                # Option ids may rotate between preflights; fall back to the
+                # exact filename the user approved.
+                option = next(
+                    (
+                        item
+                        for item in prepared.options.values()
+                        if item.get("selectable")
+                        and str(item.get("fileName") or "") == resume_file_name
+                    ),
+                    None,
+                )
+            if option is None:
+                return {
+                    "status": "failed",
+                    "error_type": "delivery_expired_options_changed",
+                    "message": "原预检已过期，重新预检后所选简历已不可发送。",
+                    "resume_options": refreshed.get("resume_options"),
+                }
+        else:
+            option = prepared.options.get(resume_option_id)
+            if option is None or not option.get("selectable"):
+                return {"status": "failed", "error_type": "resume_not_selectable"}
         if str(option.get("fileName") or "") != resume_file_name:
             return {"status": "failed", "error_type": "resume_filename_mismatch"}
         if (hr_name, company, job_title) != (
@@ -297,7 +335,7 @@ class BossResumeDelivery:
                 "job_title": prepared.job_title,
                 "resume_file_name": resume_file_name,
             }
-        return {
+        result: dict[str, Any] = {
             "status": "confirmed",
             "hr_name": prepared.hr_name,
             "company": prepared.company,
@@ -305,6 +343,9 @@ class BossResumeDelivery:
             "resume_file_name": resume_file_name,
             "receipt": receipt,
         }
+        if reprepared_after_expiry:
+            result["reprepared_after_expiry"] = True
+        return result
 
     async def _evaluate(self, script: str, payload: dict[str, str]) -> Any:
         allowed, remaining_min, _ = get_boss_cooldown().check()
