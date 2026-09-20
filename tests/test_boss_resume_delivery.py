@@ -35,7 +35,7 @@ class FakeDelivery(BossResumeDelivery):
 
     async def _evaluate(self, script: str, payload: dict[str, str]):  # type: ignore[override]
         self.payloads.append(payload)
-        if "exchange/accept" in script:
+        if "exchange/request" in script or "exchange/accept" in script:
             return self.send_result
         default_resumes = [
             {
