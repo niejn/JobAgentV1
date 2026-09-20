@@ -27,7 +27,7 @@ class FakeDelivery(BossResumeDelivery):
         self.send_result = {
             "step": "done",
             "acceptStatus": "success",
-            "refreshCode": 0,
+            "acceptCode": 0,
             "historyCode": 0,
         }
         # When set, preflight evaluations return this resume list instead.

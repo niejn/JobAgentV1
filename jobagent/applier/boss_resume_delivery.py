@@ -72,17 +72,16 @@ async (payload) => {
   const messages = ((history.zpData || {}).messages) || [];
   const selfId = String(((window._PAGE || {}).uid) || "");
   const inbound = messages.filter((m) => String(m.fromId || (m.from || {}).uid || "") !== selfId);
-  const latest = inbound.sort((a, b) => Number(b.time || b.createTime || 0)
-    - Number(a.time || a.createTime || 0))[0];
-  if (!latest) return {step: "eligibility", code: 0, message: "HR has not replied"};
-  const mid = String(latest.mid || latest.msgId || latest.cmid || "");
-  const type = String(latest.type != null ? latest.type : latest.messageType || "");
-  if (!mid || !type) return {step: "eligibility", code: 0, message: "reply message is incomplete"};
+  if (!inbound.length) return {step: "eligibility", code: 0, message: "HR has not replied"};
 
-  const test = await json("/wapi/zpchat/exchange/testAccept", {
+  // Proactive send uses exchange/test (not testAccept) for eligibility,
+  // matching the real frontend: only needs securityId + type=3 +
+  // friendSource, no HR message mid/type required (mitm 2026-09-20).
+  const test = await json("/wapi/zpchat/exchange/test", {
     method: "POST", headers: {...base, "X-Requested-With": "XMLHttpRequest",
       "Content-Type": "application/x-www-form-urlencoded"},
-    body: new URLSearchParams({mid, type, securityId}).toString(),
+    body: new URLSearchParams({securityId, type: "3",
+      friendSource: String(target.friendSource || "0")}).toString(),
   });
   if (test.code !== 0) return {step: "eligibility", code: test.code, message: test.message};
   const choices = await json("/wapi/zpgeek/resume/attachment/checkbox.json?from=3", {
@@ -96,7 +95,8 @@ async (payload) => {
   return {
     step: "ready", friendId: String(target.friendId), hrName: target.name || "",
     company: target.brandName || "", jobTitle: target.jobName || target.positionName || "",
-    securityId, bossId, mid, type, supportCommonResume, supportAnnexType, supportVideoResume,
+    securityId, bossId, mid: "", type: "3",
+    supportCommonResume, supportAnnexType, supportVideoResume,
     resumes: resumeList.map((r, index) => ({
       optionId: "resume_" + index,
       encryptResumeId: String(r.resumeId || ""),
@@ -124,12 +124,6 @@ async (payload) => {
       encryptResumeId: payload.encryptResumeId, mid: payload.mid || ""}).toString(),
   }).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
   if (accept.code !== 0) return {step: "accept", code: accept.code, message: accept.message};
-  const refresh = await fetch("/wapi/zpchat/message/refresh?messageId="
-    + encodeURIComponent(payload.mid) + "&_=" + Date.now(), {
-    method: "GET", credentials: "include",
-    headers: {traceId, "X-Requested-With": "XMLHttpRequest",
-      ...(zpToken ? {"zp_token": zpToken} : {})},
-  }).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
   const history = await fetch("/wapi/zpchat/geek/historyMsg?bossId="
     + encodeURIComponent(payload.bossId) + "&maxMsgId=0&c=20&page=1&src=0"
     + "&securityId=" + encodeURIComponent(payload.securityId) + "&_=" + Date.now(), {
@@ -138,8 +132,7 @@ async (payload) => {
       ...(zpToken ? {"zp_token": zpToken} : {})},
   }).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
   return {step: "done", acceptCode: accept.code, acceptStatus: ((accept.zpData || {}).status || ""),
-    refreshCode: refresh.code, historyCode: history.code, refreshMessage: refresh.message || ""};
-}
+    historyCode: history.code, refreshMessage: history.message || ""};
 """
 
 
@@ -313,12 +306,12 @@ class BossResumeDelivery:
         self._prepared.pop(delivery_id, None)
         delivery_status = (
             "confirmed"
-            if raw.get("refreshCode") == 0 and raw.get("historyCode") == 0
+            if raw.get("acceptCode") == 0 and raw.get("historyCode") == 0
             else "unverified"
         )
         receipt = {
             "accept_status": raw.get("acceptStatus"),
-            "refresh_code": raw.get("refreshCode"),
+            "accept_code": raw.get("acceptCode"),
             "history_code": raw.get("historyCode"),
         }
         with ResumeDeliveryRegistry(self._settings.jobagent_state_db) as registry:
