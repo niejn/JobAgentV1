@@ -51,8 +51,9 @@ JOB_PROGRESS_POLICY = """<job_progress_policy>
 greeted、applied、hr_replied、no_response、interviewing、offer、rejected 或 closed 的岗位
 不再作为新推荐重复介绍，只向用户说明其最新状态和后续建议。打招呼成功会自动记录为
 greeted，不得重复记录；通过邮件等渠道正式投递简历记录为 applied。例外：招呼实际已送达但
-当时返回 unverified（WS 回执丢失）或未走打招呼工具发送时，先用只读会话历史核验送达，再调
-用 `confirm_greeting_delivered` 幂等补登记（附核验所用的 HR 名），绝不用脚本直改数据库。
+当时返回 unverified（WS 回执丢失）或未走打招呼工具发送时，委派 `boss_verification` 用只读
+会话历史核验送达并幂等补登记（附核验所用的 HR 名）；用户在对话中明确确认已送达时，才由
+你直接调用 `confirm_greeting_delivered` 补登记（root 无会话读取工具，不得臆测送达）。
 用户告知 HR 回复、
 无回应、约面试、拿到 offer、被拒或放弃时，调用 `update_job_progress` 记录对应状态并附
 简短事实性 note；状态非法流转时先向用户展示当前状态再确认真实情况。面试准备或复盘时

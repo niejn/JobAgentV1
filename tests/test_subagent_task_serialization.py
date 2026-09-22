@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from langchain.agents.middleware.types import ModelResponse
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 
-from jobagent.agent import build_job_agent
+from jobagent.agent import _PLATFORM_WRITE_TOOL_NAMES, build_job_agent
 from jobagent.config import Settings
 from jobagent.middleware import SingleSubagentTaskMiddleware
 
@@ -143,10 +145,59 @@ async def test_default_agent_exposes_platform_tools_only_to_their_subagents(tmp_
     assert graph is not None
     assert "boss_greet_jobs" not in root_names
     assert "send_application_email" not in root_names
-    assert {tool.name for tool in subagents["boss_recruiting"]["tools"]} >= {
-        "boss_greet_jobs",
-        "send_boss_resume_after_hr_reply",
+    # State-DB tools stay on root; boss_verification mirrors them read-mostly.
+    assert {"get_job_progress", "list_job_records"} <= root_names
+    boss_split = {
+        "boss_discovery": {"discover_boss_jobs"},
+        "boss_greeting": {"boss_greet_jobs", "list_boss_greetings"},
+        "boss_engagement": {
+            "read_boss_conversation",
+            "reply_boss_greeting",
+            "prepare_boss_resume_after_hr_reply",
+            "send_boss_resume_after_hr_reply",
+            "upload_boss_resume_pdf",
+        },
+        "boss_verification": {
+            "read_boss_conversation",
+            "confirm_greeting_delivered",
+            "get_job_progress",
+            "list_job_records",
+        },
     }
+    for name, expected_tools in boss_split.items():
+        assert name in subagents, name
+        actual_tools = {tool.name for tool in subagents[name]["tools"]}
+        assert actual_tools == expected_tools, name
+        assert "list_available_resume_pdfs" not in actual_tools, name
+        # A prompt may only reference tools its own subagent holds — drift
+        # here once produced an empty-tool and an unusable-verification subagent.
+        referenced = set(
+            re.findall(r"`([a-z_]+)`", str(subagents[name]["system_prompt"]))
+        )
+        assert referenced <= actual_tools, f"{name} prompt references unheld tools"
+    # Every platform write tool is HITL-gated inside its owning subagent.
+    assert "boss_greet_jobs" in subagents["boss_greeting"]["interrupt_on"]
+    assert {
+        "reply_boss_greeting",
+        "send_boss_resume_after_hr_reply",
+        "upload_boss_resume_pdf",
+    } == set(subagents["boss_engagement"]["interrupt_on"])
+    # Read-only subagents carry no HITL gates.
+    assert not subagents["boss_discovery"].get("interrupt_on")
+    assert not subagents["boss_verification"].get("interrupt_on")
+    # The two outbound-facing prompts share the frozen channel-facts block.
+    engagement_prompt = str(subagents["boss_engagement"]["system_prompt"])
+    greeting_prompt = str(subagents["boss_greeting"]["system_prompt"])
+    assert "渠道事实（实测 2026-09-19）" in engagement_prompt
+    assert "渠道事实（实测 2026-09-19）" in greeting_prompt
+    # First-round P0 vector guard: every platform write tool must end up
+    # HITL-gated in whichever subagent holds it. A write tool name missing
+    # from _HITL_TOOLS would be silently dropped by _boss_interrupts and every
+    # assertion above would stay green.
+    gated_union = set().union(
+        *(spec.get("interrupt_on", {}) for spec in subagents.values())
+    )
+    assert _PLATFORM_WRITE_TOOL_NAMES <= gated_union
     xhs_names = {tool.name for tool in subagents["xhs_recruiting"]["tools"]}
     assert xhs_names >= {
         "send_recruitment_email",
@@ -156,20 +207,17 @@ async def test_default_agent_exposes_platform_tools_only_to_their_subagents(tmp_
         "select_recruitment_position",
     }
     assert "list_available_resume_pdfs" in xhs_names
-    boss_names = {tool.name for tool in subagents["boss_recruiting"]["tools"]}
-    assert "list_available_resume_pdfs" not in boss_names
     assert {"list_skills", "read_skill"} <= xhs_names
     assert "install_skill" not in xhs_names
     assert "register_resume_pdf" not in xhs_names
     assert "list_available_resume_pdfs" not in root_names
     assert "register_resume_pdf" in root_names
     assert {"list_skills", "read_skill", "install_skill"} <= root_names
-    assert "boss_greet_jobs" in subagents["boss_recruiting"]["interrupt_on"]
     assert "send_recruitment_email" in subagents["xhs_recruiting"]["interrupt_on"]
     xhs_prompt = str(subagents["xhs_recruiting"]["system_prompt"])
     assert "<xhs_recruitment_skill>" in xhs_prompt
     assert "read_skill 读取最新内容" in xhs_prompt
     assert "失败恢复表" in xhs_prompt
     assert "already_submitted" in xhs_prompt
-    boss_prompt = str(subagents["boss_recruiting"]["system_prompt"])
+    boss_prompt = engagement_prompt
     assert "不得查询、导入或使用本地 PDF 简历库" in boss_prompt

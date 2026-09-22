@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class BossChatReplyRequest(BaseModel):
     """Send one chat reply to a Boss HR (approved via HITL middleware)."""
 
-    hr_name: str = Field(description="HR 姓名（须与 list_boss_greetings 返回的 name 一致）。")
+    hr_name: str = Field(description="HR 姓名（来自任务描述，或与 read_boss_conversation 读到的 HR 名一致）。")
     message: str = Field(
         description="要发送的回复全文。",
         max_length=500,
@@ -59,7 +59,7 @@ def build_boss_chat_reply_tool(settings: Settings) -> StructuredTool:
         name="reply_boss_greeting",
         description=(
             "回复 Boss 直聘聊天：向指定 HR 发送一条文字消息（执行前暂停等待人工批准。）"
-            "hr_name 用 list_boss_greetings 查到的 name。消息必须以求职者本人第一人称书写；"
+            "hr_name 来自任务描述或 read_boss_conversation 读到的 HR 名。消息必须以求职者本人第一人称书写；"
             "含测试/请忽略话术或暴露 AI/自动化身份的文本会被出站护栏拒发。"
         ),
         args_schema=BossChatReplyRequest,

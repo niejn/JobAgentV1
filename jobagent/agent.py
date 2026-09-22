@@ -263,30 +263,6 @@ _ROOT_HITL_TOOLS = {
     if name not in _PLATFORM_WRITE_TOOL_NAMES
 }
 
-_BOSS_SUBAGENT_PROMPT = """你是 Boss 直聘招聘渠道专家，只使用已提供的 Boss 工具。
-你不访问小红书、SMTP 或其他渠道。先读取并核对岗位、HR 与会话；外发招呼、回复或简历时，
-调用对应 Boss 写工具。写工具会自动暂停，等待用户在根 JobAgent 界面批准；绝不绕过批准。
-Boss 简历只能在 HR 已回复后调用 `prepare_boss_resume_after_hr_reply`，从 Boss 平台返回的在线/附件
-简历选项中由用户选择；不得查询、导入或使用本地 PDF 简历库。
-一次任务最多准备和执行一项外发动作。工具返回回执后，如实报告 confirmed、unverified、failed
-或 blocked，并关联用户提供的 Journey。
-
-身份铁律：所有外发文本一律以求职者本人第一人称书写（你就是用户本人）。绝不暴露或暗示
-AI/助手/机器人/自动化身份，绝不出现"链路测试""测试消息""请忽略"类话术；此类文本会被
-出站护栏拒发（refused + 违规原因）。收到 refused 时以用户本人身份重写再发，不要原样重试。
-
-渠道事实（实测 2026-09-19）：Boss 的 WS/MQTT 回执经常丢失、连接中途关闭是常态，这不代表
-发送失败——消息几乎总会送达，但要在会话历史里约 6 秒后才可见。工具返回 unverified 只表示
-"回执缺失"，大概率已送达：批量结束后工具会用只读历史自动二次核验，并把核验成功的条目改判
-为 submitted（reason=history_confirmed_after_batch）。仍有 unverified 时，用 read_boss_conversation
-只读核验后再下结论；绝不因 unverified 直接重发（会造成重复消息）。需要补发正式文案时，先读
-历史确认对方已收到什么，再决定下一条消息。
-历史会话里已有的岗位不再打招呼：工具按聊天记录与登记册自动跳过（already_contacted /
-already_greeted_in_history / already_contacted_same_hr），收到这些回执就是无需发送，如实向
-用户说明即可，不要换文案对同一个 HR 重试。
-简历投递只走 prepare/send 两个工具：发送的是 Boss 平台内简历（在线或账户附件），不需要
-也不得上传本地文件；预检凭证 10 分钟过期时 send 工具会自动重新预检并继续，绝不把
-prepare+send 写进脚本或用 execute 调内部服务绕过审批。"""
 
 _XHS_SUBAGENT_PROMPT = """你是小红书招聘线索与邮件投递渠道专家，只使用已提供的小红书和邮件工具。
 你不访问 Boss，也不继承主对话历史：task 任务描述是你唯一的上下文来源。任务描述应携带帖子
@@ -309,6 +285,69 @@ _RESUME_CRAFTING_PROMPT = """你是定制简历制作专家。你不访问 Boss�
 绝不补造项目、指标、头衔或职责。先输出与 JD 要求逐条对应的事实来源，再生成 Markdown 简历草稿，
 并调用 save_tailored_resume 保存。只有用户在后续消息明确确认后，才调用 confirm_tailored_resume。
 确认前的任何版本都不得说成可投递。"""
+# Boss channel split (2026-09-22): the single boss_recruiting subagent was
+# decomposed into phase-scoped subagents (discovery / greeting / engagement /
+# verification). The hard-won channel facts live in ONE constant injected into
+# every outbound-facing prompt so the three cannot drift apart; each prompt may
+# only reference tools its own subagent actually holds.
+_BOSS_CHANNEL_FACTS = """渠道事实（实测 2026-09-19）：
+- Boss 的 WS/MQTT 回执经常丢失：unverified 只表示"回执缺失"，消息几乎总会送达，但要
+  在会话历史里约 6 秒后才可见。绝不因 unverified 直接重发（会造成重复消息），如实
+  报告回执状态。
+- 身份铁律：外发文本一律以求职者本人第一人称书写（你就是用户本人）。绝不暴露或暗示
+  AI/助手/机器人/自动化身份，绝不出现"链路测试""测试消息""请忽略"类话术；此类文本
+  会被出站护栏拒发（refused + 违规原因），收到 refused 时以用户本人身份重写再发，
+  不要原样重试。
+- 写工具会自动暂停等待用户在根 JobAgent 界面批准，绝不绕过批准。"""
+
+_BOSS_DISCOVERY_PROMPT = """你是 Boss 直聘岗位发现专家，只使用 `discover_boss_jobs`，
+不发送任何消息、不投递简历。按任务描述中的 query、city 与可选过滤条件搜索；工具会按
+聊天记录与登记册自动跳过已联系岗位，收到 already_contacted /
+already_contacted_same_hr 属于正常去重，如实转述即可。返回 Job ID 列表与摘要（公司、
+岗位、城市、薪资）。缺少 query 或 city 时返回 blocked 并列出缺失字段，绝不臆造参数。"""
+
+_BOSS_GREETING_PROMPT = """你是 Boss 直聘打招呼专家，只使用 `boss_greet_jobs` 和
+`list_boss_greetings`。批量发送结束后工具会用只读历史自动二次核验，把核验成功的条目
+改判为 submitted（reason=history_confirmed_after_batch）；仍返回 unverified 时如实报告
+并在结果中注明"待核验"，由主 Agent 委派 boss_verification 读取历史确认，本子 Agent
+不持有会话读取工具。历史会话里已联系过的岗位由工具自动跳过（already_contacted /
+already_greeted_in_history / already_contacted_same_hr）：这些回执就是无需发送，如实
+向用户说明，不要换文案对同一个 HR 重试。
+
+""" + _BOSS_CHANNEL_FACTS
+
+# Phase-scoped merge (2026-09-22): conversation + resume_delivery were one
+# round-trip apart in the common flow (send -> unverified -> verify needs the
+# conversation reader the delivery agent lacked). boss_engagement owns the
+# whole post-HR-reply phase so the verify loop completes inside one task.
+_BOSS_ENGAGEMENT_PROMPT = """你是 Boss 直聘 HR 互动专家（HR 已回复阶段），只使用
+`read_boss_conversation`、`reply_boss_greeting`、`prepare_boss_resume_after_hr_reply`、
+`send_boss_resume_after_hr_reply` 和 `upload_boss_resume_pdf`。一次任务最多准备和执行
+一项外发动作（一条回复或一次投递）。
+读会话：读取指定会话完整历史并如实转述，重要结论附原文引句，绝不臆测 HR 意图。
+回复：只有用户明确要求回复时才调用 `reply_boss_greeting`，且先读历史确认对方已收到
+什么、下一条消息该衔接什么。
+简历：先读会话确认 HR 确实已回复，再调用 prepare（从 Boss 平台返回的在线/附件简历
+选项中让用户选择），用户选定后调用 send 投递。绝不提前 prepare、绝不把 prepare+send
+合并执行、绝不写脚本或用 execute 调内部服务绕过审批。预检凭证 10 分钟过期时 send
+会自动重新预检并继续，无需手动重跑 prepare；重新预检后原选项不可发送
+（delivery_expired_options_changed）时，把新选项交回用户重选。send 返回 unverified 时
+重读历史核验（消息约 6 秒后才可见，勿过早下结论），确认后如实报告并关联 Journey，
+绝不直接重发。
+`upload_boss_resume_pdf` 仅在用户明确要求更新 Boss 账户附件简历时使用；Boss 简历投递
+本身只走 prepare/send（发送 Boss 平台内简历），不得查询、导入或使用本地 PDF 简历库。
+账户最多保留三份附件，allow_delete 只有在用户同意删除最旧附件时才可为 true。
+
+""" + _BOSS_CHANNEL_FACTS
+
+_BOSS_VERIFICATION_PROMPT = """你是 Boss 直聘送达核验与进度专家，只使用
+`read_boss_conversation`、`confirm_greeting_delivered`、`get_job_progress` 和
+`list_job_records`。招呼或简历投递报告 unverified 时，先读取对应会话历史核验是否真的
+送达（消息约 6 秒后才可见，勿过早下结论）；确认已送达但登记册仍是 discovered 时，
+调用 `confirm_greeting_delivered` 幂等补登记（附核验所用的 HR 名与原文片段）。
+查单个岗位完整状态历史用 `get_job_progress`，按状态/公司筛选用 `list_job_records`。
+核验结论必须引用历史原文，绝不臆测；除幂等补登记外不修改任何数据，绝不发送消息。"""
+
 
 
 def _load_subagent_skill(skill_manager: SkillManager, name: str) -> str | None:
@@ -1777,23 +1816,86 @@ def build_job_agent(
                 BossSessionPreflightMiddleware,
             )
 
+            # One shared preflight: a single TTL credential cache covers every
+            # Boss subagent instead of re-checking cookies per delegation.
+            boss_preflight = BossSessionPreflight(settings)
+
+            def _boss_tools(names: frozenset[str]) -> list[BaseTool]:
+                return [t for t in boss_tools if t.name in names]
+
+            def _boss_interrupts(names: frozenset[str]) -> dict[str, dict[str, Any]]:
+                return _interrupt_on_config(
+                    {n: why for n, why in _HITL_TOOLS.items() if n in names}
+                )
+
             platform_subagents.append(
                 {
-                    "name": "boss_recruiting",
-                    "description": "处理 Boss 直聘岗位、HR 会话、打招呼、回复和简历发送。",
-                    "system_prompt": _BOSS_SUBAGENT_PROMPT,
+                    "name": "boss_discovery",
+                    "description": "Boss 直聘岗位发现与去重入库（只读搜索）",
+                    "system_prompt": _BOSS_DISCOVERY_PROMPT,
                     "model": effective_model,
-                    "tools": boss_tools,
-                    "middleware": [
-                        BossSessionPreflightMiddleware(BossSessionPreflight(settings))
-                    ],
-                    "interrupt_on": _interrupt_on_config(
+                    "tools": _boss_tools({"discover_boss_jobs"}),
+                    "middleware": [BossSessionPreflightMiddleware(boss_preflight)],
+                }
+            )
+            platform_subagents.append(
+                {
+                    "name": "boss_greeting",
+                    "description": "Boss 打招呼发送与已打招呼会话列表（发送需 HITL）",
+                    "system_prompt": _BOSS_GREETING_PROMPT,
+                    "model": effective_model,
+                    "tools": _boss_tools({"boss_greet_jobs", "list_boss_greetings"}),
+                    "middleware": [BossSessionPreflightMiddleware(boss_preflight)],
+                    "interrupt_on": _boss_interrupts({"boss_greet_jobs"}),
+                }
+            )
+            platform_subagents.append(
+                {
+                    "name": "boss_engagement",
+                    "description": "HR 已回复阶段：读会话/回复 HR/准备并投递简历（回复与投递需 HITL）",
+                    "system_prompt": _BOSS_ENGAGEMENT_PROMPT,
+                    "model": effective_model,
+                    "tools": _boss_tools(
                         {
-                            name: description
-                            for name, description in _HITL_TOOLS.items()
-                            if name in _BOSS_TOOL_NAMES
+                            "read_boss_conversation",
+                            "reply_boss_greeting",
+                            "prepare_boss_resume_after_hr_reply",
+                            "send_boss_resume_after_hr_reply",
+                            "upload_boss_resume_pdf",
                         }
                     ),
+                    "middleware": [BossSessionPreflightMiddleware(boss_preflight)],
+                    "interrupt_on": _boss_interrupts(
+                        {
+                            "reply_boss_greeting",
+                            "send_boss_resume_after_hr_reply",
+                            "upload_boss_resume_pdf",
+                        }
+                    ),
+                }
+            )
+            platform_subagents.append(
+                {
+                    "name": "boss_verification",
+                    "description": "送达核验、进度查询与幂等补登记（只读核验）",
+                    "system_prompt": _BOSS_VERIFICATION_PROMPT,
+                    "model": effective_model,
+                    # read_boss_conversation mirrors boss_engagement (read-only,
+                    # same pattern as _XHS_SHARED_TOOL_NAMES). The state tools
+                    # are NOT in _BOSS_TOOL_NAMES, so source them from the
+                    # pre-filter snapshot; the root agent keeps them too.
+                    "tools": _boss_tools({"read_boss_conversation"})
+                    + [
+                        t
+                        for t in all_registered_tools
+                        if t.name
+                        in {
+                            "confirm_greeting_delivered",
+                            "get_job_progress",
+                            "list_job_records",
+                        }
+                    ],
+                    "middleware": [BossSessionPreflightMiddleware(boss_preflight)],
                 }
             )
         if xhs_tools:
@@ -1863,16 +1965,49 @@ def build_job_agent(
         system_prompt += """
 
 <platform_subagent_policy>
-Boss 与小红书/邮件渠道由原生 `task` Tool 调用专属 Subagent：`boss_recruiting` 或
-`xhs_recruiting`；定制简历由 `resume_crafting` 处理。Subagent 不继承本对话历史，
-task 的任务描述必须自包含：写明帖子 URL 或
-note_id、已确认的公司/岗位、Journey ID。XHS 邮件附件先由 XHS 子 Agent 用
-`list_available_resume_pdfs` 核对；Boss 简历只在 HR 回复后由 Boss 平台预检工具列出。邮件任务
-还须携带用户已逐字确认的主题/正文；有本地分析结论时一并附上让子代理复用。当任务
-可能外发消息、简历或邮件时，一次只调用一个 task，必须等待该任务完成并返回回执后才能派发
-下一个。不要尝试调用未注册的渠道原始 Tool，也不要并行派发 task。
+Boss 渠道由原生 `task` Tool 调用单一职责 Subagent，按阶段路由：
+- 找岗位/搜索新机会 → `boss_discovery`（只读搜索与去重）
+- 发打招呼/列已打招呼会话 → `boss_greeting`
+- HR 已回复阶段的读会话/回复/简历投递 → `boss_engagement`
+- 送达核验/进度查询/幂等补登记 → `boss_verification`
+小红书/邮件渠道 → `xhs_recruiting`；定制简历 → `resume_crafting`。
+Subagent 不继承本对话历史，task 的任务描述必须自包含：写明岗位/会话的 Job ID 或
+conversation 标识、已确认的公司/岗位、Journey ID 与必要参数（query、city、目标消息
+意图）；XHS 邮件任务写明帖子 URL 或 note_id、用户已逐字确认的主题/正文，附件先由
+XHS 子 Agent 用 `list_available_resume_pdfs` 核对；Boss 简历只在 HR 回复后由 Boss
+平台预检工具列出。有本地分析结论时一并附上让子代理复用。
+当任务可能外发消息、简历或邮件时，一次只调用一个 task，必须等待该任务完成并返回
+回执后才能派发下一个。`boss_engagement` 自持会话读取工具，投递 unverified 的收尾核验
+在同一个 task 内完成；`boss_greeting` 返回的 unverified 才委派 `boss_verification`
+读历史核验，绝不让发送方子代理自行重发。不要尝试调用未注册的渠道原始 Tool，不要用
+`execute` + `write_file` 绕过 Subagent，也不要并行派发 task。
 </platform_subagent_policy>
 """
+        # builder.py gates <greeting_policy> on the root agent holding
+        # boss_greet_jobs; in delegation mode the tool lives in boss_greeting,
+        # so re-attach the SAME policy text (single source in main_agent.py)
+        # with a delegation preamble — but only when the greet tool itself
+        # registered, mirroring the builder gate (a degraded greet builder
+        # must keep the policy absent).  Both paths are mutually exclusive:
+        # default bundle filters the tool out of root; a custom tools= bundle
+        # builds no platform subagents.
+        greeting_spec = next(
+            (s for s in platform_subagents if s["name"] == "boss_greeting"), None
+        )
+        if greeting_spec and any(
+            t.name == "boss_greet_jobs" for t in greeting_spec["tools"]
+        ):
+            from jobagent.prompts.main_agent import GREETING_POLICY
+            system_prompt += (
+                "\n<greeting_policy_delegated>\n"
+                "以下招呼起草规则在委派模式下由你（主 Agent）承担起草侧：按规则定制招呼语并"
+                "连同岗位展示给用户，用户同意后把定稿文本写入 task（boss_greeting）的任务"
+                "描述再委派；执行前的物理审批由子 Agent 的 HITL 暂停承担。文中"
+                "\"调用 boss_greet_jobs\"即指上述委派动作，\"greeting 字段\"即任务描述中的"
+                "定稿文本。\n"
+                + GREETING_POLICY
+                + "\n</greeting_policy_delegated>\n"
+            )
     if "register_resume_pdf" in {
         tool.name for tool in registered_tools
     }:

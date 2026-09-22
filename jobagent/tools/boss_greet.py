@@ -636,11 +636,14 @@ def build_boss_greet_jobs_tool(manager: BossGreetingsManager) -> BaseTool:
             "shows a conversation for that job), and an HR we already talked "
             "to under another job is skipped with already_contacted_same_hr "
             "instead of re-sending. "
-            "still deliver — unverified means 'no receipt', usually delivered; "
+            "Receipts can drop while messages still deliver — unverified "
+            "means 'no receipt', usually delivered; "
             "the batch re-verifies via read-only history at the end and flips "
             "confirmed entries to submitted (reason=history_confirmed_after_batch). "
-            "Never re-send on unverified; confirm with read_boss_conversation. "
-            "Call update_job_application_state after to track the result."
+            "Never re-send on unverified; report such entries as pending "
+            "verification in the task result — the root agent routes history "
+            "verification to boss_verification and records application state "
+            "itself. Do not call tools you do not hold."
         ),
         args_schema=BossGreetJobsRequest,
     )
