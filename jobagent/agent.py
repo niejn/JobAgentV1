@@ -538,7 +538,7 @@ class JobAgent:
         # 每次调用的最大超步数；不传时回退 LangGraph 默认 25（仅约 6-12 轮工具循环）。
         # 超限时不裸抛 GraphRecursionError，而是无工具再调一次模型做总结收尾
         # （见 _graceful_budget_exhaustion，对应 Hermes _budget_grace_call）。
-        recursion_limit: int = 90,
+        recursion_limit: int = 160,
         opportunity_artifacts: LocalOpportunityArtifacts | None = None,
         filesystem_root: Path | None = None,
         skill_manager: SkillManager | None = None,
@@ -999,7 +999,7 @@ class JobAgent:
                         "（例如换个更小的任务或分步进行）。</budget_exhaustion_policy>"
                     )
                 ),
-                *messages,
+                *_bounded_message_tail(messages),
             ]
             closing_model = self._model.bind(max_tokens=4096, temperature=0.0)
             async with asyncio.timeout(60):
@@ -1260,6 +1260,39 @@ def _visible_text(message: Any) -> str:
         )
     content = getattr(message, "content", None)
     return content if isinstance(content, str) else ""
+
+
+def _bounded_message_tail(
+    messages: Sequence[BaseMessage], *, max_chars: int = 60_000
+) -> list[BaseMessage]:
+    """Keep the most recent messages within a character budget.
+
+    Budget-exhaustion closing calls otherwise replay the whole checkpoint
+    transcript (every tool output of a 160-superstep turn); the giant context
+    regularly blew the 60s summary timeout and users only ever saw the
+    fallback line (field report 2026-09-22).
+    """
+
+    kept: list[BaseMessage] = []
+    total = 0
+    for message in reversed(messages):
+        size = len(str(getattr(message, "content", "") or ""))
+        if kept and total + size > max_chars:
+            break
+        kept.append(message)
+        total += size
+        if total >= max_chars:
+            break
+    # A cut boundary can leave the tail starting with an orphan ToolMessage
+    # whose paired AIMessage(tool_calls) was truncated away; OpenAI-compatible
+    # APIs reject that shape with a 400 (review round 2026-09-22), which would
+    # push the closing summary back onto the fallback path.
+    while kept and isinstance(kept[-1], ToolMessage):
+        kept.pop()
+    if not kept:
+        return []
+    kept.reverse()
+    return kept
 
 
 def _reasoning_delta(message: Any) -> str:

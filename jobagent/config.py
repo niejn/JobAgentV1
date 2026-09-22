@@ -310,11 +310,12 @@ class Settings(BaseSettings):
     # 运行预算：deep_agent 每次调用的最大超步数（supersteps）。
     # LangGraph 的隐式默认是 25 —— 约仅 6-12 轮“模型→工具→模型”循环，复合任务
     # （连续调研+对比+写工件）会中途裸崩 GraphRecursionError。
-    # 换算参考：deepagents 一轮工具循环 ≈ 2-4 超步，90 超步 ≈ 22-45 轮，
-    # 已覆盖绝大多数任务（Hermes 的 90 轮模型调用 ≈ 200+ 超步，无需对齐）。
+    # 换算参考：deepagents 一轮工具循环 ≈ 2-4 超步，160 超步 ≈ 40-80 轮，
+    # 覆盖复合任务并留一倍余量（2026-09-22 实测 90 在 OCR JD→分析→找岗
+    # 链路上撞顶；500 超步≈125-250 轮会让单轮跑数百次模型调用，仅作硬顶）。
     # 超限时的收尾行为见 JobAgent.reply_stream 的 GraphRecursionError 分支
-    # （无工具纯总结，对应 Hermes _budget_grace_call 思路）。
-    jobagent_recursion_limit: int = Field(default=90, ge=1, le=500)
+    # （无工具纯总结 + 截断历史，对应 Hermes _budget_grace_call 思路）。
+    jobagent_recursion_limit: int = Field(default=160, ge=1, le=500)
 
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None

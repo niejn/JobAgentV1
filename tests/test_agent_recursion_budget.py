@@ -77,11 +77,16 @@ def _make_agent(
 
 
 @pytest.mark.asyncio
-async def test_settings_default_recursion_limit_is_90() -> None:
-    """The implicit LangGraph default (25) is replaced by an explicit 90."""
+async def test_settings_default_recursion_limit_is_160() -> None:
+    """The implicit LangGraph default (25) is replaced by an explicit 160.
+
+    90 was field-exhausted by the OCR-JD → analysis → discovery compound flow
+    (2026-09-22); 160 ≈ 40-80 tool-loop rounds keeps double headroom while
+    500 stays the hard cap (see config.py comment).
+    """
 
     settings = Settings(_env_file=None)
-    assert settings.jobagent_recursion_limit == 90
+    assert settings.jobagent_recursion_limit == 160
 
 
 @pytest.mark.asyncio
@@ -205,3 +210,27 @@ async def test_budget_exhaustion_summary_failure_falls_back(tmp_path: Any) -> No
     tokens = [event.text for event in events if event.kind == "token"]
     fallback = [text for text in tokens if "最大运行步数" in text]
     assert fallback, "expected bounded fallback message, got: " + repr(tokens)
+
+
+def test_bounded_message_tail_keeps_recent_messages_within_budget() -> None:
+    """The closing summary replays a bounded tail, not the full transcript.
+
+    A 160-superstep turn accumulates giant tool outputs; unbounded replay blew
+    the 60s summary timeout and users only saw the fallback line.
+    """
+
+    from langchain_core.messages import HumanMessage, ToolMessage
+
+    from jobagent.agent import _bounded_message_tail
+
+    big = ToolMessage(content="x" * 40_000, name="discover_boss_jobs", tool_call_id="t1")
+    recent = [HumanMessage(content="最新问题"), HumanMessage(content="最新补充")]
+    messages = [HumanMessage(content="早期内容"), big, *recent]
+    tail = _bounded_message_tail(messages, max_chars=50_000)
+
+    assert tail[-2:] == recent, "most recent messages must survive"
+    assert sum(len(str(m.content)) for m in tail) <= 50_000
+    from langchain_core.messages import ToolMessage as _TM
+
+    assert not isinstance(tail[0], _TM), "orphan ToolMessage must be stripped"
+    assert _bounded_message_tail([big], max_chars=10) == [], "only-tool transcript degrades to empty tail"
