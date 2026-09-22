@@ -211,7 +211,8 @@ jobagent chat --config profiles/agent.yaml --session-id <会话 ID>
 jobagent chat --sessions
 ```
 
-聊天内命令：`/status` 查看岗位进度看板，`/sessions` 列出并切换会话，`/exit` 退出。
+聊天内命令：`/status` 查看岗位进度看板，`/sessions` 列出并切换会话，`/exit` 退出。终端支持
+多行粘贴（bracketed paste）：粘贴的换行不会提前提交，回车发送，`Ctrl+Enter` 手动换行（`Esc+Enter` 亦可）。
 
 ### `jobagent login` — 登录平台
 
@@ -295,7 +296,41 @@ jobagent run --platform boss --profile profiles/me.yaml --query "大模型工程
 > Claude OAuth/Anthropic 不属于第一版模型通道，后续在完成 Agent tool-call 适配后再接入。
 
 小红书限流由 `pyrate-limiter` 提供，当前使用进程内存桶，不依赖 Redis。搜索、详情、作者帖子
-和初始化走 API 桶；帖子图片逐张取得媒体桶许可。以后多实例部署时可沿用同一适配接口换成
+和初始化走 API 桶；帖子图片逐张取得媒体桶许可。
+以后多实例部署时可沿用同一适配接口换成
+Redis/PostgreSQL 桶，无需把固定 `sleep` 散落到研究工作流中。
+
+### `omp-volcengine-switch` — OMP 火山方舟 Plan 快速切换
+
+如果你在使用 **Oh My Pi (OMP)** 时需要在 **Volcengine 火山方舟 Coding Plan** 与 **Agent Plan**
+之间切换，这个 Skill 提供一键服务，并自动备份配置，防止误改 API Key。
+
+**路径：** `skills/omp-volcengine-switch/`
+
+**功能：**
+- 切换到 Coding Plan：`https://ark.cn-beijing.volces.com/api/coding/v3`
+- 切换到 Agent Plan：`https://ark.cn-beijing.volces.com/api/agent/v3`
+- 自动备份 `.env` 为 `.env.bak.<timestamp>`
+- 脱敏 Key 显示（只显示前 4 位 + 后 2 位）
+
+**快速使用：**
+
+```powershell
+# 交互式切换（询问 Plan + Key）
+.\skills\omp-volcengine-switch\scripts\switch-volcengine-plan.ps1
+# 直接切换 Coding Plan（交互式输入 Key）
+.\skills\omp-volcengine-switch\scripts\switch-volcengine-plan.ps1 -Target coding
+# 直接切换 Agent Plan（直接传 Key，适合脚本化）
+.\skills\omp-volcengine-switch\scripts\switch-volcengine-plan.ps1 -Target agent -Key sk-sp-...
+```
+
+**核心注意：** Coding Plan Key 与 Agent Plan Key 是**不同套餐的专用 Key**，不可混用。
+混用必报 `401 The API key format is incorrect`（你之前遇到的错误就是这个原因）。
+切换后必重启 OMP，确认 `.env` 中的 `OPENAI_BASE_URL` 和 `OPENAI_API_KEY` 对应正确 Plan。
+
+**关键修正引用：** 本项目 `.env.example` 第 35 行原写 `https://ark.cn-beijing.volces.com/api/plan/v3`
+(错误路径)，正确 Coding Plan 地址应为 `/api/coding/v3`。该 Skill 已内置正确 URL。
+
 Redis/PostgreSQL 桶，无需把固定 `sleep` 散落到研究工作流中。
 
 ### `profiles/search.yaml` 求职画像

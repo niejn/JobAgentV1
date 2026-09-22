@@ -696,8 +696,12 @@ def _make_chat_prompt_session(
     """Build the multi-line chat input session (prompt_toolkit).
 
     Bracketed paste inserts newlines into the buffer instead of submitting,
-    so pasted multi-line text only sends on Enter; Esc+Enter types a manual
-    line break. Mirrors omp/pi terminal input behavior.
+    so pasted multi-line text only sends on Enter; Ctrl+Enter types a manual
+    line break (prompt_toolkit's win32 input maps Control-Enter to the
+    Escape+Enter sequence, which is what the binding below matches — plain
+    Esc then Enter also works). Shift+Enter is NOT bindable: terminals send a
+    bare carriage return for it and prompt_toolkit has no such key.
+    Mirrors omp/pi terminal input behavior.
 
     ``input``/``output`` are test seams (tests/test_cli_chat_input.py);
     production callers leave them as prompt_toolkit defaults.
@@ -764,7 +768,7 @@ async def _chat(
         input_session = _build_chat_prompt_session()
         if input_session is not None:
             click.echo(
-                "JobAgent · 支持多行粘贴：粘贴的换行不会提前提交；回车发送，Esc+Enter 手动换行。"
+                "JobAgent · 支持多行粘贴：粘贴的换行不会提前提交；回车发送，Ctrl+Enter 手动换行（Esc+Enter 亦可）。"
             )
         while True:
             try:
