@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 import traceback
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Coroutine, Sequence
 from contextlib import AsyncExitStack
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
 import click
@@ -38,6 +39,10 @@ from jobagent.scraper.base import BaseScraper
 from jobagent.scraper.linkedin import LinkedInScraper
 from jobagent.scraper.xhs_backend import SpiderXhsBackend
 from jobagent.scraper.xhs_discovery import XhsDiscoveryRequest, discover_xhs_notes
+
+if TYPE_CHECKING:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.key_binding import KeyPressEvent
 
 logger = logging.getLogger(__name__)
 
@@ -93,15 +98,12 @@ def boss_reply_command(limit: int) -> None:
     for index, item in enumerate(items, 1):
         risk = str(item["risk_level"] or "high").lower()
         click.echo(
-            f"\n[{index}/{len(items)}] {item['company']} / "
-            f"{item['title']} / HR {item['hr_name']}"
+            f"\n[{index}/{len(items)}] {item['company']} / {item['title']} / HR {item['hr_name']}"
         )
         click.echo(f"风险：{risk} · {item['intent']} · 置信度 {float(item['confidence']):.2f}")
         click.echo(f"HR：{item['hr_message']}")
         click.echo(f"草稿：{item['draft_text']}")
-        action = click.prompt(
-            "操作 (a=批准, e=编辑, s=跳过, q=退出)", default="a"
-        ).strip().lower()
+        action = click.prompt("操作 (a=批准, e=编辑, s=跳过, q=退出)", default="a").strip().lower()
         if action == "q":
             break
         if action == "e":
@@ -157,7 +159,7 @@ async def _run_boss_daemon(*, run_once: bool, interval: float) -> None:
     daemon = BossConversationDaemon(
         LiveBossConversationAdapter(settings),
         BossMonitorStore(settings.jobagent_state_db),
-        poll_interval_seconds=interval,
+        poll_interval=interval,
         event_sink=BossReplyApplicationService(settings.jobagent_state_db),
     )
     if run_once:
@@ -287,15 +289,13 @@ def login_command(platform: str, timeout: int, check: bool) -> None:
         asyncio.run(_boss_cdp_login(check_only=check, timeout_minutes=timeout))
         return
     if platform not in valid:
-        raise click.UsageError(
-            f"无效平台 '{platform}'，可选: xhs, linkedin, wechat, all"
-        )
+        raise click.UsageError(f"无效平台 '{platform}'，可选: xhs, linkedin, wechat, all")
     if platform == "wechat":
         asyncio.run(_wechat_login(check_only=check, timeout_minutes=timeout))
         return
-    platforms = [
-        p for p in PLATFORM_CONFIG.keys() if p != "boss"
-    ] if platform == "all" else [platform]
+    platforms = (
+        [p for p in PLATFORM_CONFIG.keys() if p != "boss"] if platform == "all" else [platform]
+    )
     asyncio.run(_login(platforms=platforms, timeout=timeout, check_only=check))
 
 
@@ -331,11 +331,7 @@ async def _boss_cdp_login(*, check_only: bool, timeout_minutes: int) -> None:
             click.echo("[boss] 调试 Chrome 没有可用浏览器上下文。")
             return
         page = next(
-            (
-                item
-                for item in context.pages
-                if "zhipin.com" in str(item.url or "")
-            ),
+            (item for item in context.pages if "zhipin.com" in str(item.url or "")),
             None,
         )
         if page is None:
@@ -352,9 +348,7 @@ async def _boss_cdp_login(*, check_only: bool, timeout_minutes: int) -> None:
             click.echo(
                 "[boss] 请在已打开的调试 Chrome 中手动完成 Boss 登录；登录完成后保持页面打开。"
             )
-        deadline = asyncio.get_event_loop().time() + (
-            1 if check_only else timeout_minutes * 60
-        )
+        deadline = asyncio.get_event_loop().time() + (1 if check_only else timeout_minutes * 60)
         while asyncio.get_event_loop().time() < deadline:
             try:
                 logged_in = await page.evaluate(
@@ -424,9 +418,7 @@ async def _wechat_login(*, check_only: bool, timeout_minutes: int) -> None:
         except Exception as exc:  # noqa: BLE001 - diagnostics must not crash
             click.echo(f"JobAgent · 微信 Bot 状态检查失败：{exc}")
         else:
-            click.echo(
-                f"JobAgent · 微信 Bot 登录有效（bot_id={account.bot_id or 'N/A'}）。"
-            )
+            click.echo(f"JobAgent · 微信 Bot 登录有效（bot_id={account.bot_id or 'N/A'}）。")
         return
 
     click.echo("JobAgent · 微信 Bot 扫码登录（iLink 官方 API，无封号风险）")
@@ -515,16 +507,14 @@ async def _watch(channels: tuple[str, ...]) -> None:
     settings = get_settings()
     service = BossReplyApplicationService(settings.jobagent_state_db)
     wechat_channels: list[WeChatChannel] = []
-    coroutines: list[object] = []
+    coroutines: list[Coroutine[Any, Any, Any]] = []
     boss_daemon = None
     boss_worker = None
     boss_queue = None
     if "wechat" in channels:
         account = WeixinAccountStore().load()
         if account is None:
-            click.echo(
-                "JobAgent · 微信 Bot 未登录；先运行 jobagent login --platform wechat。"
-            )
+            click.echo("JobAgent · 微信 Bot 未登录；先运行 jobagent login --platform wechat。")
         else:
             channel = WeChatChannel(
                 account=account,
@@ -554,9 +544,7 @@ async def _watch(channels: tuple[str, ...]) -> None:
             a system-sent draft → user is chatting manually → cooldown."""
             import sqlite3
 
-            conn = sqlite3.connect(
-                settings.jobagent_state_db.expanduser().resolve()
-            )
+            conn = sqlite3.connect(settings.jobagent_state_db.expanduser().resolve())
             try:
                 row = conn.execute(
                     """SELECT 1 FROM boss_reply_queue
@@ -576,7 +564,6 @@ async def _watch(channels: tuple[str, ...]) -> None:
                 "manual takeover detected for friend_id=%s; auto-reply cooled down",
                 friend_id,
             )
-
 
         boss_daemon = BossConversationDaemon(
             LiveBossConversationAdapter(
@@ -620,18 +607,14 @@ async def _watch(channels: tuple[str, ...]) -> None:
                     except Exception:  # noqa: BLE001 - digest must not kill watch
                         import logging
 
-                        logging.getLogger(__name__).warning(
-                            "daily digest failed", exc_info=True
-                        )
+                        logging.getLogger(__name__).warning("daily digest failed", exc_info=True)
                 await asyncio.sleep(60)
 
         coroutines.extend((boss_daemon.run(), boss_worker.run(), _run_hr_reply_pipeline()))
     if not coroutines:
         click.echo("JobAgent · 没有可运行的通道。")
         return
-    click.echo(
-        f"JobAgent · HR Gateway 已启动（通道: {', '.join(channels)}），Ctrl+C 退出。"
-    )
+    click.echo(f"JobAgent · HR Gateway 已启动（通道: {', '.join(channels)}），Ctrl+C 退出。")
     tasks = [asyncio.create_task(coroutine) for coroutine in coroutines]
     try:
         await asyncio.gather(*tasks)
@@ -679,9 +662,7 @@ def chat_command(
     if list_sessions:
         asyncio.run(_list_sessions_only())
         return
-    asyncio.run(
-        _chat(startup_config=startup_config, session_id=session_id, one_shot=one_shot)
-    )
+    asyncio.run(_chat(startup_config=startup_config, session_id=session_id, one_shot=one_shot))
 
 
 async def _list_sessions_only() -> None:
@@ -708,6 +689,46 @@ async def _list_sessions_only() -> None:
     click.echo("\n用 `jobagent chat --session-id <会话 ID>` 恢复某个会话。")
 
 
+def _make_chat_prompt_session(
+    input: Any = None,  # noqa: A002 - mirrors prompt_toolkit's parameter name
+    output: Any = None,
+) -> PromptSession[str]:
+    """Build the multi-line chat input session (prompt_toolkit).
+
+    Bracketed paste inserts newlines into the buffer instead of submitting,
+    so pasted multi-line text only sends on Enter; Esc+Enter types a manual
+    line break. Mirrors omp/pi terminal input behavior.
+
+    ``input``/``output`` are test seams (tests/test_cli_chat_input.py);
+    production callers leave them as prompt_toolkit defaults.
+    """
+
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.key_binding import KeyBindings
+
+    bindings = KeyBindings()
+
+    @bindings.add("escape", "enter")
+    def _newline(event: KeyPressEvent) -> None:
+        event.current_buffer.insert_text("\n")
+
+    return PromptSession(
+        "You> ",
+        prompt_continuation=" " * 4,
+        key_bindings=bindings,
+        input=input,
+        output=output,
+    )
+
+
+def _build_chat_prompt_session() -> PromptSession[str] | None:
+    """Return the multi-line prompt session, or None when stdin is piped."""
+
+    if not sys.stdin.isatty():
+        return None
+    return _make_chat_prompt_session()
+
+
 async def _chat(
     startup_config: Path | None, session_id: str | None, one_shot: str | None = None
 ) -> None:
@@ -728,9 +749,7 @@ async def _chat(
         if one_shot is not None:
             # Non-interactive mode (pi-style -c): one message, one reply, exit.
             # External writes pause for approval - reject them safely here.
-            await _render_streaming_reply(
-                agent, one_shot, active_session_id, interactive=False
-            )
+            await _render_streaming_reply(agent, one_shot, active_session_id, interactive=False)
             return
         click.echo(
             "JobAgent ready. Describe a target job or ask for help. "
@@ -742,9 +761,20 @@ async def _chat(
         stored_context = SQLiteCandidateContextProvider(settings.jobagent_state_db).load()
         _render_candidate_setup_prompt(stored_context)
         _render_cookie_health_warnings()
+        input_session = _build_chat_prompt_session()
+        if input_session is not None:
+            click.echo(
+                "JobAgent · 支持多行粘贴：粘贴的换行不会提前提交；回车发送，Esc+Enter 手动换行。"
+            )
         while True:
             try:
-                message = click.prompt("You", prompt_suffix="> ")
+                if input_session is not None:
+                    # prompt() nests asyncio.run() inside the outer
+                    # asyncio.run(_chat) and crashes; prompt_async() rides
+                    # the existing loop.
+                    message = await input_session.prompt_async()
+                else:
+                    message = click.prompt("You", prompt_suffix="> ")
             except (EOFError, KeyboardInterrupt):
                 click.echo()
                 return
@@ -771,12 +801,9 @@ async def _chat(
                 )
     finally:
         click.echo()
+        click.echo(click.style("会话已保存: ", fg="cyan") + active_session_id)
         click.echo(
-            click.style("会话已保存: ", fg="cyan") + active_session_id
-        )
-        click.echo(
-            click.style("下次继续: ", fg="cyan")
-            + f"jobagent chat --session-id {active_session_id}"
+            click.style("下次继续: ", fg="cyan") + f"jobagent chat --session-id {active_session_id}"
         )
         await agent.close()
 
@@ -806,14 +833,9 @@ def _render_candidate_setup_prompt(context: object | None) -> None:
 
     has_candidate_facts = bool(
         context is not None
-        and (
-            getattr(context, "resume_text", None)
-            or getattr(context, "background", None)
-        )
+        and (getattr(context, "resume_text", None) or getattr(context, "background", None))
     )
-    has_search_profile = bool(
-        context is not None and getattr(context, "search_profile", None)
-    )
+    has_search_profile = bool(context is not None and getattr(context, "search_profile", None))
     if has_candidate_facts and has_search_profile:
         click.echo("JobAgent · 候选人资料与求职意向已就绪，可以分析 JD 或开始找岗。")
         return
@@ -825,9 +847,7 @@ def _render_candidate_setup_prompt(context: object | None) -> None:
         )
         return
     if not has_candidate_facts:
-        click.echo(
-            "JobAgent> 求职意向已经保存。请再提供基础简历，之后我才能可靠计算岗位匹配度。"
-        )
+        click.echo("JobAgent> 求职意向已经保存。请再提供基础简历，之后我才能可靠计算岗位匹配度。")
         return
     click.echo(
         "JobAgent> 候选人资料已经保存。请补充期望岗位、城市、薪资、公司特征、职位特征、"
@@ -964,7 +984,7 @@ async def _render_streaming_reply(
     (non-interactive one-shot mode rejects safely).
     """
 
-    transcript = TypewriterTranscript(stream=click.get_text_stream("stdout"))
+    transcript = TypewriterTranscript(stream=sys.stdout)
     answer_line_open = False
     emitted_answer = False
     reply_stream = agent.stream_reply(message, session_id=session_id)
@@ -1006,8 +1026,7 @@ async def _render_streaming_reply(
         click.echo()
     elif not emitted_answer:
         click.echo(
-            "JobAgent> 工具已完成，但模型没有生成最终回答；"
-            "本轮没有丢失资料，请重试或继续追问。"
+            "JobAgent> 工具已完成，但模型没有生成最终回答；本轮没有丢失资料，请重试或继续追问。"
         )
 
 
@@ -1066,9 +1085,7 @@ async def _handle_hitl_interrupt(
         decisions.extend([False] * (len(actions) - len(decisions)))
     if not decisions:
         decisions = [False]
-    resume_decision: bool | Sequence[bool] = (
-        decisions[0] if len(decisions) == 1 else decisions
-    )
+    resume_decision: bool | Sequence[bool] = decisions[0] if len(decisions) == 1 else decisions
     answer_line_open = False
     resume_stream = agent.resume_reply(resume_decision, session_id=session_id)
     try:
@@ -1317,8 +1334,8 @@ async def _login(platforms: list[str], timeout: int, check_only: bool) -> None:
             else:
                 click.echo(
                     click.style(
-                    f"[{plat}] ❌ Cookies expired or invalid. "
-                    f"Run: jobagent login --platform {plat}",
+                        f"[{plat}] ❌ Cookies expired or invalid. "
+                        f"Run: jobagent login --platform {plat}",
                         fg="red",
                     )
                 )
@@ -1479,16 +1496,11 @@ async def _run_pipeline(
                 if not confirmed:
                     continue
                 if job.source is JobSource.BOSS and boss_applier is not None:
-                    applications.append(
-                        await boss_applier.apply(job=job, profile=profile)
-                    )
+                    applications.append(await boss_applier.apply(job=job, profile=profile))
                 elif job.source is JobSource.LINKEDIN and linkedin_applier is not None:
-                    applications.append(
-                        await linkedin_applier.apply(job=job, profile=profile)
-                    )
+                    applications.append(await linkedin_applier.apply(job=job, profile=profile))
 
     click.echo(f"Applications attempted: {len(applications)}")
-
 
     await _notify_summary(
         settings=settings,
