@@ -258,6 +258,14 @@ TOOL_POLICY_PARAGRAPHS: tuple[tuple[str, frozenset[str] | None], ...] = (
         frozenset({"ls", "read_file", "write_file"}),
     ),
     (
+        """需要图片内容（JD 截图、聊天记录截图、webp/png/jpg 等）时，一律调用
+`read_image_text` 提取文字：当前模型不支持直接读图，read_file 读图片只会得到二进制
+垃圾或失败，不要反复重试，也不要用 execute 安装 OCR/图像库或编写转换脚本——本工具
+已内置本地 OCR 与 webp 转换。返回结果带置信度与引擎信息：低置信度时先向用户展示
+提取原文再下结论，不得把模糊识别直接当作事实。""",
+        frozenset({"read_image_text"}),
+    ),
+    (
         """不得自行构造、要求或暴露 Cookie、API Key、xsec_token、Spider_XHS 内部参数、任意本地路径、
 任意下载目录和平台私有请求地址。""",
         None,

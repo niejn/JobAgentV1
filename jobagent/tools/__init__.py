@@ -37,6 +37,10 @@ from jobagent.tools.interview_evidence import (
     InterviewEvidenceTarget,
     build_interview_evidence_tool,
 )
+from jobagent.tools.image_text import (
+    ImageTextFile,
+    build_read_image_text_tool,
+)
 from jobagent.tools.job_description import (
     JobDescriptionFile,
     JobDescriptionReader,
@@ -126,6 +130,8 @@ __all__ = [
     "UserDocumentFile",
     "UserDocumentReader",
     "build_user_document_tool",
+    "ImageTextFile",
+    "build_read_image_text_tool",
     "JobAnalysisArtifactInput",
     "ApplicationStateUpdateInput",
     "build_save_job_analysis_tool",

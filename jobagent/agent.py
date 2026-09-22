@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
+import sys
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -18,6 +20,7 @@ import aiosqlite
 from deepagents import create_deep_agent
 from deepagents.backends import BackendProtocol, CompositeBackend, FilesystemBackend
 from deepagents.backends.local_shell import LocalShellBackend
+from deepagents.backends.protocol import ExecuteResponse
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -47,6 +50,7 @@ from jobagent.crawl import (
     SyncChannelLimiter,
     build_crawl_gate,
 )
+from jobagent.interview.ocr import TesseractOcrExtractor
 from jobagent.journey.xhs_email_drafts import XhsEmailDraftService, contact_evidence_line
 from jobagent.memory.conversation_log import ConversationLog
 from jobagent.middleware import (
@@ -94,6 +98,7 @@ from jobagent.tools import (
     build_merge_job_identities_tool,
     build_prepare_boss_resume_after_hr_reply_tool,
     build_read_email_tool,
+    build_read_image_text_tool,
     build_save_candidate_background_tool,
     build_save_job_analysis_tool,
     build_save_job_search_profile_tool,
@@ -144,6 +149,7 @@ _SHELL_ENV_ALLOWLIST = (
     "TMP",
     "LANG",
     "PYTHONIOENCODING",
+    "PYTHONUTF8",
 )
 # Redaction vocabulary lives in observability (single source of truth).
 from jobagent.observability import _SENSITIVE_NAMES as _DEBUG_SENSITIVE_KEYS  # noqa: E402
@@ -205,6 +211,78 @@ def _mount_skill_roots(
             root_dir=memory_root, virtual_mode=True
         )
     return CompositeBackend(default=shell_backend, routes=routes)
+
+class _Utf8TolerantShellBackend(LocalShellBackend):
+    """LocalShellBackend whose ``execute`` survives non-UTF-8 child output.
+
+    Upstream decodes pipes via ``text=True`` with no ``errors`` policy, so a
+    child printing GBK bytes (Windows console tools) crashes the subprocess
+    reader thread (field crash 2026-09-22: UnicodeDecodeError in
+    ``subprocess._readerthread``). Faithful port of upstream ``execute`` with
+    ``encoding="utf-8", errors="replace"`` — re-pin when upgrading deepagents.
+    """
+
+    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        if not command or not isinstance(command, str):
+            return ExecuteResponse(
+                output="Error: Command must be a non-empty string.",
+                exit_code=1,
+                truncated=False,
+            )
+        effective_timeout = timeout if timeout is not None else self._default_timeout
+        if effective_timeout <= 0:
+            msg = f"timeout must be positive, got {effective_timeout}"
+            raise ValueError(msg)
+        try:
+            completed = subprocess.run(  # noqa: S602 - shell is the point of this backend
+                command,
+                check=False,
+                shell=True,
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=effective_timeout,
+                env=self._env,
+                cwd=str(self.cwd),
+                start_new_session=(sys.platform != "win32"),
+            )
+        except subprocess.TimeoutExpired:
+            return ExecuteResponse(
+                output=(
+                    f"Error: Command timed out after {effective_timeout} seconds. "
+                    "The command may be stuck; re-run with a longer timeout parameter."
+                ),
+                exit_code=124,
+                truncated=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - mirror upstream: never raise past execute
+            return ExecuteResponse(
+                output=f"Error executing command ({type(exc).__name__}): {exc}",
+                exit_code=1,
+                truncated=False,
+            )
+        output_parts = []
+        if completed.stdout:
+            output_parts.append(completed.stdout)
+        if completed.stderr:
+            output_parts.extend(
+                f"[stderr] {line}" for line in completed.stderr.strip().split("\n")
+            )
+        output = "\n".join(output_parts) if output_parts else "<no output>"
+        truncated = False
+        if len(output) > self._max_output_bytes:
+            output = output[: self._max_output_bytes]
+            output += f"\n\n... Output truncated at {self._max_output_bytes} bytes."
+            truncated = True
+        if completed.returncode != 0:
+            output = f"{output.rstrip()}\n\nExit code: {completed.returncode}"
+        return ExecuteResponse(
+            output=output,
+            exit_code=completed.returncode,
+            truncated=truncated,
+        )
 
 
 # Platform writes belong to their owning declarative DeepAgents Subagent.  Keep
@@ -1090,7 +1168,12 @@ class JobAgent:
                 shell_env = {
                     name: os.environ[name] for name in _SHELL_ENV_ALLOWLIST if name in os.environ
                 }
-                shell_backend = LocalShellBackend(
+                # Children default to the console codepage (cp936) on Windows
+                # while the backend decodes pipes as UTF-8; pin Python child
+                # output to UTF-8 unless the user set an explicit override.
+                shell_env.setdefault("PYTHONIOENCODING", "utf-8")
+                shell_env.setdefault("PYTHONUTF8", "1")
+                shell_backend = _Utf8TolerantShellBackend(
                     root_dir=self._filesystem_root,
                     virtual_mode=True,
                     inherit_env=False,
@@ -1486,12 +1569,14 @@ def _tool_start_status(tool_name: str, args: Any = None) -> str:
         return "正在浏览作者公开帖子并筛选候选内容…"
     if tool_name == "discover_boss_jobs":
         return "正在 Boss 搜索并筛选岗位…"
+    if tool_name == "read_user_document":
+        return "正在读取你指定的候选人文档…"
+    if tool_name == "read_image_text":
+        return "正在对图片做 OCR 文字提取…"
     if tool_name == "discover_interview_evidence":
         return "正在搜索并整理面经资料…"
     if tool_name == "read_job_description":
         return "正在读取你指定的 JD 文本…"
-    if tool_name == "read_user_document":
-        return "正在读取你指定的候选人文档…"
     if tool_name == "import_candidate_resume":
         return "正在导入并版本化你的基础简历…"
     if tool_name == "save_candidate_background":
@@ -1773,6 +1858,18 @@ def build_job_agent(
                 "read_user_document",
                 lambda: build_user_document_tool(
                     UserDocumentReader(settings.jobagent_workspace_root)
+                ),
+            ),
+            (
+                "read_image_text",
+                lambda: build_read_image_text_tool(
+                    TesseractOcrExtractor(
+                        command=settings.tesseract_cmd,
+                        language=settings.jobagent_ocr_language,
+                        page_segmentation_mode=settings.jobagent_ocr_psm,
+                        timeout_seconds=30,
+                    ),
+                    settings.jobagent_workspace_root,
                 ),
             ),
         ]

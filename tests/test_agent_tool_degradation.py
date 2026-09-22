@@ -61,6 +61,7 @@ DEFAULT_TOOL_NAMES = {
     "read_skill",
     "install_skill",
     "register_resume_pdf",
+    "read_image_text",
     "list_available_resume_pdfs",
     "create_opportunity_journey",
     "get_opportunity_journey",
