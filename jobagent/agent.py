@@ -56,6 +56,7 @@ from jobagent.memory.conversation_log import ConversationLog
 from jobagent.middleware import (
     MessageCompatibilityMiddleware,
     ModelCapabilityRegistry,
+    PlatformBypassGuardMiddleware,
     SingleSubagentTaskMiddleware,
 )
 from jobagent.models.llm_client import build_agent_model
@@ -335,6 +336,19 @@ _PLATFORM_WRITE_TOOL_NAMES = frozenset(
         "reply_boss_greeting",
     }
 )
+
+# Root file tools deliberately EXCLUDE execute: shell execution lives only in
+# the code_runner subagent (wants_shell), where the platform-bypass guard
+# sits. Tests pin this — re-adding execute here reopens the HITL bypass.
+_ROOT_FILESYSTEM_TOOLS = (
+    "ls",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "glob",
+    "grep",
+)
+
 _ROOT_HITL_TOOLS = {
     name: description
     for name, description in _HITL_TOOLS.items()
@@ -353,10 +367,27 @@ URL 或 note_id、已确认的公司/岗位、Journey ID 和附件简历文件�
 用户在根 JobAgent 界面批准；绝不绕过批准。一次任务最多准备和执行一项外发动作，并如实返回
 邮件回执与 Journey 关联结果。"""
 
+# Shell execution is delegated to this single subagent so the bypass guard
+# lives exactly where execute exists (root holds no execute tool at all).
+_CODE_RUNNER_PROMPT = """你是本地代码执行专家，只使用 `read_file`（先读脚本确认内容）和
+`execute`（运行主 Agent 委派的命令或脚本）：数据转换（如 webp 转 png）、批量处理、
+OCR 辅助、测试和小工具脚本。命令由任务描述给出，
+不要自行扩展范围；一次任务聚焦一个命令，如实完整回报 stdout、stderr、exit code 与产物
+路径，超时/失败不重试超过一次并说明原因。
+铁律：你只做本地计算，绝不触碰平台发送与凭据——不 import/调用 jobagent 的平台模块
+（applier/boss_ws/boss_resume_delivery 等）、不读取或打印任何 Cookie/密钥文件；此类命令
+会被执行守卫直接拒绝（platform_bypass）。需要外发消息、简历或邮件时如实返回 blocked，
+让主 Agent 走对应渠道子 Agent 的人工审批流程。回显内容中不得包含密钥、Cookie 或令牌。"""
+
 # Injected verbatim into the xhs_recruiting subagent's system prompt at
 # assembly time: the SKILL.md stays the single editable content source, but
 # delivery is deterministic (no read_skill round the model could skip).
 _XHS_RECRUITMENT_SKILL = "xhs-recruitment-email"
+
+# Same deterministic injection for the Boss delivery channel: the SKILL.md is
+# the single editable content source for the prepare→approve→send workflow;
+# boss_engagement owns it (assembly-time copy, no read_skill dependency).
+_BOSS_DELIVERY_SKILL = "boss-delivery"
 
 _RESUME_CRAFTING_PROMPT = """你是定制简历制作专家。你不访问 Boss、小红书、SMTP、Cookie 或任何
 平台工具。任务描述必须包含岗位 JD、Journey ID 和已确认的候选人事实；信息不足时返回 blocked，
@@ -1183,17 +1214,13 @@ class JobAgent:
                 backend = _mount_skill_roots(
                     shell_backend, self._skill_manager, self._memory_root
                 )
+                # Root keeps file tools WITHOUT execute: shell execution lives
+                # only in the code_runner subagent (see wants_shell below), so
+                # the platform-bypass guard sits where execute exists and no
+                # other agent can structurally run commands.
                 filesystem_middleware = FilesystemMiddleware(
                     backend=backend,
-                    tools=[
-                        "ls",
-                        "read_file",
-                        "write_file",
-                        "edit_file",
-                        "glob",
-                        "grep",
-                        "execute",
-                    ],
+                    tools=list(_ROOT_FILESYSTEM_TOOLS),
                 )
                 # deepagents harness: a ReAct loop (model <-> tools nodes)
                 # compiled as a LangGraph CompiledStateGraph. Named 'deep_agent'
@@ -1209,10 +1236,38 @@ class JobAgent:
                         ),
                         *list(spec.get("middleware", [])),
                     ]
+                    if spec.pop("wants_shell", False):
+                        # Execute injection point: FilesystemMiddleware here
+                        # REPLACES the subagent's default filesystem stack
+                        # (deepagents contract) with execute+read on the
+                        # shared backend, gated by the bypass guard.
+                        spec["middleware"] = [
+                            PlatformBypassGuardMiddleware(self._filesystem_root),
+                            FilesystemMiddleware(
+                                backend=backend, tools=["execute", "read_file"]
+                            ),
+                            *spec["middleware"],
+                        ]
+                    else:
+                        # P0 fix (security review): deepagents gives every
+                        # declarative subagent an UNRESTRICTED default
+                        # FilesystemMiddleware (tools=None → execute/write/
+                        # edit/delete) — each platform subagent would hold an
+                        # unguarded shell. Replace the default stack with
+                        # read-only access.
+                        spec["middleware"] = [
+                            FilesystemMiddleware(backend=backend, tools=["read_file"]),
+                            *spec["middleware"],
+                        ]
                     subagents.append(spec)
                 deep_agent = create_deep_agent(
                     model=self._model,
                     tools=list(self._root_tools),
+                    # deepagents auto-adds an unrestricted "general-purpose"
+                    # subagent unless a spec with that exact name exists; it
+                    # would inherit ALL root tools (incl. HITL-gated writes)
+                    # with zero approval. We ship a stub instead (see
+                    # build_job_agent) so the default never materializes.
                     system_prompt=self._system_prompt,
                     subagents=cast(Any, subagents or None),
                     # Native SkillsMiddleware: skill metadata reaches the
@@ -1979,11 +2034,19 @@ def build_job_agent(
                     "interrupt_on": _boss_interrupts({"boss_greet_jobs"}),
                 }
             )
+            boss_delivery_skill = _load_subagent_skill(skill_manager, _BOSS_DELIVERY_SKILL)
+            engagement_system_prompt = _BOSS_ENGAGEMENT_PROMPT + (
+                "\n\n<boss_delivery_skill>\n"
+                f"{boss_delivery_skill}\n</boss_delivery_skill>\n"
+                "（以上副本来自装配时刻。）"
+                if boss_delivery_skill
+                else ""
+            )
             platform_subagents.append(
                 {
                     "name": "boss_engagement",
                     "description": "HR 已回复阶段：读会话/回复 HR/准备并投递简历（回复与投递需 HITL）",
-                    "system_prompt": _BOSS_ENGAGEMENT_PROMPT,
+                    "system_prompt": engagement_system_prompt,
                     "model": effective_model,
                     "tools": _boss_tools(
                         {
@@ -2060,6 +2123,23 @@ def build_job_agent(
                     "interrupt_on": xhs_interrupts,
                 }
             )
+        # deepagents auto-adds a default "general-purpose" subagent that
+        # inherits ALL root tools (incl. HITL-gated writes) with no
+        # interrupt_on — task(general-purpose) would be a zero-approval
+        # bypass (security review 2026-09-22). A spec with this exact name
+        # suppresses the default; the stub stays unusable-by-design.
+        platform_subagents.append(
+            {
+                "name": "general-purpose",
+                "description": "已禁用：请改委派 code_runner（本地计算）或对应渠道子 Agent。",
+                "system_prompt": (
+                    "本代理已禁用。收到任务时，不调用任何工具，直接返回："
+                    "请主 Agent 改委派 code_runner（本地计算/脚本）或对应渠道子 Agent。"
+                ),
+                "model": effective_model,
+                "tools": [],
+            }
+        )
         platform_subagents.append(
             {
                 "name": "resume_crafting",
@@ -2072,9 +2152,26 @@ def build_job_agent(
                 ),
             }
         )
+        # Shell execution is NOT a root tool: it lives only in this subagent
+        # so the platform-bypass guard sits exactly where execute exists and
+        # every other agent (root included) is structurally unable to run
+        # commands. ``wants_shell`` is consumed in _ensure_deep_agent, which
+        # injects FilesystemMiddleware(tools=["execute"], backend=shared)
+        # plus PlatformBypassGuardMiddleware and pops the marker before the
+        # spec reaches deepagents.
+        platform_subagents.append(
+            {
+                "name": "code_runner",
+                "description": "运行本地脚本或 Shell 命令（数据转换、批量处理、测试），只做本地计算。",
+                "system_prompt": _CODE_RUNNER_PROMPT,
+                "model": effective_model,
+                "tools": [],
+                "wants_shell": True,
+            }
+        )
     # PS-1 分层组装：条件注入（段/段落跟随 registered_tools）+ 元数据层
     # （日期冻结于构造时刻）+ candidate_context 不可信块。单一组装点在
-    # prompts/builder.py，本处只传事实源。
+    # PS-1 分层组装：条件注入（段/段落跟随 registered_tools）+ 元数据层
     conversation_log = ConversationLog(state_db.parent / "conversations")
     memory_dir = state_db.parent / "memory"
     memory_markdown = ""
@@ -2100,7 +2197,9 @@ Boss 渠道由原生 `task` Tool 调用单一职责 Subagent，按阶段路由�
 - 发打招呼/列已打招呼会话 → `boss_greeting`
 - HR 已回复阶段的读会话/回复/简历投递 → `boss_engagement`
 - 送达核验/进度查询/幂等补登记 → `boss_verification`
-小红书/邮件渠道 → `xhs_recruiting`；定制简历 → `resume_crafting`。
+小红书/邮件渠道 → `xhs_recruiting`；定制简历 → `resume_crafting`；
+运行脚本/Shell 命令（格式转换、批量处理、测试）→ `code_runner`（主 Agent 不持有
+execute，本地计算一律委派它执行）。
 Subagent 不继承本对话历史，task 的任务描述必须自包含：写明岗位/会话的 Job ID 或
 conversation 标识、已确认的公司/岗位、Journey ID 与必要参数（query、city、目标消息
 意图）；XHS 邮件任务写明帖子 URL 或 note_id、用户已逐字确认的主题/正文，附件先由

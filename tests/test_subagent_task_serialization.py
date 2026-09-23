@@ -147,6 +147,15 @@ async def test_default_agent_exposes_platform_tools_only_to_their_subagents(tmp_
     assert "send_application_email" not in root_names
     # State-DB tools stay on root; boss_verification mirrors them read-mostly.
     assert {"get_job_progress", "list_job_records"} <= root_names
+    # Shell execution is delegated: root has no execute tool (the 2026-09-22
+    # field bypass ran a python script straight through root execute), and
+    # code_runner carries the wants_shell marker consumed in _ensure_deep_agent
+    # to inject FilesystemMiddleware(tools=["execute"]) + the bypass guard.
+    from jobagent.agent import _ROOT_FILESYSTEM_TOOLS
+
+    assert "execute" not in _ROOT_FILESYSTEM_TOOLS
+    assert subagents["code_runner"]["tools"] == []
+    assert subagents["code_runner"]["wants_shell"] is True
     boss_split = {
         "boss_discovery": {"discover_boss_jobs"},
         "boss_greeting": {"boss_greet_jobs", "list_boss_greetings"},
@@ -221,3 +230,8 @@ async def test_default_agent_exposes_platform_tools_only_to_their_subagents(tmp_
     assert "already_submitted" in xhs_prompt
     boss_prompt = engagement_prompt
     assert "不得查询、导入或使用本地 PDF 简历库" in boss_prompt
+    # boss-delivery channel skill is deterministically injected at assembly
+    # time (boss_engagement holds no read_skill; injection is the only path).
+    assert "<boss_delivery_skill>" in boss_prompt
+    assert "resume_filename_mismatch" in boss_prompt
+    assert "ACK 丢失铁律" in boss_prompt

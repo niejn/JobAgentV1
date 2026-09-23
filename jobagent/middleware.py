@@ -15,6 +15,7 @@ from langchain.agents.middleware import AgentMiddleware, AgentState, ModelReques
 from langchain.agents.middleware.types import ModelResponse
 from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, RemoveMessage, ToolMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 
 from jobagent.observability import _SENSITIVE_KEY, _SENSITIVE_QUERY
@@ -333,3 +334,128 @@ class SingleSubagentTaskMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
         return self._serialize(await handler(request))
+
+
+# Symbols whose invocation outside the HITL-gated tools is a physical bypass
+# of human approval. Field incident 2026-09-22 (trace 76de8f7…): the model
+# wrote a script importing ``jobagent.applier.boss_ws.send_text_to_conversation``
+# plus ``get_cookies`` and ran it via ``execute`` — reply AND resume were sent
+# with no approval prompt. Prompt rules ("don't bypass subagents") are not a
+# physical gate; this middleware is.
+_BYPASS_PATTERNS: tuple[str, ...] = (
+    "jobagent.applier",
+    "boss_ws",
+    "send_text_to_conversation",
+    "verify_text_in_conversation",
+    "boss_resume_delivery",
+    "send_boss_resume",
+    "boss_greet",
+    "cookie_manager",
+    "get_cookies",
+    "boss_cookies",
+    "xhs_cookies",
+    "cookies.json",
+    "xhs_email_drafts",
+    "smtplib",
+    "python -m jobagent",
+)
+_MAX_SCRIPT_SCAN_BYTES = 256 * 1024
+_REJECTION_TEMPLATE = (
+    '{{"status":"blocked","error_type":"platform_bypass",'
+    '"message":"execute 命令命中平台发送/凭据内部符号（{pattern}）。'
+    "外发消息、简历或邮件只能委派对应 Subagent 工具执行，HITL 人工审批不可绕过；"
+    '请改用 task 委派。"}}'
+)
+
+
+class PlatformBypassGuardMiddleware(AgentMiddleware):
+    """Physically block ``execute`` from invoking platform send/credential internals.
+
+    Scans the command text and the contents of any ``.py`` files the command
+    references (resolved against the agent filesystem root, where ``write_file``
+    puts scripts) for bypass symbols. Benign scripting — file conversion, OCR,
+    tests — is unaffected.
+    """
+
+    name = "PlatformBypassGuardMiddleware"
+
+    def __init__(self, filesystem_root: Path) -> None:
+        super().__init__()
+        self._root = filesystem_root.expanduser().resolve()
+
+    def inspect_command(self, command: str) -> str | None:
+        """Return the matched bypass pattern, or None when the command is clean."""
+
+        lowered = command.lower()
+        for pattern in _BYPASS_PATTERNS:
+            if pattern in lowered:
+                return pattern
+        for token in command.replace('"', " ").replace("'", " ").split():
+            if not token.lower().endswith(".py"):
+                continue
+            candidate = Path(token)
+            for resolved in self._candidate_paths(candidate):
+                if self._file_hits(resolved):
+                    return f"{candidate.name} 内容命中"
+        return None
+
+    def _candidate_paths(self, candidate: Path) -> list[Path]:
+        """Resolve a command-relative script path against plausible cwds.
+
+        The agent VFS root (``write_file`` target) and the shell cwd (repo
+        root, often reached via an explicit ``cd`` in the command) differ, so
+        try the root, its first ancestors, and the workspace subfolder before
+        giving up (field command: ``cd /d REPO && python data\\journeys\\
+        workspace\\x.py`` with VFS root ``data/journeys``).
+        """
+        if candidate.is_absolute():
+            return [candidate]
+        bases = [self._root, *self._root.parents[:3]]
+        candidates = [base / candidate for base in bases]
+        if "workspace" in candidate.parts:
+            candidates.append(self._root / "workspace" / candidate.name)
+        candidates.append(self._root / "workspace" / candidate)
+        return candidates
+
+    def _file_hits(self, path: Path) -> bool:
+        try:
+            if not path.is_file() or path.stat().st_size > _MAX_SCRIPT_SCAN_BYTES:
+                return False
+            body = path.read_text(encoding="utf-8", errors="replace").lower()
+        except OSError:
+            return False
+        return any(pattern in body for pattern in _BYPASS_PATTERNS)
+
+    def _reject(self, request: "ToolCallRequest", pattern: str) -> ToolMessage:
+        logger.warning(
+            "jobagent.platform_bypass_blocked",
+            extra={"pattern": pattern, "tool": request.tool_call["name"]},
+        )
+        return ToolMessage(
+            content=_REJECTION_TEMPLATE.format(pattern=pattern),
+            name=request.tool_call["name"],
+            tool_call_id=request.tool_call["id"],
+            status="error",
+        )
+
+    def wrap_tool_call(
+        self,
+        request: "ToolCallRequest",
+        handler: Callable[["ToolCallRequest"], ToolMessage | Command[Any]],
+    ) -> ToolMessage | Command[Any]:
+        if request.tool_call["name"] == "execute":
+            pattern = self.inspect_command(str(request.tool_call["args"].get("command", "")))
+            if pattern:
+                return self._reject(request, pattern)
+        return handler(request)
+
+    async def awrap_tool_call(
+        self,
+        request: "ToolCallRequest",
+        handler: Callable[["ToolCallRequest"], Awaitable[ToolMessage | Command[Any]]],
+    ) -> ToolMessage | Command[Any]:
+        if request.tool_call["name"] == "execute":
+            pattern = self.inspect_command(str(request.tool_call["args"].get("command", "")))
+            if pattern:
+                return self._reject(request, pattern)
+        return await handler(request)
