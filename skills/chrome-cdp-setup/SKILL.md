@@ -1,5 +1,5 @@
 ---
-name: ChromeCDP-setup
+name: chrome-cdp-setup
 description: "Chrome DevTools 调试模式连接管理。检测并启动本地 Chrome 的远程调试端口（默认 9222）。"
 author: JobAgent
 version: 2.0.0

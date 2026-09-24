@@ -153,15 +153,20 @@ def test_process_crash_then_jobagent_startup_recovers_sent(delivery, tmp_path, m
     database, _, settings, service, draft_id, journey, sender, verifier = delivery
     context = multiprocessing.get_context("spawn")
     entered, output = context.Event(), context.Queue()
+    # Spawn children reopen sync primitives BY NAME during unpickling, so
+    # every primitive must outlive the spawn handshake from a named local;
+    # inline temporaries inside args=(...) get unlinked first on Linux and
+    # the child dies with SemLock._rebuild FileNotFoundError.
+    barrier, release = context.Barrier(1), context.Event()
     process = context.Process(
         target=process_send,
         args=(
             database,
             tmp_path / "resumes",
             draft_id,
-            context.Barrier(1),
+            barrier,
             entered,
-            context.Event(),
+            release,
             output,
             True,
         ),

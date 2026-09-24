@@ -164,7 +164,7 @@ class TestToolPassthrough:
         class FailingDiscovery:
             async def discover(self, request):
                 raise BossAccessError(
-                    "请读取 skills/ChromeCDP-setup/SKILL.md",
+                    "请读取 skills/chrome-cdp-setup/SKILL.md",
                     code="cdp_not_ready",
                 )
 
@@ -175,4 +175,4 @@ class TestToolPassthrough:
         result = asyncio.run(tool.ainvoke({"query": "python", "city": "上海"}))
         assert result["status"] == "blocked"
         assert result["error_type"] == "cdp_not_ready"
-        assert "ChromeCDP-setup" in result["message"]
+        assert "chrome-cdp-setup" in result["message"]

@@ -265,3 +265,15 @@ async def test_tools_keep_prepare_read_only_and_send_separate(tmp_path: Path) ->
     assert prepare_tool.name == "prepare_boss_resume_after_hr_reply"
     assert send_tool.name == "send_boss_resume_after_hr_reply"
     assert prepared["status"] == "ready"
+
+
+def test_page_evaluate_scripts_are_brace_balanced() -> None:
+    """2026-09-22 field incident: _SEND_JS shipped with its async arrow
+    unclosed (brace delta +1), so every registered resume send died with a
+    browser-side SyntaxError and reported send_failed — the breakage that
+    drove the agent to script prepare+send itself. Pin both page scripts."""
+    from jobagent.applier.boss_resume_delivery import _PREPARE_JS, _SEND_JS
+
+    for name, script in (("prepare", _PREPARE_JS), ("send", _SEND_JS)):
+        delta = script.count("{") - script.count("}")
+        assert delta == 0, f"{name} JS brace delta {delta}"

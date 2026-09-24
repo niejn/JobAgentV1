@@ -110,14 +110,21 @@ class HrReplyOrchestrator:
 
     # -- main tick ------------------------------------------------------------
 
-    async def run_once(self) -> PipelineStats:
+    async def run_once(self, *, now: float | None = None) -> PipelineStats:
+        """Process one batch of inbound messages.
+
+        ``now`` is injectable for deterministic tests of the local send-window
+        policy.  Production callers intentionally omit it and use the current
+        wall clock.
+        """
+
         stats = PipelineStats()
         connection = sqlite3.connect(self._state_db)
         connection.execute("PRAGMA busy_timeout = 5000")
         connection.executescript(_ENGINE_SCHEMA)
-        now = time.time()
+        current_time = time.time() if now is None else now
         try:
-            if not in_send_window(now):
+            if not in_send_window(current_time):
                 stats.deferred_window = self._count_unclassified(connection)
                 return stats
             config = self._load_config(connection)
@@ -146,7 +153,7 @@ class HrReplyOrchestrator:
                         queue=queue,
                         connection=connection,
                         stats=stats,
-                        now=now,
+                        now=current_time,
                     )
             finally:
                 queue.close()
@@ -275,6 +282,8 @@ class HrReplyOrchestrator:
 
         status = "awaiting_human"
         draft_text = decision.draft_text
+        audit_note = ""
+        bounded_until = 0.0
         if decision.action == "auto":
             # Bound authorization to today's send window and use the SAME
             # value for both the policy row and the queue row — the queue
@@ -417,4 +426,3 @@ class HrReplyOrchestrator:
             return {str(key): str(value) for key, value in rows}
         finally:
             connection.close()
-

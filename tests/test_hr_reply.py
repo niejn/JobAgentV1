@@ -133,6 +133,14 @@ class TestClassifier:
         assert result.requires_human
         assert "llm_unavailable" in result.degraded_reason
 
+    def test_invalid_structured_output_degrades_to_human(self) -> None:
+        model = _StubModel([{"intent": "salary_expectation", "confidence": "NaN"}])
+        classifier = HrQuestionClassifier(model=model)  # type: ignore[arg-type]
+        result = classifier.classify(hr_messages=["您期望薪资多少？"])
+        assert result.degraded
+        assert result.requires_human
+        assert "invalid_llm_output" in result.degraded_reason
+
 
 def _facts(store: CandidateFactStore) -> Any:
     seed_default_facts(store)
@@ -328,7 +336,7 @@ class TestOrchestrator:
         orchestrator = HrReplyOrchestrator(
             settings, classifier=HrQuestionClassifier(model=stub)  # type: ignore[arg-type]
         )
-        stats = await orchestrator.run_once()
+        stats = await orchestrator.run_once(now=morning_timestamp())
         assert stats.processed == 1
         assert stats.awaiting_human == 1
         from jobagent.boss_reply_queue import BossReplyQueue
@@ -350,7 +358,7 @@ class TestOrchestrator:
         orchestrator = HrReplyOrchestrator(
             settings, classifier=HrQuestionClassifier(model=stub)  # type: ignore[arg-type]
         )
-        stats = await orchestrator.run_once()
+        stats = await orchestrator.run_once(now=morning_timestamp())
         assert stats.degraded == 1
         assert stats.awaiting_human == 1  # degraded -> human, never auto
 
@@ -366,6 +374,14 @@ class TestOrchestrator:
         db = tmp_path / "state.db"
         HrReplyOrchestrator.set_engine_override(db, "auto_enabled", "0")
         assert HrReplyOrchestrator.get_engine_overrides(db)["auto_enabled"] == "0"
+
+
+def morning_timestamp() -> float:
+    """An explicit local 10:00 clock for orchestrator pipeline tests."""
+
+    import datetime as _dt
+
+    return _dt.datetime(2026, 9, 20, 10, 0).timestamp()
 
 
 class TestDigestAndTools:

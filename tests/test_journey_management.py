@@ -13,26 +13,34 @@ from jobagent import web
 from jobagent.agent import build_hitl_middleware
 from jobagent.journey.creation import CreateJourneyRequest, create_journey
 from jobagent.journey.management import (
-    JourneyTarget, JourneyUpdate, change_journey, get_journey, list_journeys,
+    JourneyTarget,
+    JourneyUpdate,
+    change_journey,
+    get_journey,
+    list_journeys,
 )
 from jobagent.journey.store import SQLiteJourneyStore
 from jobagent.tools.journey_management import build_journey_management_tools
 
 
 def seed(path):
-    return create_journey(path, CreateJourneyRequest(company='测试公司', role='工程师', job_description='初始JD'))[0]
+    return create_journey(
+        path, CreateJourneyRequest(company='测试公司', role='工程师', job_description='初始JD'))[0]
 
 
 def target(journey):
     return dict(journey_id=journey['id'], expected_company=journey['company'],
-                expected_role=journey['role'], expected_version=journey['version'], reason='用户确认')
+                expected_role=journey['role'], expected_version=journey['version'],
+                reason='用户确认')
 
 
 def test_update_delete_restore_and_creation_key(tmp_path):
     path = tmp_path / 'state.db'
     original = seed(path)
     args = target(get_journey(path, original.id))
-    updated = change_journey(path, 'update', JourneyUpdate(**args, changes={'job_description': '新版JD', 'department': '研发'}))
+    updated = change_journey(
+        path, 'update',
+        JourneyUpdate(**args, changes={'job_description': '新版JD', 'department': '研发'}))
     assert updated['version'] == 2
     assert get_journey(path, original.id)['jd_version_count'] == 2
     with pytest.raises(ValueError, match='已变化'):
@@ -52,7 +60,9 @@ def test_update_delete_restore_and_creation_key(tmp_path):
     assert restored['deleted_at'] is None
     assert list_journeys(path)[0]['job_description'] == '新版JD'
     with sqlite3.connect(path) as connection:
-        assert connection.execute('SELECT action FROM journey_change_events ORDER BY id').fetchall() == [('update',), ('delete',), ('restore',)]
+        assert connection.execute(
+            'SELECT action FROM journey_change_events ORDER BY id'
+        ).fetchall() == [('update',), ('delete',), ('restore',)]
 
 
 def test_running_tasks_block_delete_and_are_preserved(tmp_path):
@@ -100,8 +110,11 @@ class ManagementModel(BaseChatModel):
         return self
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        reply = AIMessage(content='完成') if any(isinstance(m, ToolMessage) for m in messages) else AIMessage(
-            content='', tool_calls=[{'name': self.action + '_opportunity_journey', 'args': self.arguments, 'id': 'op-1'}])
+        reply = (
+            AIMessage(content='完成') if any(isinstance(m, ToolMessage) for m in messages)
+            else AIMessage(content='', tool_calls=[
+                {'name': self.action + '_opportunity_journey',
+                 'args': self.arguments, 'id': 'op-1'}]))
         return ChatResult(generations=[ChatGeneration(message=reply)])
 
 

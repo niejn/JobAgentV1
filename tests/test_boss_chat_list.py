@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -365,6 +366,68 @@ async def test_read_conversation_single_evaluate_chain() -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_conversation_labels_card_messages() -> None:
+    """Regression (TCL 2026-09-23): a resume-request card read back as an
+    empty message. type 9 must surface as actionable text; other card types
+    get card_label only so the reply pipeline stays text-clean."""
+    import jobagent.applier.boss_chat as chat_mod
+
+    chat_mod._parked_page = None
+    page = MagicMock()
+    page.url = "https://www.zhipin.com/web/geek/chat"
+    page.is_closed = lambda: False
+    page.goto = AsyncMock()
+
+    async def evaluate(script: str, payload: dict | None = None):
+        if payload is None:
+            return True
+        if "geekFilterByLabel" in script and "historyMsg" in script:
+            return {
+                "step": "done",
+                "job": {},
+                "jobCandidates": [],
+                "messages": [
+                    # type 1 text: unchanged, no mining payload
+                    {"mid": 1, "direction": "boss", "type": 1, "time": 100,
+                     "text": "看下你的简历", "bodyJson": ""},
+                    # type 9 resume card: actionable label + raw body
+                    {"mid": 2, "direction": "boss", "type": 9, "time": 200,
+                     "text": "", "bodyJson": '{"resumeOption":1}'},
+                    # type 8 job card: visible but never enters text channel
+                    {"mid": 3, "direction": "boss", "type": 8, "time": 300,
+                     "text": "", "bodyJson": '{"jobId":"j-9"}'},
+                    # unknown type: label table miss, body still preserved
+                    {"mid": 4, "direction": "boss", "type": 99, "time": 400,
+                     "text": "", "bodyJson": '{"x":1}'},
+                ],
+            }
+        return True
+
+    page.evaluate = evaluate
+    pool = MagicMock()
+    pool.acquire = AsyncMock(return_value=page)
+    pool.detach = AsyncMock()
+    pool.prune_blank_tabs = AsyncMock()
+    reader = _reader_with_pool(pool)
+
+    result = await reader.read_conversation(hr_name="康先生")
+
+    assert result["status"] == "ok"
+    text_msg, resume_card, job_card, unknown = result["messages"]
+    assert text_msg["text"] == "看下你的简历"
+    assert "body_json" not in text_msg and "card_label" not in text_msg
+    assert resume_card["text"] == "[简历请求卡片]"
+    assert resume_card["body_json"] == '{"resumeOption":1}'
+    assert "card_label" not in resume_card
+    assert job_card["text"] == ""
+    assert job_card["card_label"] == "[职位卡片]"
+    assert job_card["body_json"] == '{"jobId":"j-9"}'
+    assert unknown["text"] == ""
+    assert "card_label" not in unknown
+    assert unknown["body_json"] == '{"x":1}'
+
+
+@pytest.mark.asyncio
 async def test_read_conversation_step_failures_are_typed() -> None:
     import jobagent.applier.boss_chat as chat_mod
 
@@ -448,3 +511,119 @@ async def test_read_conversation_self_heals_on_dead_page() -> None:
     assert result["status"] == "ok"
     assert calls["n"] == 2  # died once, healed once
     assert pool.acquire.await_count == 2
+
+
+# ── scan_boss_hr_replies (registered replacement for workspace scan scripts) ──
+
+def _reader_mock(greetings, histories):
+    """BossChatReader mock: list_greetings + per-HR read_conversation queue."""
+    reader = MagicMock()
+    reader.list_greetings = AsyncMock(
+        return_value={"status": "ok", "count": len(greetings), "greetings": greetings}
+    )
+    reader.read_conversation = AsyncMock(side_effect=lambda hr_name, **_: histories[hr_name].pop(0))
+    cls = MagicMock(return_value=reader)
+    cls.return_value.__aenter__ = AsyncMock(return_value=reader)
+    cls.return_value.__aexit__ = AsyncMock(return_value=None)
+    return cls, reader
+
+
+def _greeting(friend_id, name, updated_ms, last_inbound=True):
+    return {
+        "friendId": friend_id,
+        "friendSource": 1,
+        "name": name,
+        "brandName": f"公司{friend_id}",
+        "jobName": f"岗位{friend_id}",
+        "updateTime": updated_ms,
+        "job_metadata": {"job_id": f"job-{friend_id}", "job_url": f"https://www.zhipin.com/job_detail/job-{friend_id}.html"},
+        "lastMessage": None,
+    }
+
+
+def _history(directions):
+    """One read result: messages ordered oldest->newest, last one decides."""
+    msgs = [
+        {"direction": d, "time": 0, "text": f"msg-{i}"} for i, d in enumerate(directions)
+    ]
+    msgs[-1]["time"] = int(time.time() * 1000)
+    return {"status": "ok", "friend_id": 1, "messages": msgs}
+
+
+@pytest.mark.asyncio
+async def test_scan_reports_only_conversations_awaiting_our_reply(tmp_path):
+    from jobagent.tools.boss_chat import build_boss_chat_scan_tool
+
+    now = int(time.time() * 1000)
+    greetings = [
+        _greeting(20001, "张HR", now - 60_000),        # active, HR sent last word
+        _greeting(20002, "李HR", now - 120_000),       # active, we sent last word
+        _greeting(20003, "王HR", now - 100 * 3_600_000),  # stale: outside window
+    ]
+    histories = {
+        "张HR": [_history(["geek", "boss"])],
+        "李HR": [_history(["boss", "geek"])],
+    }
+    cls, _reader = _reader_mock(greetings, histories)
+    with (
+        patch("jobagent.applier.boss_chat.BossChatReader", cls),
+        patch("jobagent.tools.boss_chat.asyncio.sleep", new=AsyncMock()),
+        patch("jobagent.journey.chat_archive.BossChatArchive"),
+    ):
+        result = await build_boss_chat_scan_tool(_settings(tmp_path)).ainvoke(
+            {"hours_back": 24.0}
+        )
+
+    assert result["status"] == "ok"
+    assert [item["hr_name"] for item in result["awaiting_reply"]] == ["张HR"]
+    assert result["awaiting_reply"][0]["last_hr_text"] == "msg-1"
+    assert result["awaiting_reply"][0]["job_url"].endswith("job-20001.html")
+    assert result["candidates_read"] == 2  # stale conversation never read
+
+
+@pytest.mark.asyncio
+async def test_scan_retries_empty_history_once(tmp_path):
+    from jobagent.tools.boss_chat import build_boss_chat_scan_tool
+
+    now = int(time.time() * 1000)
+    greetings = [_greeting(20001, "张HR", now - 60_000)]
+    histories = {
+        "张HR": [
+            {"status": "ok", "friend_id": 1, "messages": []},  # transient empty
+            _history(["boss"]),
+        ]
+    }
+    cls, reader = _reader_mock(greetings, histories)
+    with (
+        patch("jobagent.applier.boss_chat.BossChatReader", cls),
+        patch("jobagent.tools.boss_chat.asyncio.sleep", new=AsyncMock()) as sleep,
+        patch("jobagent.journey.chat_archive.BossChatArchive"),
+    ):
+        result = await build_boss_chat_scan_tool(_settings(tmp_path)).ainvoke({})
+
+    assert result["awaiting_reply"][0]["hr_name"] == "张HR"
+    assert reader.read_conversation.await_count == 2
+    sleep.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_scan_bounds_reads_by_max_reads(tmp_path):
+    from jobagent.tools.boss_chat import build_boss_chat_scan_tool
+
+    now = int(time.time() * 1000)
+    greetings = [_greeting(20000 + i, f"HR{i}", now - i * 60_000) for i in range(3)]
+    histories = {f"HR{i}": [_history(["boss"])] for i in range(3)}
+    cls, reader = _reader_mock(greetings, histories)
+    with (
+        patch("jobagent.applier.boss_chat.BossChatReader", cls),
+        patch("jobagent.tools.boss_chat.asyncio.sleep", new=AsyncMock()),
+        patch("jobagent.journey.chat_archive.BossChatArchive"),
+    ):
+        result = await build_boss_chat_scan_tool(_settings(tmp_path)).ainvoke(
+            {"hours_back": 24.0, "max_reads": 2}
+        )
+
+    assert reader.read_conversation.await_count == 2
+    assert result["candidates_read"] == 2
+    # newest first: HR0/HR1 read, HR2 left for a follow-up scan
+    assert [item["hr_name"] for item in result["awaiting_reply"]] == ["HR0", "HR1"]

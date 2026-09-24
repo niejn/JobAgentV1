@@ -12,6 +12,13 @@ from typing import Any
 
 from jobagent.journey.store import _enable_wal
 
+#: Boss chat message type for a resume-request card (chat-core enum
+#: RESUME=9; see docs/boss-card-message-ingestion-design.md). Single
+#: source of truth shared by the history-reader labels and the daemon
+#: queue feed - the WS decoder in boss_ws.find_resume_requests matches
+#: the same protobuf body_type.
+RESUME_CARD_TYPE = 9
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS resume_requests (
     id TEXT PRIMARY KEY,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, RemoveMe
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
+from langgraph.types import Command
 
 from jobagent.observability import _SENSITIVE_KEY, _SENSITIVE_QUERY
 
@@ -426,7 +428,7 @@ class PlatformBypassGuardMiddleware(AgentMiddleware):
             return False
         return any(pattern in body for pattern in _BYPASS_PATTERNS)
 
-    def _reject(self, request: "ToolCallRequest", pattern: str) -> ToolMessage:
+    def _reject(self, request: ToolCallRequest, pattern: str) -> ToolMessage:
         logger.warning(
             "jobagent.platform_bypass_blocked",
             extra={"pattern": pattern, "tool": request.tool_call["name"]},
@@ -440,8 +442,8 @@ class PlatformBypassGuardMiddleware(AgentMiddleware):
 
     def wrap_tool_call(
         self,
-        request: "ToolCallRequest",
-        handler: Callable[["ToolCallRequest"], ToolMessage | Command[Any]],
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], ToolMessage | Command[Any]],
     ) -> ToolMessage | Command[Any]:
         if request.tool_call["name"] == "execute":
             pattern = self.inspect_command(str(request.tool_call["args"].get("command", "")))
@@ -451,11 +453,96 @@ class PlatformBypassGuardMiddleware(AgentMiddleware):
 
     async def awrap_tool_call(
         self,
-        request: "ToolCallRequest",
-        handler: Callable[["ToolCallRequest"], Awaitable[ToolMessage | Command[Any]]],
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
     ) -> ToolMessage | Command[Any]:
         if request.tool_call["name"] == "execute":
             pattern = self.inspect_command(str(request.tool_call["args"].get("command", "")))
             if pattern:
                 return self._reject(request, pattern)
+        return await handler(request)
+
+
+class RepeatedToolCallGuardMiddleware(AgentMiddleware):
+    """Break identical-tool-call loops (field incident 2026-09-23 16:43).
+
+    GLM-5.3 re-decided the same ``write_file`` (~12 KB args) 20+ times in a
+    single turn — every retry carried a fresh ``tool_call_id`` and slightly
+    rewritten docstring, while each success ``ToolMessage`` was already in
+    context. A pure model-side loop the harness physically tolerated until
+    the recursion budget. This guard counts CONSECUTIVE executions of the
+    same (tool name, canonical args); from the 4th identical consecutive
+    call it short-circuits with an explicit refusal that names the previous
+    result as authoritative. Any different call resets the streak, and
+    ``before_agent`` clears counters so a later user turn may legitimately
+    repeat the same write.
+    """
+
+    _ALLOWED_CONSECUTIVE = 3
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._streak_key: str | None = None
+        self._streak_count = 0
+
+    def before_agent(
+        self, state: AgentState, runtime: Runtime[Any]  # noqa: ARG002
+    ) -> None:
+        """New turn (or HITL resume): a repeat is no longer part of one loop."""
+
+        self._streak_key = None
+        self._streak_count = 0
+
+    @staticmethod
+    def _call_key(tool_call: dict[str, Any]) -> str:
+        try:
+            canonical = json.dumps(
+                tool_call.get("args") or {}, sort_keys=True, ensure_ascii=False, default=str
+            )
+        except (TypeError, ValueError):
+            canonical = repr(tool_call.get("args"))
+        digest = hashlib.sha1(canonical.encode("utf-8", "replace")).hexdigest()[:16]
+        return f"{tool_call.get('name', '')}:{digest}"
+
+    def _count(self, tool_call: dict[str, Any]) -> int:
+        key = self._call_key(tool_call)
+        if key == self._streak_key:
+            self._streak_count += 1
+        else:
+            self._streak_key = key
+            self._streak_count = 1
+        return self._streak_count
+
+    def _refusal(self, request: ToolCallRequest, count: int) -> ToolMessage:
+        name = str(request.tool_call.get("name") or "tool")
+        logger.warning(
+            "jobagent.repeated_tool_call_blocked",
+            extra={"tool": name, "consecutive": count},
+        )
+        return ToolMessage(
+            content=(
+                f"已拦截：{name} 以完全相同的参数连续执行 {self._ALLOWED_CONSECUTIVE} 次"
+                f"（本次是第 {count} 次），此前每次都已成功返回。请直接基于已有结果继续任务，"
+                "不要再次发起相同调用；若确实需要重做，先说明原因并调整参数。"
+            ),
+            name=name,
+            tool_call_id=str(request.tool_call.get("id") or "repeated-call"),
+        )
+
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], ToolMessage],
+    ) -> ToolMessage:
+        if self._count(request.tool_call) > self._ALLOWED_CONSECUTIVE:
+            return self._refusal(request, self._streak_count)
+        return handler(request)
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage]],
+    ) -> ToolMessage:
+        if self._count(request.tool_call) > self._ALLOWED_CONSECUTIVE:
+            return self._refusal(request, self._streak_count)
         return await handler(request)

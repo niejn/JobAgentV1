@@ -9,6 +9,11 @@ from jobagent.journey.resume_requests import ResumeRequest, ResumeRequestQueue
 class BossResumeRequestListener:
     """Keep transport parsing separate from durable request state."""
 
+    #: conversation_id must be the daemon-format id, str(friend.conversationId
+    #: or friendId) - resume_requests dedupes on UNIQUE(conversation_id,
+    #: source_mid), so the polling feed in boss_daemon and this realtime feed
+    #: collapse onto one row per card only when both use the same format.
+
     def __init__(self, queue: ResumeRequestQueue) -> None:
         self._queue = queue
 

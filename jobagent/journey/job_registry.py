@@ -580,44 +580,53 @@ class SQLiteJobRegistry:
         # F1-R4 layering: postings gain an identity_key column. Legacy rows
         # are backfilled by deriving the key from their own company/title,
         # then the deepest existing status per identity wins the identity row.
-        columns = {
-            row["name"]
-            for row in self._connection.execute(
-                "PRAGMA table_info(job_records)"
-            ).fetchall()
-        }
-        if "identity_key" not in columns:
-            self._connection.execute(
-                "ALTER TABLE job_records ADD COLUMN identity_key TEXT NOT NULL DEFAULT ''"
-            )
-            for row in self._connection.execute(
-                "SELECT job_id, company, title, status, first_seen_at, "
-                "last_seen_at, greeted_at FROM job_records"
-            ).fetchall():
-                key = derive_identity_key(str(row["company"]), str(row["title"]))
+        # The check-then-ALTER must serialize against concurrent initializers
+        # (fresh database + several processes opening the registry at once):
+        # BEGIN IMMEDIATE makes the loser wait, then re-read the migrated
+        # schema instead of issuing a duplicate ALTER.
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            columns = {
+                row["name"]
+                for row in self._connection.execute(
+                    "PRAGMA table_info(job_records)"
+                ).fetchall()
+            }
+            if "identity_key" not in columns:
                 self._connection.execute(
-                    "UPDATE job_records SET identity_key = ? WHERE job_id = ?",
-                    (key, row["job_id"]),
+                    "ALTER TABLE job_records ADD COLUMN identity_key TEXT NOT NULL DEFAULT ''"
                 )
-                self._connection.execute(
-                    """INSERT INTO job_identity
-                       (identity_key, company, title, status, first_seen_at,
-                        last_seen_at, greeted_at, note)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, '')
-                       ON CONFLICT(identity_key) DO UPDATE SET
-                         status = excluded.status,
-                         last_seen_at = excluded.last_seen_at""",
-                    (
-                        key,
-                        str(row["company"]),
-                        str(row["title"]),
-                        str(row["status"]),
-                        str(row["first_seen_at"]),
-                        str(row["last_seen_at"]),
-                        row["greeted_at"],
-                    ),
-                )
-        self._connection.commit()
+                for row in self._connection.execute(
+                    "SELECT job_id, company, title, status, first_seen_at, "
+                    "last_seen_at, greeted_at FROM job_records"
+                ).fetchall():
+                    key = derive_identity_key(str(row["company"]), str(row["title"]))
+                    self._connection.execute(
+                        "UPDATE job_records SET identity_key = ? WHERE job_id = ?",
+                        (key, row["job_id"]),
+                    )
+                    self._connection.execute(
+                        """INSERT INTO job_identity
+                           (identity_key, company, title, status, first_seen_at,
+                            last_seen_at, greeted_at, note)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, '')
+                           ON CONFLICT(identity_key) DO UPDATE SET
+                             status = excluded.status,
+                             last_seen_at = excluded.last_seen_at""",
+                        (
+                            key,
+                            str(row["company"]),
+                            str(row["title"]),
+                            str(row["status"]),
+                            str(row["first_seen_at"]),
+                            str(row["last_seen_at"]),
+                            row["greeted_at"],
+                        ),
+                    )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
 
 
 def _record_from_row(row: sqlite3.Row) -> JobRecord:

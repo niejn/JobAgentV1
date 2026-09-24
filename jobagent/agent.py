@@ -57,6 +57,7 @@ from jobagent.middleware import (
     MessageCompatibilityMiddleware,
     ModelCapabilityRegistry,
     PlatformBypassGuardMiddleware,
+    RepeatedToolCallGuardMiddleware,
     SingleSubagentTaskMiddleware,
 )
 from jobagent.models.llm_client import build_agent_model
@@ -84,6 +85,7 @@ from jobagent.tools import (
     build_boss_chat_history_tool,
     build_boss_chat_list_tool,
     build_boss_chat_reply_tool,
+    build_boss_chat_scan_tool,
     build_boss_greet_jobs_tool,
     build_boss_job_discovery_tool,
     build_boss_management_tools,
@@ -299,6 +301,7 @@ _BOSS_TOOL_NAMES = frozenset(
         "send_boss_resume_after_hr_reply",
         "list_boss_greetings",
         "read_boss_conversation",
+        "scan_boss_hr_replies",
         "reply_boss_greeting",
     }
 )
@@ -430,9 +433,11 @@ already_greeted_in_history / already_contacted_same_hr）：这些回执就是�
 # conversation reader the delivery agent lacked). boss_engagement owns the
 # whole post-HR-reply phase so the verify loop completes inside one task.
 _BOSS_ENGAGEMENT_PROMPT = """你是 Boss 直聘 HR 互动专家（HR 已回复阶段），只使用
-`read_boss_conversation`、`reply_boss_greeting`、`prepare_boss_resume_after_hr_reply`、
-`send_boss_resume_after_hr_reply` 和 `upload_boss_resume_pdf`。一次任务最多准备和执行
-一项外发动作（一条回复或一次投递）。
+`scan_boss_hr_replies`、`read_boss_conversation`、`reply_boss_greeting`、
+`prepare_boss_resume_after_hr_reply`、`send_boss_resume_after_hr_reply` 和
+`upload_boss_resume_pdf`。一次任务最多准备和执行一项外发动作（一条回复或一次投递）。
+发现待回复会话：批量找出谁在等我们回复用 `scan_boss_hr_replies`（只读，
+按活跃时间扫近 N 小时的会话），不要写脚本扫描。
 读会话：读取指定会话完整历史并如实转述，重要结论附原文引句，绝不臆测 HR 意图。
 回复：只有用户明确要求回复时才调用 `reply_boss_greeting`，且先读历史确认对方已收到
 什么、下一条消息该衔接什么。
@@ -1234,6 +1239,7 @@ class JobAgent:
                             self._model_capability_registry,
                             self._model_capability_key,
                         ),
+                        RepeatedToolCallGuardMiddleware(),
                         *list(spec.get("middleware", [])),
                     ]
                     if spec.pop("wants_shell", False):
@@ -1289,6 +1295,7 @@ class JobAgent:
                         TodoListMiddleware(),
                         build_hitl_middleware(),
                         SingleSubagentTaskMiddleware(),
+                        RepeatedToolCallGuardMiddleware(),
                         cast(Any, NodeTraceMiddleware()),
                     ],
                     backend=backend,
@@ -1844,6 +1851,10 @@ def build_job_agent(
                 lambda: build_send_boss_resume_after_hr_reply_tool(boss_resume_delivery),
             ),
             ("list_boss_greetings", lambda: build_boss_chat_list_tool(settings)),
+            (
+                "scan_boss_hr_replies",
+                lambda: build_boss_chat_scan_tool(settings),
+            ),
             ("save_user_fact", lambda: build_save_user_fact_tool(settings)),
             ("search_history", lambda: build_search_history_tool(settings)),
             (
@@ -2050,6 +2061,7 @@ def build_job_agent(
                     "model": effective_model,
                     "tools": _boss_tools(
                         {
+                            "scan_boss_hr_replies",
                             "read_boss_conversation",
                             "reply_boss_greeting",
                             "prepare_boss_resume_after_hr_reply",

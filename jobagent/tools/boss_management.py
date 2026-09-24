@@ -68,7 +68,20 @@ def build_boss_management_tools(state_db: Path) -> list[BaseTool]:
     async def boss_reply_view(which: str, limit: int) -> dict[str, Any]:
         if which == "inbox":
             items = service.list_inbox(limit)
-            return {"status": "ok", "which": "inbox", "count": len(items), "items": items}
+            result: dict[str, Any] = {
+                "status": "ok",
+                "which": "inbox",
+                "count": len(items),
+                "items": items,
+            }
+            if not service.monitor_status()["initialized"]:
+                result["monitor"] = "not_initialized"
+                result["hint"] = (
+                    "Boss 监控守护进程尚未完成基线扫描，inbox 只反映本地已同步的数据"
+                    "（很可能不是 Boss 上的真实情况）。请先运行 "
+                    "`jobagent boss daemon --once` 或 `jobagent watch` 启动监控。"
+                )
+            return result
         items = service.list_pending(limit)
         rendered = [
             {

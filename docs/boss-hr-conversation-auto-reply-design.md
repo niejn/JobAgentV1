@@ -11,12 +11,17 @@ jobagent boss daemon --once
 jobagent boss reply
 jobagent boss reply-worker
 jobagent boss reply-worker --once
-jobagent watch --channel wechat --channel boss
+jobagent watch
 ```
 
-当前 daemon 使用会话列表的 `lastMessage` 做低请求量变更探测，首次运行建立历史基线；后续
-发生变化的会话通过稳定 `friend_id` 拉取历史增量，新入站消息写入
-`boss_inbound_messages`。发送 worker 使用稳定的 `friend_id + friend_source + encrypt_boss_id`
+当前 daemon 的变更探测按传输自适应：CDP 会话列表带 `lastMessage` 时用其消息 id 做
+低请求量头标；HTTP 传输（`geekFilterByLabel`）不携带任何消息体，退化为会话级
+`updateTime` 头标（`boss:{conversation_id}:t{updateTime}`），变化后同样通过稳定
+`friend_id` 拉取历史增量。首轮（或无 cursor 的会话首次出现）的历史属于监控前
+冷启动原料，逐条标 `baseline=1`，不进 inbox、不触发通知，仅供回填管道；历史扫尾
+每轮最多 8 个会话、读间 1.5s 沉降，遇 `api_rejected`（warlock 页面预算耗尽）立即
+暂停本轮、下一轮换新页面续扫。新入站消息写入 `boss_inbound_messages`。发送 worker
+使用稳定的 `friend_id + friend_source + encrypt_boss_id`
 定位会话，并要求 `approved` 或带有效策略凭证的 `auto_ready` 状态。发送采用 owner、generation
 和到期 lease 原子抢占，在途任务持续续租；只恢复已过期发送。跨进程共享全局/单会话发送间隔
 和每日上限，常驻 worker 额外执行 5–10 秒随机停顿。自动授权来自独立

@@ -237,12 +237,27 @@ _Avoid_: 邮件模板、SMTP 回执、HR 已读、可被模型改写的正文
 响应），或通过 CDP 连接用户已登录的 Chrome 实例。这一约束适用于 Boss、小红书及未来可能接入
 的任何平台。
 
+### 代码风格：import 置顶（ruff `PLC0415`）
+
+所有 `import` 必须放在 Python 模块顶部（PEP 8），由 ruff 规则 `PLC0415` 强制，随 `ruff check` 与 CI 生效。
+仅两类例外：
+
+1. **循环引用**：确认无法通过调整模块边界消除时，才允许函数内 import，
+   且必须逐处标注 `# noqa: PLC0415  # circular import: <原因>`。新增 noqa 需在评审中说明。
+2. **可选依赖**：用模块顶部的 `try: import x / except ImportError` 守护
+   （如 boss_chat 的 httpx），这不算函数内 import，不属于违规。
+
+历史遗留：2026-09-23 之前的函数内 import 尚未迁移完的旧文件，逐个列在
+`pyproject.toml` 的 `[tool.ruff.lint.per-file-ignores]`（`tests/*`、`scripts/*`
+整体豁免）。迁移一个文件就删掉对应豁免行；已迁移文件与新文件一律执行本规则，
+禁止向豁免清单新增条目。
+
 ### Skill 系统设计准则：纯文档、两级分类
 
 Skill 只包含 `SKILL.md`（纯文档），不使用自定义代码（无 `tool.py` / `get_tools()`）。
 分为两级：
 
-**A. 可移植通用 Skill**（如 `ChromeCDP-setup`）：
+**A. 可移植通用 Skill**（如 `chrome-cdp-setup`）：
 - 设计目标：skill 可以在不同 Agent 之间移植——我们的 skill 可以直接用在 Pi、
   Claude Code 等其他 Agent 上，反之亦然。
 - 实现方式：SKILL.md 中的步骤只用通用工具（`execute`、`read_file`、`ls`、
@@ -258,7 +273,7 @@ Skill 只包含 `SKILL.md`（纯文档），不使用自定义代码（无 `tool
   其他 Skill（注入副本是保证，read_skill 是增益）；`install_skill` 是 HITL 写操作，
   仅主 Agent 持有。
 
-**验证**：ChromeCDP-setup 的工作流程全部使用 PowerShell 命令描述，在 Pi / Claude Code
+**验证**：chrome-cdp-setup 的工作流程全部使用 PowerShell 命令描述，在 Pi / Claude Code
 （有 bash 工具）和我们的 JobAgent（有 execute 工具）上均可直接执行；
 xhs-recruitment-email 已确定性注入 xhs_recruiting 子 Agent（见
 `docs/platform-subagent-rearchitecture-design.md` 实现补充）。

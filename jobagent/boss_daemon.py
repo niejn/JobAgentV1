@@ -8,12 +8,16 @@ import logging
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from jobagent.config import Settings
+from jobagent.journey.resume_requests import RESUME_CARD_TYPE
 from jobagent.journey.store import _enable_wal
+
+if TYPE_CHECKING:
+    from jobagent.journey.resume_requests import ResumeRequestQueue
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +72,10 @@ class BossInboundMessage:
     text: str
     sent_at: int
     raw: dict[str, Any]
+    # True → pre-monitor cold-start material, not a live HR reply. Per-message
+    # because a non-baseline poll can still meet first-seen conversations
+    # whose whole history predates the monitor.
+    baseline: bool = False
 
     @property
     def message_key(self) -> str:
@@ -118,10 +126,16 @@ class LiveBossConversationAdapter:
         settings: Settings,
         *,
         conversation_limit: int = 100,
+        history_pull_cap: int = 8,
         outbound_sink: BossOutboundEventSink | None = None,
     ) -> None:
         self._settings = settings
         self._conversation_limit = conversation_limit
+        # Per-poll bound on history reads so a cold-start sweep over ~100
+        # conversations spreads across polls instead of bursting Boss; 8 is
+        # the budget the scan tool (scan_boss_hr_replies) has proven safe
+        # against the chat page's warlock rate limiting.
+        self._history_pull_cap = history_pull_cap
         self._outbound_sink = outbound_sink
 
     async def poll(
@@ -158,36 +172,56 @@ class LiveBossConversationAdapter:
                 friend.get("encryptBossId") or friend.get("encryptFriendId") or ""
             )
             message = friend.get("lastMessage")
-            if not hr_name or not friend_id or not isinstance(message, dict):
+            if not hr_name or not friend_id:
                 continue
-            try:
-                from_id = int(message.get("fromId") or 0)
-            except (TypeError, ValueError):
-                from_id = 0
-            direction = str(message.get("direction") or "").lower()
-            body = message.get("body")
-            body_text = body.get("text") if isinstance(body, dict) else ""
-            text = str(body_text or message.get("text") or "").strip()
+            conversation_id = str(friend.get("conversationId") or friend_id)
             raw_job = friend.get("job_metadata")
             job = raw_job if isinstance(raw_job, dict) else {}
-            conversation_id = str(friend.get("conversationId") or friend_id)
             try:
-                sent_at = int(
-                    message.get("time")
-                    or message.get("createTime")
-                    or friend.get("updateTime")
-                    or 0
-                )
+                update_time = int(friend.get("updateTime") or 0)
             except (TypeError, ValueError):
-                continue
-            head_key = _platform_message_key(conversation_id, message, sent_at, text)
+                update_time = 0
+            if isinstance(message, dict):
+                # CDP transport: the listing carries the last message, so the
+                # per-message id is the head signal.
+                try:
+                    from_id = int(message.get("fromId") or 0)
+                except (TypeError, ValueError):
+                    from_id = 0
+                direction = str(message.get("direction") or "").lower()
+                body = message.get("body")
+                body_text = body.get("text") if isinstance(body, dict) else ""
+                text = str(body_text or message.get("text") or "").strip()
+                try:
+                    sent_at = int(
+                        message.get("time")
+                        or message.get("createTime")
+                        or update_time
+                        or 0
+                    )
+                except (TypeError, ValueError):
+                    continue
+                head_key = _platform_message_key(conversation_id, message, sent_at, text)
+            else:
+                # HTTP transport (geekFilterByLabel): the listing carries no
+                # per-message payload, so the conversation-level updateTime is
+                # the only change signal; the history diff resolves details.
+                message = None
+                sent_at = update_time
+                if not sent_at:
+                    continue
+                head_key = f"boss:{conversation_id}:t{sent_at}"
             next_cursor = BossConversationCursor(head_key=head_key, sent_at=sent_at)
             previous = cursors.get(conversation_id)
             if previous is not None and previous.head_key == head_key:
                 continue
             if baseline:
                 cursor_updates[conversation_id] = next_cursor
-                if text and (direction == "boss" or from_id == friend_id):
+                if (
+                    message is not None
+                    and text
+                    and (direction == "boss" or from_id == friend_id)
+                ):
                     inbound.append(
                         _inbound_from_raw(
                             message,
@@ -204,8 +238,16 @@ class LiveBossConversationAdapter:
             changed.append((friend, conversation_id, friend_id, hr_name, sent_at, head_key))
 
         if changed:
+            # Newest conversations first; the cap leaves the rest of a
+            # cold-start sweep to the next polls (cursor stays unset).
+            changed.sort(key=lambda item: item[4], reverse=True)
             async with BossChatReader(self._settings) as reader:
-                for friend, conversation_id, friend_id, hr_name, sent_at, head_key in changed:
+                for index, (friend, conversation_id, friend_id, hr_name, sent_at, head_key) in (
+                    enumerate(changed[: self._history_pull_cap])
+                ):
+                    if index:
+                        # Same settle interval the scan tool uses between reads.
+                        await asyncio.sleep(1.5)
                     history = await reader.read_conversation(
                         hr_name=hr_name, friend_id=friend_id, page=1
                     )
@@ -215,10 +257,25 @@ class LiveBossConversationAdapter:
                             hr_name,
                             history.get("error_type", "unknown"),
                         )
+                        if history.get("error_type") == "api_rejected":
+                            # The chat page's per-load automated-fetch budget is
+                            # spent; every remaining read this poll would be
+                            # rejected. Leave their cursors unset — the next
+                            # poll opens a fresh reader (fresh page, fresh
+                            # budget) and the sweep resumes there.
+                            logger.info(
+                                "Boss daemon history sweep paused; resuming next poll"
+                            )
+                            break
                         continue
-                    previous_at = cursors.get(
-                        conversation_id, BossConversationCursor("", 0)
-                    ).sent_at
+                    previous_cursor = cursors.get(conversation_id)
+                    first_seen = previous_cursor is None
+                    previous_at = (
+                        previous_cursor.sent_at if previous_cursor is not None else 0
+                    )
+                    previous_head = (
+                        previous_cursor.head_key if previous_cursor is not None else ""
+                    )
                     raw_job = history.get("job_metadata") or friend.get("job_metadata")
                     job = raw_job if isinstance(raw_job, dict) else {}
                     for raw_message in history.get("messages", []):
@@ -264,16 +321,25 @@ class LiveBossConversationAdapter:
                                         friend_id, _text, _time
                                     )
                             continue
-                        previous_head = cursors.get(
-                            conversation_id, BossConversationCursor("", 0)
-                        ).head_key
+                        # The equal-time/different-key arm catches a head
+                        # message replaced at the same timestamp — but only
+                        # for message-id cursors. Against a t{updateTime}
+                        # cursor, a message at previous_at IS the old head.
+                        same_time_is_new = previous_head != (
+                            f"boss:{conversation_id}:t{previous_at}"
+                        )
                         if (
                             normalized.sent_at > previous_at
                             or (
                                 normalized.sent_at == previous_at
+                                and same_time_is_new
                                 and normalized.message_key != previous_head
                             )
                         ):
+                            if first_seen:
+                                # Whole history predates the monitor → cold-start
+                                # material, not a live reply (no notify, no inbox).
+                                normalized = replace(normalized, baseline=True)
                             inbound.append(normalized)
                     cursor_updates[conversation_id] = BossConversationCursor(
                         head_key=head_key, sent_at=sent_at
@@ -468,7 +534,7 @@ class BossMonitorStore:
                         message.text,
                         message.sent_at,
                         json.dumps(message.raw, ensure_ascii=False),
-                        int(baseline),
+                        int(baseline or message.baseline),
                     ),
                 )
                 if cursor.rowcount == 1:
@@ -513,11 +579,13 @@ class BossConversationDaemon:
         event_sink: BossInboundEventSink | None = None,
         outbound_sink: BossOutboundEventSink | None = None,
         poll_interval: float = 30.0,
+        resume_queue: ResumeRequestQueue | None = None,
     ) -> None:
         self._adapter = adapter
         self._store = store
         self._event_sink = event_sink
         self._outbound_sink = outbound_sink
+        self._resume_queue = resume_queue
         self._poll_interval = poll_interval
         self._stop = asyncio.Event()
         self._owner = f"daemon-{uuid.uuid4().hex[:8]}"
@@ -541,14 +609,68 @@ class BossConversationDaemon:
             owner=self._owner,
             generation=generation,
         )
-        if not baseline and inserted and self._event_sink is not None:
-            self._event_sink.publish_inbound(list(inserted))
+        resume_received = self._receive_resume_requests(inserted)
+        live_inserted = [m for m in inserted if not m.baseline]
+        if not baseline and live_inserted and self._event_sink is not None:
+            self._event_sink.publish_inbound(list(live_inserted))
         return {
             "status": "ok",
             "baseline": baseline,
             "fetched": len(batch.messages),
-            "new_messages": 0 if baseline else len(inserted),
+            "new_messages": 0 if baseline else len(live_inserted),
+            "resume_requests": resume_received,
         }
+
+    def _receive_resume_requests(self, inserted: list[BossInboundMessage]) -> int:
+        """Feed HR resume-request cards into the durable queue (idempotent).
+
+        The card text label comes from the reader (boss_chat); this feed is
+        the polling-path twin of the realtime WS listener, landing in the
+        same resume_requests table keyed by mid. Baseline (cold-start) cards
+        are included: a card is actionable regardless of when it was sent.
+
+        Contract (review 2026-09-23): the queue dedupes on
+        UNIQUE(conversation_id, source_mid), so cross-path idempotency
+        (WS listener + this poll delivering the same card) holds only if
+        both paths pass the SAME conversation_id this daemon uses -
+        str(friend.conversationId or friendId). WS wiring must honor this.
+        Premise: the geekFilterByLabel listing carries no conversationId
+        (field matrix in this module's reader), so the formula degrades to
+        str(friendId) - the only key a WS packet (uids + mid only) can ever
+        match. If the listing ever starts returning conversationId !=
+        friendId, re-anchor BOTH paths on str(friendId).
+
+        Returns how many cards were received this poll.
+        """
+
+        if self._resume_queue is None:
+            return 0
+        received = 0
+        for message in inserted:
+            raw = message.raw if isinstance(message.raw, dict) else {}
+            try:
+                is_card = int(raw.get("type")) == RESUME_CARD_TYPE
+            except (TypeError, ValueError):
+                is_card = False
+            if not is_card:
+                continue
+            try:
+                source_mid = int(message.platform_message_id)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "resume card without numeric mid skipped: %s", message.message_key
+                )
+                continue
+            self._resume_queue.receive(
+                conversation_id=message.conversation_id,
+                source_mid=source_mid,
+                friend_name=message.hr_name,
+                company=message.company,
+                job_title=message.title,
+                card_payload=raw,
+            )
+            received += 1
+        return received
 
     async def run(self) -> None:
         failures = 0
@@ -585,6 +707,8 @@ class BossConversationDaemon:
                 self._store.release_lease(self._owner)
             await self._adapter.close()
             self._store.close()
+            if self._resume_queue is not None:
+                self._resume_queue.close()
 
     def stop(self) -> None:
         self._stop.set()
@@ -593,3 +717,5 @@ class BossConversationDaemon:
         self.stop()
         await self._adapter.close()
         self._store.close()
+        if self._resume_queue is not None:
+            self._resume_queue.close()

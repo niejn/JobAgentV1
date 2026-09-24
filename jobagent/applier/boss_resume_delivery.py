@@ -14,8 +14,13 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
+from playwright.async_api import async_playwright
+
+from jobagent.applier import boss_chat_session as _chat_session
+from jobagent.auth.boss_debug_chrome import BossDebugChromeError, ensure_boss_debug_chrome
 from jobagent.config import Settings
 from jobagent.crawl import CrawlGate
+from jobagent.journey.resume_deliveries import ResumeDeliveryRegistry
 from jobagent.scraper.boss import get_boss_cooldown
 from jobagent.scraper.cdp_tab_pool import CdpTabPool
 
@@ -133,7 +138,15 @@ async (payload) => {
   }).then((r) => r.json()).catch((e) => ({code: -1, message: String(e)}));
   return {step: "done", acceptCode: accept.code, acceptStatus: ((accept.zpData || {}).status || ""),
     historyCode: history.code, refreshMessage: history.message || ""};
+}
 """
+
+# The closing brace above is load-bearing: shipped 2026-09-22 with the async
+# arrow unclosed (brace delta +1), so every page.evaluate(_SEND_JS) died with
+# a browser-side SyntaxError and the registered resume tool reported
+# "send_failed" — which is what drove the field agent to script
+# prepare+send itself (workspace send_resume_goodnotes.py appended this same
+# brace at runtime and got status=confirmed). Tests pin the balance.
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,7 +295,6 @@ class BossResumeDelivery:
             prepared.job_title,
         ):
             return {"status": "failed", "error_type": "delivery_context_mismatch"}
-        from jobagent.journey.resume_deliveries import ResumeDeliveryRegistry
 
         with ResumeDeliveryRegistry(self._settings.jobagent_state_db) as registry:
             if registry.already_confirmed(
@@ -352,13 +364,11 @@ class BossResumeDelivery:
             return {"step": "cooldown", "message": f"Boss 冷却中（约 {remaining_min} 分钟）"}
         if self._crawl_gate is not None:
             await self._crawl_gate.acquire("boss-cdp")
-        from playwright.async_api import async_playwright
-
-        from jobagent.applier.boss_chat_session import get_chat_page
 
         playwright = await async_playwright().start()
         pool: CdpTabPool | None = None
         try:
+            await ensure_boss_debug_chrome(self._settings)
             browser = await playwright.chromium.connect_over_cdp(
                 self._settings.debug_chrome_cdp_endpoint, timeout=10_000
             )
@@ -366,11 +376,13 @@ class BossResumeDelivery:
             if context is None:
                 return {"step": "browser", "message": "Chrome 中没有可用的登录上下文"}
             pool = CdpTabPool(context)
-            page, fresh = await get_chat_page(pool)
+            page, fresh = await _chat_session.get_chat_page(pool)
             if fresh:
                 await page.goto(_CHAT_URL, wait_until="domcontentloaded", timeout=30_000)
                 await asyncio.sleep(1.0)
             return await asyncio.wait_for(page.evaluate(script, payload), timeout=45.0)
+        except BossDebugChromeError as exc:
+            return {"step": "browser", "message": str(exc)}
         except Exception as exc:
             logger.info("Boss resume delivery page evaluation failed", exc_info=True)
             return {"step": "page", "message": type(exc).__name__}
@@ -379,8 +391,6 @@ class BossResumeDelivery:
             # connection, which dies on stop(); a stale _parked handle is
             # what caused TargetClosedError when the next _evaluate() call
             # tried to reuse it across connections (live finding 2026-09-20).
-            import jobagent.applier.boss_chat_session as _chat_session
-
             _chat_session._parked = None  # noqa: SLF001
             if pool is not None:
                 await pool.close()

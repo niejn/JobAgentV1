@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from typing import Any
@@ -107,7 +108,7 @@ class BossAccessError(RuntimeError):
     """Boss access failed; ``code`` tells the Agent what to do next.
 
     Codes:
-    - ``cdp_not_ready``  - Chrome debug port is down -> follow skills/ChromeCDP-setup/SKILL.md
+    - ``cdp_not_ready``  - Chrome debug port is down -> follow skills/chrome-cdp-setup/SKILL.md
     - ``cooldown_active`` - rate-limit cooldown running -> wait, do not retry
     - ``boss_risk_control`` - server rejected the request -> cooldown started
     - ``boss_access_denied`` - login expired or automation detected -> check the Chrome window
@@ -154,7 +155,7 @@ class BossCooldownManager:
         remaining = self._blocked_until - time.monotonic()
         if remaining <= 0:
             return True, 0, ""
-        return False, max(1, int(remaining // 60)), self._reason
+        return False, max(1, math.ceil(remaining / 60)), self._reason
 
     def reset(self) -> None:
         self._blocked_until = 0.0

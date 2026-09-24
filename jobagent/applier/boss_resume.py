@@ -35,6 +35,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from playwright.async_api import async_playwright
+
+from jobagent.auth.boss_debug_chrome import BossDebugChromeError, ensure_boss_debug_chrome
 from jobagent.config import Settings
 from jobagent.crawl import CrawlGate
 from jobagent.scraper.boss import BossAccessError, get_boss_cooldown
@@ -122,19 +125,21 @@ class BossResumeUploader:
         self._tab_pool: CdpTabPool | None = None
 
     async def __aenter__(self) -> BossResumeUploader:
-        from playwright.async_api import async_playwright
-
         self._playwright = await async_playwright().start()
         try:
+            await ensure_boss_debug_chrome(self._settings)
             browser = await self._playwright.chromium.connect_over_cdp(
                 self._settings.debug_chrome_cdp_endpoint,
                 timeout=10_000,
             )
+        except BossDebugChromeError as exc:
+            await self._playwright.stop()
+            raise BossAccessError(str(exc), code="cdp_not_ready") from exc
         except Exception as exc:
             await self._playwright.stop()
             raise BossAccessError(
                 "Boss CDP: 无法连接 Chrome--Chrome 调试端口未就绪。"
-                "请按 skills/ChromeCDP-setup/SKILL.md 启动调试模式后重试。",
+                "请按 skills/chrome-cdp-setup/SKILL.md 启动调试模式后重试。",
                 code="cdp_not_ready",
             ) from exc
         context = next((c for c in browser.contexts if c.pages), None)

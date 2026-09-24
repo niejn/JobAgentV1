@@ -46,6 +46,7 @@ dependencies = [
   "uvicorn>=0.52.4",
   "fastapi>=0.141.1",
   "python-multipart>=0.0.20",
+  "prompt-toolkit>=3.0.0",
 ]
 
 [dependency-groups]
@@ -78,11 +79,49 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+select = ["E", "F", "I", "UP", "B", "PLC0415"]
 
 [tool.ruff.lint.per-file-ignores]
 # Prompt 文本常量含不可重排的长中文行（重排会改变字符串字节）。
 "jobagent/prompts/*" = ["E501"]
+# import 置顶迁移遗留文件（规则见 CONTEXT.md「代码风格：import 置顶」）。
+# 迁移完成一个文件就从下面清单移除一行；禁止把新文件加进来。
+"tests/*" = ["PLC0415"]
+"scripts/*" = ["PLC0415"]
+"jobagent/agent.py" = ["PLC0415"]
+"jobagent/applier/boss_chat_send.py" = ["PLC0415"]
+"jobagent/applier/boss_direct_contact.py" = ["PLC0415"]
+"jobagent/applier/boss_ws.py" = ["PLC0415"]
+"jobagent/applier/email_reader.py" = ["PLC0415"]
+"jobagent/applier/email_sender.py" = ["PLC0415"]
+"jobagent/boss_daemon.py" = ["PLC0415"]
+"jobagent/boss_reply_worker.py" = ["PLC0415"]
+"jobagent/cli.py" = ["PLC0415"]
+"jobagent/gateway/wechat_channel.py" = ["PLC0415"]
+"jobagent/hr_reply/orchestrator.py" = ["PLC0415"]
+"jobagent/hr_reply/policy.py" = ["PLC0415"]
+"jobagent/interview/research.py" = ["PLC0415"]
+"jobagent/journey/job_registry.py" = ["PLC0415"]
+"jobagent/journey/xhs_email_drafts.py" = ["PLC0415"]
+"jobagent/models/fallback.py" = ["PLC0415"]
+"jobagent/models/llm_client.py" = ["PLC0415"]
+"jobagent/observability.py" = ["PLC0415"]
+"jobagent/scraper/boss_cdp.py" = ["PLC0415"]
+"jobagent/scraper/boss_http.py" = ["PLC0415"]
+"jobagent/scraper/xhs.py" = ["PLC0415"]
+"jobagent/scraper/xhs_cdp.py" = ["PLC0415"]
+"jobagent/tools/boss_chat.py" = ["PLC0415"]
+"jobagent/tools/boss_chat_send.py" = ["PLC0415"]
+"jobagent/tools/boss_greet.py" = ["PLC0415"]
+"jobagent/tools/boss_management.py" = ["PLC0415"]
+"jobagent/tools/boss_resume.py" = ["PLC0415"]
+"jobagent/tools/email_apply.py" = ["PLC0415"]
+"jobagent/tools/email_inbox.py" = ["PLC0415"]
+"jobagent/tools/job_discovery.py" = ["PLC0415"]
+"jobagent/tools/job_identity_merge.py" = ["PLC0415"]
+"jobagent/tools/memory.py" = ["PLC0415"]
+"jobagent/tools/xhs_recruitment.py" = ["PLC0415"]
+"jobagent/tools/xhs_search.py" = ["PLC0415"]
 
 [tool.mypy]
 python_version = "3.11"

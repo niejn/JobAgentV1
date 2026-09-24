@@ -141,7 +141,7 @@ def build_boss_job_discovery_tool(
             )
         except BossAccessError as exc:
             # Pass the real reason through so the Agent can act on it:
-            # cdp_not_ready -> follow skills/ChromeCDP-setup/SKILL.md;
+            # cdp_not_ready -> follow skills/chrome-cdp-setup/SKILL.md;
             # cooldown_active / boss_risk_control -> stop retrying and wait.
             result: dict[str, Any] = {
                 "status": "blocked",

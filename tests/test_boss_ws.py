@@ -5,7 +5,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from jobagent.applier.boss_ws import (
+    BossConversationTarget,
     BossMqttWsClient,
+    BossPublishAmbiguous,
+    BossWsCredentials,
     _extract_nodes,
     encode_mqtt_connect,
     encode_mqtt_publish,
@@ -17,6 +20,8 @@ from jobagent.applier.boss_ws import (
     mqtt_puback_packet_id,
     mqtt_publish_payload,
     probe_ws_handshake,
+    send_text_to_conversation,
+    send_text_to_target,
 )
 
 
@@ -147,3 +152,103 @@ async def test_fetch_ws_nodes_redacts_url_parameters() -> None:
     assert result.status == "ok"
     assert result.nodes == ("ws.zhipin.com", "ws6.zhipin.com")
     assert "secret" not in repr(result)
+
+
+def _target() -> BossConversationTarget:
+    return BossConversationTarget(
+        friend_id=7,
+        friend_source=0,
+        encrypt_boss_id="e",
+        name="HR",
+        company="c",
+        job_title="t",
+    )
+
+
+def _client(publish_side_effect: BaseException | None = None) -> MagicMock:
+    client = MagicMock()
+    client.connect = AsyncMock()
+    client.publish_text = AsyncMock(side_effect=publish_side_effect)
+    client.close = AsyncMock()
+    return client
+
+
+@pytest.mark.asyncio
+async def test_ack_loss_after_publish_is_ambiguous_and_keeps_target() -> None:
+    """Field finding 2026-09-22: PUBACK loss while the message still lands.
+
+    A publish that already left the socket must surface as
+    BossPublishAmbiguous carrying the resolved target, so callers verify by
+    history instead of recording a definite failure or re-sending blind.
+    """
+    target = _target()
+    credentials = BossWsCredentials(1, "p", "w", ("ws.zhipin.com",))
+    client = _client(TimeoutError("ack window elapsed"))
+
+    with (
+        patch(
+            "jobagent.applier.boss_ws.fetch_ws_credentials",
+            new=AsyncMock(return_value=credentials),
+        ),
+        patch("jobagent.applier.boss_ws.BossMqttWsClient", return_value=client),
+    ):
+        with pytest.raises(BossPublishAmbiguous) as caught:
+            await send_text_to_target(cookies={}, target=target, text="hi")
+
+    assert caught.value.target == target
+    assert isinstance(caught.value.original, TimeoutError)
+    client.publish_text.assert_awaited_once()
+    client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_conversation_send_ambiguity_carries_resolved_target() -> None:
+    """send_text_to_conversation resolves the target internally; on ack loss
+    the caller would otherwise have nothing to verify with (the gap that
+    forced the 2026-09-22 workspace-script workaround)."""
+    target = _target()
+    credentials = BossWsCredentials(1, "p", "w", ("ws.zhipin.com",))
+    client = _client(ConnectionError("Boss WebSocket closed before PUBACK"))
+
+    with (
+        patch(
+            "jobagent.applier.boss_ws.find_conversation_target",
+            new=AsyncMock(return_value=target),
+        ),
+        patch(
+            "jobagent.applier.boss_ws.fetch_ws_credentials",
+            new=AsyncMock(return_value=credentials),
+        ),
+        patch("jobagent.applier.boss_ws.BossMqttWsClient", return_value=client),
+    ):
+        with pytest.raises(BossPublishAmbiguous) as caught:
+            await send_text_to_conversation(
+                cookies={}, company="c", job_title="t", text="hi"
+            )
+
+    assert caught.value.target == target
+    assert isinstance(caught.value.original, ConnectionError)
+
+
+@pytest.mark.asyncio
+async def test_connect_failure_before_publish_is_not_ambiguous() -> None:
+    """Boundary: nothing was sent yet, so the failure stays definite."""
+    target = _target()
+    credentials = BossWsCredentials(1, "p", "w", ("ws.zhipin.com",))
+    client = MagicMock()
+    client.connect = AsyncMock(side_effect=ConnectionError("CONNACK rejected"))
+    client.publish_text = AsyncMock()
+    client.close = AsyncMock()
+
+    with (
+        patch(
+            "jobagent.applier.boss_ws.fetch_ws_credentials",
+            new=AsyncMock(return_value=credentials),
+        ),
+        patch("jobagent.applier.boss_ws.BossMqttWsClient", return_value=client),
+    ):
+        with pytest.raises(ConnectionError) as caught:
+            await send_text_to_target(cookies={}, target=target, text="hi")
+
+    assert not isinstance(caught.value, BossPublishAmbiguous)
+    client.publish_text.assert_not_awaited()

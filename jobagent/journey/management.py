@@ -2,10 +2,11 @@
 
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from jobagent.journey.store import SQLiteJourneyStore
+from jobagent.journey.store import OpportunityJourney, SQLiteJourneyStore
 
 
 class JourneyChanges(BaseModel):
@@ -17,8 +18,10 @@ class JourneyChanges(BaseModel):
     job_description: str | None = Field(default=None, max_length=100000)
 
     @model_validator(mode="after")
-    def nonempty_patch(self):
-        if not self.model_fields_set or any(getattr(self, key) is None for key in self.model_fields_set):
+    def nonempty_patch(self) -> "JourneyChanges":
+        if not self.model_fields_set or any(
+            getattr(self, key) is None for key in self.model_fields_set
+        ):
             raise ValueError("Provide changed fields only; null is not a field value")
         return self
 
@@ -36,31 +39,41 @@ class JourneyUpdate(JourneyTarget):
     changes: JourneyChanges
 
 
-def _summary(store, journey):
+def _summary(store: SQLiteJourneyStore, journey: OpportunityJourney) -> dict[str, Any]:
     return {**asdict(journey), **store.journey_counts(journey.id),
-            "created_at": journey.created_at.isoformat(), "updated_at": journey.updated_at.isoformat()}
+            "created_at": journey.created_at.isoformat(),
+            "updated_at": journey.updated_at.isoformat()}
 
 
-def list_journeys(path: Path, *, company="", include_deleted=False, limit=50, offset=0):
+def list_journeys(
+    path: Path, *, company: str = "", include_deleted: bool = False,
+    limit: int = 50, offset: int = 0,
+) -> list[dict[str, Any]]:
     with SQLiteJourneyStore(path) as store:
         return [_summary(store, journey) for journey in store.list_journeys(
             company=company, include_deleted=include_deleted, limit=limit, offset=offset)]
 
 
-def get_journey(path: Path, journey_id: str):
+def get_journey(path: Path, journey_id: str) -> dict[str, Any]:
     with SQLiteJourneyStore(path) as store:
         journey = store.get_journey(journey_id)
         return {**_summary(store, journey),
                 "change_history": store.journey_change_history(journey_id),
                 "tasks": [asdict(item) for item in store.list_tasks(journey_id, limit=500)],
                 "artifacts": [asdict(item) for item in store.list_artifacts(journey_id, limit=500)],
-                "job_description_versions": [asdict(item) for item in store.list_job_description_versions(journey_id, limit=500)]}
+                "job_description_versions": [
+                    asdict(item)
+                    for item in store.list_job_description_versions(journey_id, limit=500)
+                ]}
 
 
-def change_journey(path: Path, action: str, request: JourneyTarget):
+def change_journey(path: Path, action: str, request: JourneyTarget) -> dict[str, Any]:
     with SQLiteJourneyStore(path) as store:
         journey = store.manage_journey(
             **request.model_dump(exclude={"changes"}), action=action,
-            changes=request.changes.model_dump(exclude_unset=True) if isinstance(request, JourneyUpdate) else {},
+            changes=(
+                request.changes.model_dump(exclude_unset=True)
+                if isinstance(request, JourneyUpdate) else {}
+            ),
         )
         return _summary(store, journey)

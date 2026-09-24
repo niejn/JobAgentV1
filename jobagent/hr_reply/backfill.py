@@ -127,7 +127,7 @@ def _conversation_history(
         entry["messages"].append(str(text))
     sent = connection.execute(
         """SELECT conversation_id, draft_text FROM boss_reply_queue
-        WHERE sent_at IS NOT NULL AND draft_text != ''
+        WHERE status='submitted' AND sent_at IS NOT NULL AND draft_text != ''
         ORDER BY sent_at DESC LIMIT ?""",
         (limit,),
     ).fetchall()

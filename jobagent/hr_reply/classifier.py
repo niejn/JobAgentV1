@@ -141,13 +141,24 @@ class HrQuestionClassifier:
             return Classification.degraded_classification(
                 f"llm_unavailable:{type(exc).__name__}"
             )
-        intent = str(raw.get("intent") or "unknown")
+        # Some LangChain adapters return a plain dict even when structured
+        # output was requested.  Validate it again at this trust boundary:
+        # malformed values (including NaN confidence) must degrade to human
+        # review instead of accidentally passing a numeric policy gate.
+        try:
+            parsed = ClassifySchema.model_validate(raw)
+        except Exception as exc:  # noqa: BLE001 - same safe degradation contract
+            logger.warning("hr classifier returned invalid output: %s", type(exc).__name__)
+            return Classification.degraded_classification(
+                f"invalid_llm_output:{type(exc).__name__}"
+            )
+        intent = parsed.intent
         if intent not in INTENTS:
             intent = "unknown"
         return Classification(
             intent=intent,
-            confidence=float(raw.get("confidence") or 0.0),
-            negotiation_followup=bool(raw.get("negotiation_followup")),
-            question_summary=str(raw.get("question_summary") or "")[:200],
+            confidence=parsed.confidence,
+            negotiation_followup=parsed.negotiation_followup,
+            question_summary=parsed.question_summary[:200],
             required_facts=INTENT_FACT_REQUIREMENTS.get(intent, ()),
         )

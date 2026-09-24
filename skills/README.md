@@ -52,8 +52,10 @@ version: 1.0.0
 
 | 目录 | 用途 |
 |---|---|
-| `ChromeCDP-setup` | 检测并启动 Chrome 远程调试端口 |
+| `chrome-cdp-setup` | 检测并启动 Chrome 远程调试端口 |
 | `xhs-recruitment-email` | 小红书招人帖邮件投递全流程（保存帖→核对→草稿→审批） |
+| `boss-delivery` | Boss 直聘岗位投递全流程（读会话→准备→审批→发送→回执核验，含 ACK 丢失口径） |
+| `resume-docx-layout` | 简历内容 JSON → v7 定稿版式 docx（内容/排版分离，出新版只改数据） |
 
 ## JobAgent 运行时
 
@@ -78,9 +80,10 @@ Skill 不会被导入为 Python 代码；携带的脚本由模型经 `execute` �
 
 ### 渠道工作流 Skill
 
-`xhs-recruitment-email` 这类渠道工作流 Skill 引用 JobAgent 业务 Tool（如
-`analyze_recruitment_note`），不满足上面的通用工具可移植准则，因此单独归类：
-它在 `build_job_agent` 装配时被**确定性注入**所属 Subagent 的 system prompt
-（剥掉 frontmatter，仅注入正文），不依赖模型主动读取；Subagent 同时持有只读
-`read_skill`，用于会话中途安装的新版本或读取其他 Skill。`install_skill` 是
-HITL 写操作，仅主 Agent 持有。
+`xhs-recruitment-email`（注入 xhs_recruiting）与 `boss-delivery`（注入
+boss_engagement）这类渠道工作流 Skill 引用 JobAgent 业务 Tool（如
+`analyze_recruitment_note`、`prepare_boss_resume_after_hr_reply`），不满足上面的
+通用工具可移植准则，因此单独归类：它们在 `build_job_agent` 装配时被**确定性注入**
+所属 Subagent 的 system prompt（剥掉 frontmatter，仅注入正文），不依赖模型主动
+读取；持有只读 `read_skill` 的 Subagent（如 xhs_recruiting）可在会话中途读取
+新版本或其他 Skill。`install_skill` 是 HITL 写操作，仅主 Agent 持有。

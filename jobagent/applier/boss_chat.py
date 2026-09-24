@@ -31,19 +31,77 @@ import asyncio
 import logging
 import time
 from collections.abc import Mapping
+from types import ModuleType
 from typing import Any
 from urllib.parse import urlsplit
 
+from playwright.async_api import async_playwright
+
+from jobagent.applier import boss_chat_session as session_mod
+from jobagent.auth.boss_debug_chrome import BossDebugChromeError, ensure_boss_debug_chrome
+from jobagent.auth.browser_login import sync_boss_cookies_from_cdp_context
+from jobagent.auth.cookie_manager import get_cookies
 from jobagent.config import Settings
+from jobagent.journey.job_registry import SQLiteJobRegistry
+from jobagent.journey.resume_requests import RESUME_CARD_TYPE
 from jobagent.scraper.cdp_tab_pool import CdpTabPool
+
+httpx: ModuleType | None
+try:
+    import httpx
+except ImportError:  # optional transport dependency
+    httpx = None
 
 logger = logging.getLogger(__name__)
 
+#: Non-text Boss message labels (chat-core enum; see
+#: docs/boss-card-message-ingestion-design.md). Only ACTIONABLE types are
+#: written into ``text`` - the sole channel the daemon inbound pipeline and
+#: the reply classifier read - so stickers/images cannot flood the human
+#: review queue. Every other enumerated type surfaces as ``card_label`` on
+#: the tool result (agent-visible, behavior-neutral).
+_CARD_LABELS: dict[int, str] = {
+    2: "[语音消息]",
+    3: "[图片消息]",
+    4: "[动作卡片]",
+    7: "[对话卡片]",
+    8: "[职位卡片]",
+    9: "[简历请求卡片]",
+    12: "[链接消息]",
+    13: "[视频消息]",
+    14: "[面试卡片]",
+    19: "[简历分享]",
+    20: "[表情]",
+    25: "[评价]",
+}
+
+
+def _apply_card_semantics(message: dict[str, Any]) -> None:
+    """Label one mapped history message that carries no text.
+
+    Card messages (resume requests, job cards...) have no ``body.text`` by
+    protocol; without this the TCL 2026-09-23 resume-request card read back
+    as an empty message. ``bodyJson`` from the page JS becomes ``body_json``
+    for structure mining once a raw-body capture exists.
+    """
+
+    body_json = str(message.pop("bodyJson", "") or "")
+    if body_json:
+        message["body_json"] = body_json
+    if str(message.get("text") or ""):
+        return
+    try:
+        message_type = int(message.get("type"))
+    except (TypeError, ValueError):
+        return
+    if message_type == RESUME_CARD_TYPE:
+        message["text"] = _CARD_LABELS[RESUME_CARD_TYPE]
+    elif message_type in _CARD_LABELS:
+        message["card_label"] = _CARD_LABELS[message_type]
+
 
 async def _get_parked_page(pool: Any) -> tuple[Any, bool]:
-    from jobagent.applier.boss_chat_session import get_chat_page
-
-    return await get_chat_page(pool)
+    return await session_mod.get_chat_page(pool)
 
 
 _CHAT_PAGE_PATH = "/web/geek/chat"
@@ -55,11 +113,6 @@ _MAX_FRIENDS = 100
 
 async def _sync_live_boss_cookies(settings: Settings) -> int:
     """Refresh the HTTP session from the same debug Chrome used for login."""
-
-    from playwright.async_api import async_playwright
-
-    from jobagent.auth.boss_debug_chrome import ensure_boss_debug_chrome
-    from jobagent.auth.browser_login import sync_boss_cookies_from_cdp_context
 
     await ensure_boss_debug_chrome(settings)
     driver = await async_playwright().start()
@@ -94,11 +147,7 @@ async def list_boss_greetings_http(
     relation endpoint; it remains safe when the chat SPA renderer is blocked.
     """
 
-    from jobagent.auth.cookie_manager import get_cookies
-
-    try:
-        import httpx
-    except ImportError:
+    if httpx is None:
         return {"status": "failed", "error_type": "httpx_unavailable"}
     try:
         saved = await _sync_live_boss_cookies(settings)
@@ -239,7 +288,6 @@ def _resolve_registry_job_metadata(
 
     if not company.strip() or not title.strip():
         return None
-    from jobagent.journey.job_registry import SQLiteJobRegistry
 
     with SQLiteJobRegistry(settings.jobagent_state_db) as registry:
         matches = [
@@ -457,6 +505,8 @@ async (payload) => {
     messages: msgs.map((m) => {
       const b = m.body || {};
       const fromUid = m.fromId || (m.from && m.from.uid) || 0;
+      const text = String(b.text || m.text || b.content || m.content || "")
+        .slice(0, 500);
       return {
         mid: m.mid || m.msgId || m.cmid || 0,
         direction: String(fromUid) === String(((window._PAGE || {}).uid))
@@ -466,8 +516,10 @@ async (payload) => {
         time: m.time || m.createTime || 0,
         type: m.type != null ? m.type : m.messageType,
         job: jobFromMessage(m),
-        text: String(b.text || m.text || b.content || m.content || "")
-          .slice(0, 500),
+        text,
+        // Card payloads (resume requests, job cards...) carry no text; pass
+        // the raw body through so Python can label and mine it.
+        bodyJson: text ? "" : JSON.stringify(b).slice(0, 400),
       };
     }),
   };
@@ -484,14 +536,16 @@ class BossChatReader:
         self._tab_pool: CdpTabPool | None = None
 
     async def __aenter__(self) -> BossChatReader:
-        from playwright.async_api import async_playwright
-
         self._playwright = await async_playwright().start()
         try:
+            await ensure_boss_debug_chrome(self._settings)
             browser = await self._playwright.chromium.connect_over_cdp(
                 self._settings.debug_chrome_cdp_endpoint,
                 timeout=10_000,
             )
+        except BossDebugChromeError as exc:
+            await self._playwright.stop()
+            raise ConnectionError(str(exc)) from exc
         except Exception as exc:
             await self._playwright.stop()
             raise ConnectionError(
@@ -591,8 +645,6 @@ class BossChatReader:
                         exc_info=True,
                     )
                     # drop the dead parked page so the next loop gets a new tab
-                    import jobagent.applier.boss_chat_session as session_mod
-
                     session_mod._parked = None
                     continue
                 return {
@@ -642,6 +694,7 @@ class BossChatReader:
                     message["job_metadata"] = _normalize_job_metadata(
                         raw_message_job, source="conversation_message"
                     )
+                _apply_card_semantics(message)
             logger.info(
                 "Boss chat history: %d messages with %s", len(messages), hr_name
             )

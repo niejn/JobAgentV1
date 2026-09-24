@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from jobagent.journey.store import OpportunityJourney, SQLiteJourneyStore
 
@@ -19,9 +19,11 @@ class CreateJourneyRequest(BaseModel):
     department: str = Field(default="", max_length=200)
     recruiting_cycle: str = Field(default="", max_length=100)
 
-    @field_validator("company", "role", "source_job_id", "department", "recruiting_cycle", "job_description")
+    @field_validator(
+        "company", "role", "source_job_id", "department", "recruiting_cycle", "job_description"
+    )
     @classmethod
-    def strip_text(cls, value: str, info) -> str:
+    def strip_text(cls, value: str, info: ValidationInfo) -> str:
         value = value.strip()
         if info.field_name in {"company", "role"} and not value:
             raise ValueError("company and role must not be blank")
@@ -34,11 +36,13 @@ def create_journey(path: Path, request: CreateJourneyRequest) -> tuple[Opportuni
     No network side effects and no fabricated JD/stage. Source IDs are authoritative;
     without an ID only the exact company/role/department/cycle tuple is deduplicated.
     """
-    key = "source:" + request.source_job_id if request.source_job_id else "fields:" + hashlib.sha256(
-        json.dumps([request.company.casefold(), request.role.casefold(),
-                    request.department.casefold(), request.recruiting_cycle.casefold()],
-                   ensure_ascii=False).encode()
-    ).hexdigest()
+    key = (
+        "source:" + request.source_job_id if request.source_job_id else "fields:" + hashlib.sha256(
+            json.dumps([request.company.casefold(), request.role.casefold(),
+                        request.department.casefold(), request.recruiting_cycle.casefold()],
+                       ensure_ascii=False).encode()
+        ).hexdigest()
+    )
     with SQLiteJourneyStore(path) as store:
         return store.create_once(creation_key=key, **request.model_dump(exclude={"source_job_id"}))
 

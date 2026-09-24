@@ -154,6 +154,7 @@ async def _run_boss_daemon(*, run_once: bool, interval: float) -> None:
         LiveBossConversationAdapter,
     )
     from jobagent.boss_reply_service import BossReplyApplicationService
+    from jobagent.journey.resume_requests import ResumeRequestQueue
 
     settings = get_settings()
     daemon = BossConversationDaemon(
@@ -161,6 +162,7 @@ async def _run_boss_daemon(*, run_once: bool, interval: float) -> None:
         BossMonitorStore(settings.jobagent_state_db),
         poll_interval=interval,
         event_sink=BossReplyApplicationService(settings.jobagent_state_db),
+        resume_queue=ResumeRequestQueue(settings.jobagent_state_db),
     )
     if run_once:
         result = await daemon.run_once()
@@ -487,12 +489,12 @@ def _render_wechat_qr(img_content: str) -> None:
     "channels",
     multiple=True,
     type=click.Choice(["wechat", "boss"]),
-    default=["wechat"],
+    default=["wechat", "boss"],
     show_default=True,
     help="Gateway channels to run.",
 )
 def watch_command(channels: tuple[str, ...]) -> None:
-    """Run the HR Gateway process: WeChat bot + job progress commands."""
+    """Run the HR Gateway process: WeChat bot + Boss reply pipeline."""
 
     asyncio.run(_watch(channels=channels))
 
@@ -538,6 +540,7 @@ async def _watch(channels: tuple[str, ...]) -> None:
         )
         from jobagent.hr_reply.orchestrator import HrReplyOrchestrator
         from jobagent.hr_reply.policy import ConversationStateStore
+        from jobagent.journey.resume_requests import ResumeRequestQueue
 
         def _note_manual_outbound(friend_id: int, text: str, sent_at: int) -> None:
             """Takeover detection (design P0-1): outbound message not matching
@@ -576,6 +579,7 @@ async def _watch(channels: tuple[str, ...]) -> None:
             ),
             BossMonitorStore(settings.jobagent_state_db),
             event_sink=service,
+            resume_queue=ResumeRequestQueue(settings.jobagent_state_db),
         )
         boss_queue = BossReplyQueue(settings.jobagent_state_db)
         boss_worker = BossReplyWorker(

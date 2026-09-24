@@ -153,6 +153,11 @@ JD + Candidate Background
   15:33 的空消息=简历请求卡片（type 9/action 类），渲染为「拒绝/同意」
   按钮（`.btn-v2 btn-outline-v2` / `.btn-v2 btn-sure-v2`，app chunk
   @1063580 组件）。
+- **卡片消息接入已实现（2026-09-23）**：`read_boss_conversation` 对空文本卡片
+  打标签（type 9 写入 text=`[简历请求卡片]`，其余枚举类型走 `card_label`），
+  daemon 轮询侧把 type 9 幂等灌入 `resume_requests`（与 WS 监听共用表）。
+  设计与诚实边界见 `docs/boss-card-message-ingestion-design.md`；type-9 的
+  body 内部结构仍待一次 raw bytes 抓包。
 - **接口头矩阵（net03 成功请求逐个比对，2026-08-28 定稿）**：
   `zp_token` 头的值 = cookie `bst`（chat-core CookieUtil.get("bst") 实锤）。
   各接口组合不同——filterByLabel: zp_token；getGeekFriendList: zp_token +

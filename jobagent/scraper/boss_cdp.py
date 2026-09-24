@@ -121,7 +121,7 @@ class BossCdpBackend:
                 await driver.stop()
                 raise BossAccessError(
                     "Boss CDP: 无法连接 Chrome--Chrome 调试端口未就绪。请按以下步骤设置:\n"
-                    "1. 读取 skills/ChromeCDP-setup/SKILL.md\n"
+                    "1. 读取 skills/chrome-cdp-setup/SKILL.md\n"
                     "2. 按 SKILL.md 中的 4 个步骤启动 Chrome 调试模式\n"
                     "3. 重试本次操作",
                     code="cdp_not_ready",

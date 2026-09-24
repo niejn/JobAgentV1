@@ -81,3 +81,20 @@ def _redirect_cli_setup_logging_to_tests() -> Iterator[None]:
         yield
     finally:
         cli_module.setup_logging = original
+
+
+@pytest.fixture(autouse=True)
+def _isolate_default_data_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep default Settings() away from production data dirs.
+
+    Field finding 2026-09-23: tests that build Settings() without explicit
+    paths drove real conversation turns and wrote fixture dialogs into
+    ``data/conversations/``. Every data-rooted Settings default is pointed
+    at the test's tmp_path here; tests that pass explicit paths override
+    these env values anyway.
+    """
+    monkeypatch.setenv("JOBAGENT_STATE_DB", str(tmp_path / "state.db"))
+    monkeypatch.setenv("JOBAGENT_CHECKPOINT_DB", str(tmp_path / "checkpoints.db"))
+    monkeypatch.setenv("JOBAGENT_ARTIFACT_DIR", str(tmp_path / "journeys"))
+    monkeypatch.setenv("JOBAGENT_MEMORY_DIR", str(tmp_path / "memory"))
+    monkeypatch.setenv("JOBAGENT_OPPORTUNITY_DIR", str(tmp_path / "opportunities"))

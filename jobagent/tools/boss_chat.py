@@ -4,15 +4,31 @@ Read-only: no confirmation gate (nothing is sent). Send/reply (TR-6) is a
 separate, HITL-gated tool.
 """
 
-from __future__ import annotations
-
+import asyncio
 import logging
+import time
+from datetime import datetime
 from typing import Any
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from jobagent.config import Settings
+
+logger = logging.getLogger(__name__)
+
+
+def _as_ms(value: Any) -> int:
+    """Boss timestamps arrive as s or ms epoch depending on endpoint; normalize."""
+    try:
+        ts = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return ts if ts >= 1_000_000_000_000 else ts * 1000
+
+
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -80,10 +96,14 @@ def build_boss_chat_list_tool(settings: Settings) -> StructuredTool:
 
 __all__ = [
     "BossChatHistoryRequest",
-    "build_boss_chat_history_tool",
     "BossChatListRequest",
+    "BossChatScanRequest",
+    "build_boss_chat_history_tool",
     "build_boss_chat_list_tool",
+    "build_boss_chat_scan_tool",
 ]
+
+
 
 
 class BossChatHistoryRequest(BaseModel):
@@ -133,4 +153,148 @@ def build_boss_chat_history_tool(settings: Settings) -> StructuredTool:
             "恢复 job_metadata / job_candidates；没有唯一证据时不会猜测职位 URL。"
         ),
         args_schema=BossChatHistoryRequest,
+    )
+
+
+class BossChatScanRequest(BaseModel):
+    """Scan recent Boss conversations for HR replies awaiting our response."""
+
+    hours_back: float = Field(
+        default=24.0, ge=0.5, le=168.0, description="只扫描这段时间内活跃的会话。"
+    )
+    max_reads: int = Field(
+        default=8, ge=1, le=20, description="最多逐个读取多少个候选会话（按活跃时间倒序）。"
+    )
+
+
+def build_boss_chat_scan_tool(settings: Settings) -> StructuredTool:
+    """Incremental HR-reply sweep as a registered read-only tool.
+
+    Replaces the recurring workspace scan_hr_round*.py pattern: ONE
+    conversation-list call, then bounded history reads (max_reads, newest
+    first) only for conversations active since the cutoff, reporting the
+    ones whose last message is inbound — the HR is waiting on us.
+    """
+
+    async def _read_messages(reader: Any, hr_name: str) -> tuple[list[Any], str]:
+        result = await reader.read_conversation(hr_name=hr_name)
+        if result.get("status") != "ok":
+            return [], str(result.get("status") or "failed")
+        messages = list(result.get("messages") or [])
+        if not messages:
+            # Live finding (workspace reread_empty.py): the first read after a
+            # fresh activity burst can return empty; one retry settles it.
+            await asyncio.sleep(1.5)
+            result = await reader.read_conversation(hr_name=hr_name)
+            if result.get("status") != "ok":
+                return [], str(result.get("status") or "failed")
+            messages = list(result.get("messages") or [])
+        try:
+            from jobagent.journey.chat_archive import BossChatArchive
+
+            with BossChatArchive(settings.jobagent_state_db) as archive:
+                archive.upsert_history(
+                    friend_id=int(result.get("friend_id") or 0),
+                    friend_name=hr_name,
+                    messages=messages,
+                )
+        except Exception:
+            logger.warning("chat archive write failed", exc_info=True)
+        return messages, "ok"
+
+    async def _run(hours_back: float = 24.0, max_reads: int = 8) -> dict[str, Any]:
+        from jobagent.applier.boss_circuit import BossCircuit, boss_circuit_path
+
+        circuit = BossCircuit(boss_circuit_path(settings.jobagent_state_db))
+        if (refusal := circuit.check()) is not None:
+            return refusal
+        from jobagent.applier.boss_chat import BossChatReader, list_boss_greetings_http
+
+        if settings.boss_chat_transport == "http":
+            listed = await list_boss_greetings_http(settings, label_id=0, limit=50)
+        else:
+            async with BossChatReader(settings) as reader:
+                listed = await reader.list_greetings(
+                    filter_name="全部", label_id=0, limit=50
+                )
+        if listed.get("status") != "ok":
+            circuit.record(listed)
+            return listed
+
+        since_ms = int(time.time() * 1000 - hours_back * 3_600_000)
+        candidates: list[tuple[int, dict[str, Any]]] = []
+        for greeting in listed.get("greetings") or []:
+            if not isinstance(greeting, dict):
+                continue
+            updated_ms = _as_ms(greeting.get("updateTime"))
+            if updated_ms >= since_ms:
+                candidates.append((updated_ms, greeting))
+        candidates.sort(key=lambda item: item[0], reverse=True)
+
+        awaiting: list[dict[str, Any]] = []
+        unread: list[dict[str, Any]] = []
+        async with BossChatReader(settings) as reader:
+            for updated_ms, greeting in candidates[:max_reads]:
+                hr_name = str(greeting.get("name") or "")
+                if not hr_name:
+                    continue
+                messages, read_status = await _read_messages(reader, hr_name)
+                entry = {
+                    "hr_name": hr_name,
+                    "friend_id": greeting.get("friendId"),
+                    "company": str(greeting.get("brandName") or ""),
+                    "job_title": str(
+                        greeting.get("jobName") or greeting.get("positionName") or ""
+                    ),
+                    "last_active": datetime.fromtimestamp(updated_ms / 1000).strftime(
+                        "%m-%d %H:%M"
+                    ),
+                }
+                if read_status != "ok":
+                    unread.append({**entry, "error_type": read_status})
+                    continue
+                if not messages:
+                    unread.append({**entry, "error_type": "empty_history"})
+                    continue
+                last = messages[-1]
+                if str(last.get("direction") or "").lower() != "boss":
+                    continue  # our side sent the last word; nobody is waiting
+                last_ms = _as_ms(last.get("time"))
+                if last_ms < since_ms:
+                    continue
+                metadata = greeting.get("job_metadata") or {}
+                awaiting.append(
+                    {
+                        **entry,
+                        "last_hr_time": datetime.fromtimestamp(last_ms / 1000).strftime(
+                            "%m-%d %H:%M"
+                        ),
+                        "last_hr_text": str(last.get("text") or "")[:120],
+                        "job_id": metadata.get("job_id") or "",
+                        "job_url": metadata.get("job_url") or "",
+                    }
+                )
+        result = {
+            "status": "ok",
+            "since": datetime.fromtimestamp(since_ms / 1000).strftime("%Y-%m-%d %H:%M"),
+            "conversations_listed": listed.get("count"),
+            "candidates_read": min(len(candidates), max_reads),
+            "awaiting_reply": awaiting,
+            "unread": unread,
+            "next": ("对 awaiting_reply 中的 HR 用 read_boss_conversation 读全文，"
+                     "再按回复/投递流程处理。"),
+        }
+        circuit.record(result)
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="scan_boss_hr_replies",
+        description=(
+            "扫描 Boss 会话，找出近期有 HR 回复、正在等我们响应的会话（只读）。"
+            "一次列表 + 按活跃时间倒序读取候选会话，返回 HR 名、公司、岗位、最后一条 "
+            "HR 消息与时间。发打招呼后的批量回执核验、找出该回复谁，都用本工具，"
+            "不要写脚本扫描。"
+        ),
+        args_schema=BossChatScanRequest,
     )

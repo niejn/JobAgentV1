@@ -47,7 +47,11 @@ class ToolBindableFakeModel:
 @pytest.mark.asyncio
 async def test_agent_can_ask_for_missing_business_information(tmp_path) -> None:
     model = ToolBindableFakeListChatModel(responses=["请先告诉我目标公司和岗位。"])
-    settings = Settings(_env_file=None, jobagent_checkpoint_db=tmp_path / "checkpoints.db")
+    settings = Settings(
+        _env_file=None,
+        jobagent_checkpoint_db=tmp_path / "checkpoints.db",
+        jobagent_state_db=tmp_path / "state.db",
+    )
     agent = build_job_agent(settings, model=model, tools=[])
 
     try:
@@ -65,6 +69,7 @@ async def test_default_deep_agent_write_file_is_scoped_to_artifact_root(tmp_path
         _env_file=None,
         jobagent_artifact_dir=tmp_path / "journeys",
         jobagent_checkpoint_db=tmp_path / "checkpoints.db",
+        jobagent_state_db=tmp_path / "state.db",
     )
     agent = build_job_agent(settings, model=WriteFileCallingFakeModel())
 
@@ -314,7 +319,8 @@ async def test_agent_streams_visible_tokens_without_hidden_reasoning(tmp_path) -
     settings = Settings(
         _env_file=None,
         jobagent_checkpoint_db=tmp_path / "checkpoints.db",
-    )
+        jobagent_state_db=tmp_path / "state.db",
+            )
     agent = build_job_agent(settings, model=VisibleStreamingFakeModel(), tools=[])
 
     try:
@@ -339,6 +345,7 @@ async def test_debug_trace_emits_sanitized_phase_diagnostics(tmp_path) -> None:
         _env_file=None,
         jobagent_debug_trace=True,
         jobagent_checkpoint_db=tmp_path / "checkpoints.db",
+        jobagent_state_db=tmp_path / "state.db",
     )
     agent = build_job_agent(settings, model=VisibleStreamingFakeModel(), tools=[])
 
@@ -357,7 +364,8 @@ async def test_agent_streams_self_describing_tool_lifecycle(tmp_path) -> None:
     settings = Settings(
         _env_file=None,
         jobagent_checkpoint_db=tmp_path / "checkpoints.db",
-        jobagent_debug_trace=False,
+        jobagent_state_db=tmp_path / "state.db",
+                jobagent_debug_trace=False,
     )
     agent = build_job_agent(
         settings,
@@ -489,7 +497,8 @@ async def test_agent_does_not_stream_nested_tool_model_json(tmp_path) -> None:
     settings = Settings(
         _env_file=None,
         jobagent_checkpoint_db=tmp_path / "checkpoints.db",
-    )
+        jobagent_state_db=tmp_path / "state.db",
+            )
     agent = build_job_agent(
         settings,
         model=NestedToolCallingFakeModel(),
@@ -515,7 +524,8 @@ async def test_agent_recovers_final_answer_when_post_tool_output_hits_length_lim
     settings = Settings(
         _env_file=None,
         jobagent_checkpoint_db=tmp_path / "checkpoints.db",
-    )
+        jobagent_state_db=tmp_path / "state.db",
+            )
     agent = build_job_agent(
         settings,
         model=LengthLimitedAfterToolFakeModel(),
@@ -543,7 +553,8 @@ async def test_agent_restores_session_history_across_instances(tmp_path) -> None
     settings = Settings(
         _env_file=None,
         jobagent_checkpoint_db=tmp_path / "checkpoints.db",
-    )
+        jobagent_state_db=tmp_path / "state.db",
+            )
     first = build_job_agent(settings, model=HistoryAwareFakeModel(), tools=[])
     await first.reply("第一条", session_id="journey-1")
     await first.close()
@@ -592,7 +603,8 @@ async def test_agent_exposes_visible_history_when_resuming_a_session(tmp_path) -
     settings = Settings(
         _env_file=None,
         jobagent_checkpoint_db=tmp_path / "checkpoints.db",
-    )
+        jobagent_state_db=tmp_path / "state.db",
+            )
     first = build_job_agent(settings, model=HistoryAwareFakeModel(), tools=[])
     await first.reply("第一条", session_id="journey-1")
     await first.close()
@@ -615,7 +627,8 @@ async def test_agent_lists_saved_conversation_sessions_newest_first(tmp_path) ->
     settings = Settings(
         _env_file=None,
         jobagent_checkpoint_db=tmp_path / "checkpoints.db",
-    )
+        jobagent_state_db=tmp_path / "state.db",
+            )
     agent = build_job_agent(settings, model=HistoryAwareFakeModel(), tools=[])
     try:
         await agent.reply("第一会话", session_id="session-one")
@@ -691,6 +704,7 @@ def test_default_agent_registers_safe_user_document_reader(tmp_path) -> None:
         _env_file=None,
         jobagent_workspace_root=tmp_path,
         jobagent_checkpoint_db=tmp_path / "checkpoints.db",
+        jobagent_state_db=tmp_path / "state.db",
     )
 
     agent = build_job_agent(settings, model=ToolBindableFakeListChatModel(responses=["ok"]))
@@ -719,7 +733,8 @@ async def test_list_sessions_works_before_any_chat(tmp_path) -> None:
     settings = Settings(
         _env_file=None,
         jobagent_checkpoint_db=tmp_path / "checkpoints.db",
-    )
+        jobagent_state_db=tmp_path / "state.db",
+            )
     seeding = build_job_agent(settings, model=HistoryAwareFakeModel(), tools=[])
     try:
         await seeding.reply("第一条", session_id="session-seeded")

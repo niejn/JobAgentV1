@@ -16,8 +16,9 @@ import asyncio
 import hashlib
 import json
 import logging
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import httpx
 
@@ -36,6 +37,9 @@ from jobagent.wechat.ilink import (
     WeixinBotClient,
     WeixinSessionExpired,
 )
+
+if TYPE_CHECKING:
+    from jobagent.boss_reply_service import BossReplyApplicationService
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +70,7 @@ class MessageHandler(Protocol):
 class NotificationSource(Protocol):
     def sync_pending_notifications(self) -> int: ...
 
-    def pending_notifications(self, channel: str, limit: int = 5) -> list[object]: ...
+    def pending_notifications(self, channel: str, limit: int = 5) -> Sequence[object]: ...
 
     def mark_notification(
         self, event_id: str, *, delivered: bool, error: str = ""
@@ -197,7 +201,7 @@ class RegistryCommandHandler:
 class BossReplyCommandHandler:
     """Deterministic WeChat commands over the shared Boss reply module."""
 
-    def __init__(self, service: object) -> None:
+    def __init__(self, service: BossReplyApplicationService) -> None:
         self._service = service
 
     async def handle(self, message: InboundMessage) -> str | None:
@@ -209,6 +213,12 @@ class BossReplyCommandHandler:
         if action == "inbox":
             messages = self._service.list_inbox(5)
             if not messages:
+                if not self._service.monitor_status()["initialized"]:
+                    return (
+                        "Boss 暂无未处理的新 HR 消息。\n"
+                        "注意：Boss 监控未启动或未完成基线扫描，"
+                        "请先运行 jobagent watch。"
+                    )
                 return "Boss 暂无未处理的新 HR 消息。"
             return "Boss 新 HR 消息：\n" + "\n".join(
                 f"{row['company']} / {row['hr_name']}：{row['text']}"

@@ -369,7 +369,10 @@ class SpiderXhsBackend:
         self._ensure_started()
         requested = limit or self._settings.xhs_referral_max_posts
         async with self._request_lock:
-            return await self._run_sync(self._search_notes_sync, query, requested, sort)
+            return cast(
+                "list[XhsNoteReference]",
+                await self._run_sync(self._search_notes_sync, query, requested, sort),
+            )
 
     async def list_user_notes(
         self,
@@ -382,10 +385,13 @@ class SpiderXhsBackend:
         self._ensure_started()
         requested = limit or self._settings.xhs_referral_max_posts
         async with self._request_lock:
-            return await self._run_sync(
-                self._list_user_notes_sync,
-                user_id.strip(),
-                requested,
+            return cast(
+                "list[XhsNoteReference]",
+                await self._run_sync(
+                    self._list_user_notes_sync,
+                    user_id.strip(),
+                    requested,
+                ),
             )
 
     async def fetch_note(self, url: str) -> XhsFetchedNote:
@@ -393,7 +399,9 @@ class SpiderXhsBackend:
 
         self._ensure_started()
         async with self._request_lock:
-            return await self._run_sync(self._fetch_note_sync, url)
+            return cast(
+                "XhsFetchedNote", await self._run_sync(self._fetch_note_sync, url)
+            )
 
     async def download_note(
         self,

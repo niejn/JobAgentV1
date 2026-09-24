@@ -3,6 +3,7 @@
 from jobagent.tools.boss_chat import (
     build_boss_chat_history_tool,
     build_boss_chat_list_tool,
+    build_boss_chat_scan_tool,
 )
 from jobagent.tools.boss_chat_send import build_boss_chat_reply_tool
 from jobagent.tools.boss_greet import (
@@ -98,6 +99,7 @@ __all__ = [
     "build_search_history_tool",
     "build_boss_chat_list_tool",
     "build_boss_chat_reply_tool",
+    "build_boss_chat_scan_tool",
     "CandidateProfileManager",
     "BossJobDiscovery",
     "CandidateResumeFile",

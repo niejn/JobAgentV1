@@ -94,6 +94,7 @@ class BossReplyQueue:
             "send_owner": "TEXT NOT NULL DEFAULT ''",
             "send_lease_until": "REAL NOT NULL DEFAULT 0",
             "send_generation": "INTEGER NOT NULL DEFAULT 0",
+            "error": "TEXT",
         }
         for name, declaration in migrations.items():
             if name not in columns:
@@ -220,8 +221,9 @@ class BossReplyQueue:
              source_message_ids, source_fingerprint,
              company, title, hr_name,
              hr_message, draft_text, risk_level, intent, confidence, fact_ids,
-             policy_id, policy_version, authorized_until, risk_verified, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             policy_id, policy_version, authorized_until, risk_verified, status,
+             error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 reply_id,
                 conversation_id,
@@ -244,6 +246,7 @@ class BossReplyQueue:
                 authorized_until,
                 int(risk_verified),
                 status,
+                str(item.get("error") or "") or None,
             ),
         )
         self._connection.commit()

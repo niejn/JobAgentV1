@@ -48,6 +48,28 @@ class BossConversationTarget:
     job_title: str
 
 
+class BossPublishAmbiguous(ConnectionError):
+    """A publish left the socket but no PUBACK/echo confirmed delivery.
+
+    Boss routinely drops the MQTT PUBACK while the message still lands
+    (field-verified 2026-09-22: publish raised, yet history read-back
+    confirmed delivery seconds earlier). This is NOT a definite failure.
+    The resolved ``target`` rides along so the caller can immediately run
+    ``verify_text_in_conversation`` instead of re-sending blind.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        target: BossConversationTarget,
+        original: BaseException | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.target = target
+        self.original = original
+
+
 def _mqtt_remaining_length(value: int) -> bytes:
     if value < 0:
         raise ValueError("remaining length must be non-negative")
@@ -627,6 +649,16 @@ async def send_text_to_conversation(
             encrypt_uid=target.encrypt_boss_id,
             text=text,
         )
+    except (TimeoutError, ConnectionError, OSError) as exc:
+        # The PUBLISH frame was already written; a lost PUBACK says nothing
+        # about delivery. Keep the resolved target on the way out so the
+        # caller can verify by history instead of failing blind.
+        raise BossPublishAmbiguous(
+            f"Boss publish unconfirmed after send ({type(exc).__name__}); "
+            "verify by conversation history",
+            target=target,
+            original=exc,
+        ) from exc
     finally:
         await client.close()
     return target
@@ -661,6 +693,13 @@ async def send_text_to_target(
             encrypt_uid=target.encrypt_boss_id,
             text=text,
         )
+    except (TimeoutError, ConnectionError, OSError) as exc:
+        raise BossPublishAmbiguous(
+            f"Boss publish unconfirmed after send ({type(exc).__name__}); "
+            "verify by conversation history",
+            target=target,
+            original=exc,
+        ) from exc
     finally:
         await client.close()
 

@@ -160,6 +160,7 @@ async def test_default_agent_exposes_platform_tools_only_to_their_subagents(tmp_
         "boss_discovery": {"discover_boss_jobs"},
         "boss_greeting": {"boss_greet_jobs", "list_boss_greetings"},
         "boss_engagement": {
+            "scan_boss_hr_replies",
             "read_boss_conversation",
             "reply_boss_greeting",
             "prepare_boss_resume_after_hr_reply",

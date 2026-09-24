@@ -15,7 +15,6 @@ from jobagent.journey.creation import CreateJourneyRequest, create_journey
 from jobagent.journey.store import SQLiteJourneyStore
 from jobagent.tools.journey_creation import build_create_journey_tool
 
-
 ARGS = {'company': '上海启链云智能科技', 'role': 'AI Agent 全栈开发工程师',
         'source_job_id': 'boss:26ba163c0a1b8ba90nB93dS0EVtZ'}
 
@@ -25,7 +24,8 @@ def test_concurrent_retries_create_only_one_journey(tmp_path):
     with SQLiteJourneyStore(path):
         pass
     with ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(pool.map(lambda _: create_journey(path, CreateJourneyRequest(**ARGS)), range(8)))
+        results = list(pool.map(
+            lambda _: create_journey(path, CreateJourneyRequest(**ARGS)), range(8)))
     assert len({journey.id for journey, _ in results}) == 1
     assert sum(created for _, created in results) == 1
 
@@ -45,7 +45,8 @@ def test_web_and_cli_service_share_keys(tmp_path, monkeypatch):
 def test_missing_jd_and_distinct_ids(tmp_path):
     path = tmp_path / 'state.db'
     first, _ = create_journey(path, CreateJourneyRequest(**ARGS))
-    second, _ = create_journey(path, CreateJourneyRequest(**{**ARGS, 'source_job_id': 'boss:other'}))
+    second, _ = create_journey(
+        path, CreateJourneyRequest(**{**ARGS, 'source_job_id': 'boss:other'}))
     assert first.id != second.id
     assert first.job_description == ''
     assert first.stage == 'targeted'
@@ -55,7 +56,8 @@ def test_web_fields_retry_preserves_existing_jd(tmp_path):
     path = tmp_path / 'state.db'
     request = CreateJourneyRequest(company='示例公司', role='后端开发', job_description='原始JD')
     first, _ = create_journey(path, request)
-    repeated, created = create_journey(path, request.model_copy(update={'job_description': '不应覆盖'}))
+    repeated, created = create_journey(
+        path, request.model_copy(update={'job_description': '不应覆盖'}))
     assert repeated.id == first.id
     assert not created
     assert repeated.job_description == '原始JD'
@@ -70,8 +72,10 @@ class CreationModel(BaseChatModel):
         return self
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        message = AIMessage(content='完成') if any(isinstance(m, ToolMessage) for m in messages) else AIMessage(
-            content='', tool_calls=[{'name': 'create_opportunity_journey', 'args': ARGS, 'id': 'create-1'}])
+        message = (
+            AIMessage(content='完成') if any(isinstance(m, ToolMessage) for m in messages)
+            else AIMessage(content='', tool_calls=[
+                {'name': 'create_opportunity_journey', 'args': ARGS, 'id': 'create-1'}]))
         return ChatResult(generations=[ChatGeneration(message=message)])
 
 

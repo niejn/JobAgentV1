@@ -88,6 +88,26 @@ class BossReplyApplicationService:
         finally:
             connection.close()
 
+    def monitor_status(self) -> dict[str, Any]:
+        """Whether the Boss monitor daemon ever completed its baseline scan.
+
+        ``list_inbox`` returning empty is ambiguous: no new replies vs. the
+        monitor never having synced anything. This disambiguates for callers.
+        """
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT value FROM boss_monitor_state WHERE key='baseline_complete'"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        finally:
+            connection.close()
+        return {
+            "initialized": row is not None,
+            "baseline_completed_at": row["value"] if row else None,
+        }
+
     def publish_inbound(self, messages: list[object]) -> None:
         connection = self._connect()
         try:

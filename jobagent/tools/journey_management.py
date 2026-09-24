@@ -1,6 +1,7 @@
 """Query tools plus framework-HITL-gated single-Journey mutations."""
 
 from pathlib import Path
+from typing import Any
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, Field
@@ -26,11 +27,11 @@ class JourneyGetInput(BaseModel):
     journey_id: str = Field(min_length=1, max_length=100)
 
 
-def build_journey_management_tools(path: Path):
-    async def list_opportunity_journeys(**kwargs):
+def build_journey_management_tools(path: Path) -> list[StructuredTool]:
+    async def list_opportunity_journeys(**kwargs: Any) -> dict[str, Any]:
         return {"status": "completed", "journeys": list_journeys(path, **kwargs)}
 
-    async def get_opportunity_journey(journey_id: str):
+    async def get_opportunity_journey(journey_id: str) -> dict[str, Any]:
         try:
             return {"status": "completed", "journey": get_journey(path, journey_id)}
         except KeyError:
@@ -38,29 +39,42 @@ def build_journey_management_tools(path: Path):
 
     tools = [StructuredTool.from_function(
         coroutine=list_opportunity_journeys, name="list_opportunity_journeys",
-        description="查询网页 Journey 列表（不是岗位进度登记册），包含 ID、版本、JD 和任务/产物数量。支持公司过滤、分页和包含已删除记录。",
+        description=(
+            "查询网页 Journey 列表（不是岗位进度登记册），包含 ID、版本、JD 和任务/产物数量。"
+            "支持公司过滤、分页和包含已删除记录。"
+        ),
         args_schema=JourneyListInput,
     ), StructuredTool.from_function(
         coroutine=get_opportunity_journey, name="get_opportunity_journey",
-        description="按 ID 查询 Journey 详情，包括删除状态、版本、JD 历史、任务和产物；修改、删除或恢复前必须先查看。",
+        description=(
+            "按 ID 查询 Journey 详情，包括删除状态、版本、JD 历史、任务和产物；"
+            "修改、删除或恢复前必须先查看。"
+        ),
         args_schema=JourneyGetInput,
     )]
     for action, label in [("update", "修改"), ("delete", "软删除"), ("restore", "恢复")]:
-        def build(action=action, label=label):
+        def build(action: str = action, label: str = label) -> StructuredTool:
             schema = JourneyUpdate if action == "update" else JourneyTarget
 
-            async def mutate(**kwargs):
+            async def mutate(**kwargs: Any) -> dict[str, Any]:
                 try:
                     result = change_journey(path, action, schema.model_validate(kwargs))
                     return {"status": "completed", "action": action, "journey": result}
                 except KeyError:
                     return {"status": "not_found", "journey_id": kwargs.get("journey_id")}
                 except ValueError as error:
-                    return {"status": "conflict", "message": str(error), "next_action": "重新查询详情并请用户审批；不得自动重试修改。"}
+                    return {
+                        "status": "conflict", "message": str(error),
+                        "next_action": "重新查询详情并请用户审批；不得自动重试修改。",
+                    }
 
             return StructuredTool.from_function(
                 coroutine=mutate, name=f"{action}_opportunity_journey", args_schema=schema,
-                description=f"{label}一个指定 ID 的 Journey，执行前暂停等待用户批准。必须传详情中读到的版本、公司、岗位和操作理由。软删除只隐藏列表，保留 JD、任务、产物，支持恢复；不允许仅按名称批量删除。",
+                description=(
+                    f"{label}一个指定 ID 的 Journey，执行前暂停等待用户批准。"
+                    "必须传详情中读到的版本、公司、岗位和操作理由。软删除只隐藏列表，"
+                    "保留 JD、任务、产物，支持恢复；不允许仅按名称批量删除。"
+                ),
             )
         tools.append(build())
     return tools

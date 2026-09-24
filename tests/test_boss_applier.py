@@ -259,7 +259,7 @@ class TestBossApplier:
         with (
             patch("jobagent.applier.boss.asyncio.sleep", new=AsyncMock()),
             patch(
-                "jobagent.applier.boss_ws.send_text_to_conversation",
+                "jobagent.applier.boss.send_text_to_conversation",
                 new=AsyncMock(),
             ) as send,
         ):
@@ -270,6 +270,52 @@ class TestBossApplier:
         assert result.extra["reason"] == "default_greeting"
         assert result.extra["greeting_sent"] is True
         send.assert_awaited_once()
+
+    @pytest.mark.parametrize("verify_confirms", [True, False])
+    @pytest.mark.asyncio
+    async def test_custom_greeting_ack_loss_is_judged_by_history(
+        self, settings: Settings, job: Job, profile: Profile, history: ApplyHistory,
+        verify_confirms: bool,
+    ) -> None:
+        """A lost PUBACK is ambiguous, not failed: history decides (2026-09-22)."""
+        from jobagent.applier.boss_ws import BossConversationTarget, BossPublishAmbiguous
+
+        page = _make_mock_page(has_chat_input=False)
+        context = MagicMock()
+        context.cookies = AsyncMock(return_value=[{"name": "bst", "value": "cookie"}])
+        applier = BossApplier(settings, history=history)
+        applier._context = context
+
+        target = BossConversationTarget(
+            friend_id=7, friend_source=0, encrypt_boss_id="e", name="HR",
+            company=job.company, job_title=job.title,
+        )
+        ambiguous = BossPublishAmbiguous(
+            "publish unconfirmed", target=target, original=TimeoutError("ack window"),
+        )
+        with (
+            patch("jobagent.applier.boss.asyncio.sleep", new=AsyncMock()),
+            patch(
+                "jobagent.applier.boss.send_text_to_conversation",
+                new=AsyncMock(side_effect=ambiguous),
+            ),
+            patch(
+                "jobagent.applier.boss.verify_text_in_conversation",
+                new=AsyncMock(return_value=verify_confirms),
+            ) as verify,
+        ):
+            result = await applier._do_apply(
+                page, job, profile, 0.0, greeting="定制招呼"
+            )
+
+        assert result.extra["reason"] == "default_greeting"
+        verify.assert_awaited_once()
+        if verify_confirms:
+            assert result.extra["greeting_sent"] is True
+            assert result.extra["custom_greeting_error"] == "ack_lost_history_confirmed"
+        else:
+            assert result.extra["greeting_sent"] is False
+            assert result.extra["custom_greeting_error"] == "ack_lost_history_unconfirmed"
 
     @pytest.mark.asyncio
     async def test_greeting_template_substitution(

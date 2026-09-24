@@ -13,8 +13,14 @@ from typing import Any, Self
 from playwright.async_api import ElementHandle, Page, Playwright, async_playwright
 
 from jobagent.applier.base import BaseApplier
+from jobagent.applier.boss_ws import (
+    BossPublishAmbiguous,
+    send_text_to_conversation,
+    verify_text_in_conversation,
+)
 from jobagent.applier.captcha import detect_captcha, notify_captcha
 from jobagent.applier.history import ApplyHistory
+from jobagent.auth.boss_debug_chrome import BossDebugChromeError, ensure_boss_debug_chrome
 from jobagent.config import Settings
 from jobagent.crawl import CrawlGate
 from jobagent.models import Application, ApplicationStatus, Job, JobSource, Profile
@@ -105,15 +111,19 @@ class BossApplier(BaseApplier):
     async def __aenter__(self) -> Self:
         self._playwright = await async_playwright().start()
         try:
+            await ensure_boss_debug_chrome(self._settings)
             browser = await self._playwright.chromium.connect_over_cdp(
                 self._settings.debug_chrome_cdp_endpoint,
                 timeout=10_000,
             )
+        except BossDebugChromeError as exc:
+            await self._playwright.stop()
+            raise BossAccessError(str(exc), code="cdp_not_ready") from exc
         except Exception as exc:
             await self._playwright.stop()
             raise BossAccessError(
                 "Boss CDP: 无法连接 Chrome--Chrome 调试端口未就绪。请按以下步骤设置:\n"
-                "1. 读取 skills/ChromeCDP-setup/SKILL.md\n"
+                "1. 读取 skills/chrome-cdp-setup/SKILL.md\n"
                 "2. 按 SKILL.md 中的 4 个步骤启动 Chrome 调试模式\n"
                 "3. 重试本次操作",
                 code="cdp_not_ready",
@@ -306,9 +316,9 @@ class BossApplier(BaseApplier):
                 )
                 custom_sent = False
                 custom_error = ""
+                target = None
+                attempt_started_ms = int(time.time() * 1000)
                 try:
-                    from jobagent.applier.boss_ws import send_text_to_conversation
-
                     assert self._context is not None
                     cookies = {
                         item["name"]: item["value"]
@@ -321,6 +331,34 @@ class BossApplier(BaseApplier):
                         text=greeting,
                     )
                     custom_sent = True
+                except BossPublishAmbiguous as exc:
+                    # PUBACK lost does not mean delivery failed (field
+                    # finding 2026-09-22). Verify through history with the
+                    # target the exception carries before judging.
+                    target = exc.target
+                    confirmed = False
+                    try:
+                        confirmed = await verify_text_in_conversation(
+                            cookies=cookies,
+                            target=exc.target,
+                            text=greeting,
+                            not_before_ms=attempt_started_ms,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "history verify after ambiguous publish failed",
+                            exc_info=True,
+                        )
+                    if confirmed:
+                        custom_sent = True
+                        custom_error = "ack_lost_history_confirmed"
+                    else:
+                        custom_error = "ack_lost_history_unconfirmed"
+                    logger.warning(
+                        "Custom greeting follow-up publish ambiguous: %s -> %s",
+                        type(exc.original).__name__,
+                        custom_error,
+                    )
                 except Exception as exc:
                     custom_error = type(exc).__name__
                     logger.warning(

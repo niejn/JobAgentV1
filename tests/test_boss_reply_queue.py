@@ -4,7 +4,26 @@ import time
 
 import pytest
 
-from jobagent.boss_reply_queue import BossReplyQueue
+from jobagent.boss_reply_queue import _SCHEMA, BossReplyQueue
+
+
+def test_queue_migrates_error_column_for_existing_databases(tmp_path) -> None:
+    """The orchestration audit marker must not break an old queue database."""
+
+    import sqlite3
+
+    path = tmp_path / "state.db"
+    legacy_schema = _SCHEMA.replace("    error TEXT\n", "    legacy_marker TEXT\n")
+    with sqlite3.connect(path) as connection:
+        connection.executescript(legacy_schema)
+    queue = BossReplyQueue(path)
+    try:
+        columns = {
+            row[1] for row in queue._connection.execute("PRAGMA table_info(boss_reply_queue)")
+        }
+        assert "error" in columns
+    finally:
+        queue.close()
 
 
 def test_reply_queue_is_idempotent_and_version_checked(tmp_path) -> None:

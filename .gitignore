@@ -73,6 +73,11 @@ spiders/
 skills/resume-optimizer/
 skills/kami/
 
+# Local agent tooling state (session logs, harness configs)
+.claude/
+.pinta/
+.pinta.json
+
 # Personal notes
 .pi-brief-*.txt
 pi代理.md
